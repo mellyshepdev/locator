@@ -63,10 +63,11 @@ def _save_migrations(m):
     _save_json(MIGRATION_FILE, m)
 
 def _best_ip(node: dict) -> str | None:
-    for key in ("tailscale_ip", "ip", "openvpn_ip"):
-        ip = node.get(key, "")
-        if ip and re.match(r"^\d+\.\d+\.\d+\.\d+$", str(ip).strip()):
-            return str(ip).strip()
+    """Return the best reachable host (IP or domain) for SSH/rsync."""
+    for key in ("tailscale_ip", "hostname", "ip", "openvpn_ip"):
+        val = node.get(key, "")
+        if val and str(val).strip():
+            return str(val).strip()
     return None
 
 def _is_stale(node: dict, max_age: int = 300) -> bool:
@@ -150,7 +151,7 @@ def patch_node_metrics(node_id):
         for k in ("cpu_percent", "mem_percent", "disk_percent", "disk_total_gb", "disk_used_gb"):
             if data.get(k) is not None:
                 n[k] = data[k]
-        for k in ("tailscale_ip", "ip"):
+        for k in ("tailscale_ip", "hostname", "ip"):
             if data.get(k):
                 n[k] = data[k]
         n["last_metrics"] = _now()
