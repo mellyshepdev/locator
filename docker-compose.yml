@@ -1,0 +1,32 @@
+services:
+  locator:
+    build: .
+    container_name: locator
+    restart: unless-stopped
+    volumes:
+      - ./registry_data:/app/data
+      - /home/swoopg111/.ssh:/root/.ssh:ro
+    environment:
+      - UNIT_NAME=unit4
+      - BALANCE_HIGH=40
+      - BALANCE_DIFF=5
+      - BALANCE_STRIKES=2
+      - BALANCE_COOLDOWN=300
+      - OOM_THRESHOLD=90
+      - GIT_AUTO_PUSH=true
+      - GIT_REMOTE=${GIT_REMOTE:-}
+      - PYTHONUNBUFFERED=1
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.locator.rule=Host(`locator.theofficialblacksheepco.online`)"
+      - "traefik.http.routers.locator.entrypoints=websecure"
+      - "traefik.http.routers.locator.tls=true"
+      - "traefik.http.routers.locator.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.locator.priority=100"
+      - "traefik.http.services.locator.loadbalancer.server.port=5000"
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true

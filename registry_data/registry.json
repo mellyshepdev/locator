@@ -1,0 +1,1026 @@
+{
+  "services": {
+    "blacksheepunit4__lokey-client": {
+      "name": "lokey-client",
+      "host": "blacksheepunit4",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "container",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:48.479815+00:00",
+      "metadata": {
+        "cpu_usage_percent": 2.5,
+        "cpu_temp_c": null,
+        "mem_total_gb": 3.82,
+        "mem_used_gb": 1.08,
+        "mem_percent": 28.4,
+        "disk_total_gb": 78.16,
+        "disk_used_gb": 7.44,
+        "disk_percent": 10.0,
+        "containers": {
+          "running": [
+            "lokey",
+            "locator",
+            "traefik",
+            "apache",
+            "openvpn",
+            "powerdns",
+            "tailscale"
+          ],
+          "all": [
+            {
+              "name": "lokey",
+              "status": "running"
+            },
+            {
+              "name": "locator",
+              "status": "running"
+            },
+            {
+              "name": "traefik",
+              "status": "running"
+            },
+            {
+              "name": "apache",
+              "status": "running"
+            },
+            {
+              "name": "openvpn",
+              "status": "restarting"
+            },
+            {
+              "name": "powerdns",
+              "status": "running"
+            },
+            {
+              "name": "tailscale",
+              "status": "running"
+            }
+          ],
+          "ram": {
+            "lokey": {
+              "mem_mb": 24.7,
+              "mem_pct": 0.6
+            },
+            "locator": {
+              "mem_mb": 23.8,
+              "mem_pct": 0.6
+            },
+            "traefik": {
+              "mem_mb": 28.3,
+              "mem_pct": 0.7
+            },
+            "apache": {
+              "mem_mb": 8.1,
+              "mem_pct": 0.2
+            },
+            "openvpn": {
+              "mem_mb": 0.0,
+              "mem_pct": 0.0
+            },
+            "powerdns": {
+              "mem_mb": 80.3,
+              "mem_pct": 2.1
+            },
+            "tailscale": {
+              "mem_mb": 4.5,
+              "mem_pct": 0.1
+            }
+          }
+        }
+      }
+    },
+    "blacksheepunit4__tailscale": {
+      "name": "tailscale",
+      "host": "blacksheepunit4",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:48.771682+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "tailscale/tailscale:latest",
+        "mem_usage_mb": 4.5,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 0.1,
+        "networks": [
+          "host"
+        ]
+      }
+    },
+    "blacksheepunit4__lokey": {
+      "name": "lokey",
+      "host": "blacksheepunit4",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:48.513358+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "lokey-lokey:latest",
+        "mem_usage_mb": 24.7,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 0.6,
+        "networks": [
+          "traefik_proxy"
+        ]
+      }
+    },
+    "blacksheepunit4__locator": {
+      "name": "locator",
+      "host": "blacksheepunit4",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:48.547576+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "locator-locator:latest",
+        "mem_usage_mb": 23.8,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 0.6,
+        "networks": [
+          "proxy"
+        ]
+      }
+    },
+    "blacksheepunit4__web_locator_theofficialblacksheepco_online": {
+      "name": "web_locator_theofficialblacksheepco_online",
+      "host": "blacksheepunit4",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://locator.theofficialblacksheepco.online",
+      "last_seen": "2026-06-08T11:18:48.581316+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "locator"
+      }
+    },
+    "blacksheepunit4__traefik": {
+      "name": "traefik",
+      "host": "blacksheepunit4",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:48.596698+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "traefik:latest",
+        "mem_usage_mb": 28.3,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 0.7,
+        "networks": [
+          "proxy"
+        ]
+      }
+    },
+    "blacksheepunit4__web_traefik_theofficialblacksheepcompany_com": {
+      "name": "web_traefik_theofficialblacksheepcompany_com",
+      "host": "blacksheepunit4",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://traefik.theofficialblacksheepcompany.com",
+      "last_seen": "2026-06-08T11:18:48.633007+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "traefik"
+      }
+    },
+    "blacksheepunit4__apache": {
+      "name": "apache",
+      "host": "blacksheepunit4",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:48.649148+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "httpd:2.4",
+        "mem_usage_mb": 8.1,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 0.2,
+        "networks": [
+          "proxy"
+        ]
+      }
+    },
+    "blacksheepunit4__web_welcome_theofficialblacksheepco_com": {
+      "name": "web_welcome_theofficialblacksheepco_com",
+      "host": "blacksheepunit4",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://welcome.theofficialblacksheepco.com",
+      "last_seen": "2026-06-08T11:18:48.684179+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "apache"
+      }
+    },
+    "blacksheepunit4__openvpn": {
+      "name": "openvpn",
+      "host": "blacksheepunit4",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:48.700224+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "kylemanna/openvpn:latest",
+        "mem_usage_mb": 0.0,
+        "mem_limit_mb": 0.0,
+        "mem_percent": 0.0,
+        "networks": [
+          "host"
+        ]
+      }
+    },
+    "blacksheepunit4__powerdns": {
+      "name": "powerdns",
+      "host": "blacksheepunit4",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:48.736108+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "powerdns/pdns-auth-master:latest",
+        "mem_usage_mb": 80.3,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 2.1,
+        "networks": [
+          "proxy",
+          "traefik_proxy"
+        ]
+      }
+    },
+    "unit2__wireguard-client": {
+      "name": "wireguard-client",
+      "host": "unit2",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:13:54.611841+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "lscr.io/linuxserver/wireguard:latest",
+        "mem_usage_mb": 3.8,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 0.1
+      }
+    },
+    "unit2__ebay-handler": {
+      "name": "ebay-handler",
+      "host": "unit2",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:52.860880+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "ebay-handler-ebay-handler:latest",
+        "mem_usage_mb": 21.8,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 0.6
+      }
+    },
+    "unit2__locator": {
+      "name": "locator",
+      "host": "unit2",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:52.941332+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "locator-locator:latest",
+        "mem_usage_mb": 82.0,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 2.1
+      }
+    },
+    "unit2__web_locator_theofficialblacksheepco_online": {
+      "name": "web_locator_theofficialblacksheepco_online",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://locator.theofficialblacksheepco.online",
+      "last_seen": "2026-06-08T11:18:53.631947+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "apache"
+      }
+    },
+    "unit2__the-beast-postgres-1": {
+      "name": "the-beast-postgres-1",
+      "host": "unit2",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:15:33.305570+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "postgres:15-alpine",
+        "mem_usage_mb": 31.7,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 0.8
+      }
+    },
+    "unit2__lokey": {
+      "name": "lokey",
+      "host": "unit2",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:53.197941+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "lokey-client-lokey:latest",
+        "mem_usage_mb": 33.0,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 0.8
+      }
+    },
+    "unit2__pdns-db": {
+      "name": "pdns-db",
+      "host": "unit2",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:15:33.551770+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "mariadb:10.11",
+        "mem_usage_mb": 121.3,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 3.1
+      }
+    },
+    "unit2__traefik": {
+      "name": "traefik",
+      "host": "unit2",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:17:13.579187+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "traefik:v3",
+        "mem_usage_mb": 180.4,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 4.6
+      }
+    },
+    "unit2__web_traefik_theofficialblacksheepco_com": {
+      "name": "web_traefik_theofficialblacksheepco_com",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://traefik.theofficialblacksheepco.com",
+      "last_seen": "2026-06-08T11:15:33.637610+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "traefik"
+      }
+    },
+    "unit2__web_calendar_theofficialblacksheepco_online": {
+      "name": "web_calendar_theofficialblacksheepco_online",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://calendar.theofficialblacksheepco.online",
+      "last_seen": "2026-06-08T11:18:53.526231+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "apache"
+      }
+    },
+    "unit2__web_theofficialblacksheepco_com": {
+      "name": "web_theofficialblacksheepco_com",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://theofficialblacksheepco.com",
+      "last_seen": "2026-06-08T11:17:13.761700+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "apache"
+      }
+    },
+    "unit2__web_theofficialblacksheepco_online": {
+      "name": "web_theofficialblacksheepco_online",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://theofficialblacksheepco.online",
+      "last_seen": "2026-06-08T11:18:53.697091+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "apache"
+      }
+    },
+    "unit2__web_theofficialblacksheepco_store": {
+      "name": "web_theofficialblacksheepco_store",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://theofficialblacksheepco.store",
+      "last_seen": "2026-06-08T11:15:34.054918+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "apache"
+      }
+    },
+    "unit2__web_www_theofficialblacksheepco_store": {
+      "name": "web_www_theofficialblacksheepco_store",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://www.theofficialblacksheepco.store",
+      "last_seen": "2026-06-08T11:18:53.760858+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "apache"
+      }
+    },
+    "unit2__varnish": {
+      "name": "varnish",
+      "host": "unit2",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:17:14.259798+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "varnish:stable",
+        "mem_usage_mb": 20.2,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 0.5
+      }
+    },
+    "unit2__web_logs_theofficialblacksheepco_com": {
+      "name": "web_logs_theofficialblacksheepco_com",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://logs.theofficialblacksheepco.com",
+      "last_seen": "2026-06-08T11:17:14.321023+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "varnish"
+      }
+    },
+    "unit2__web_terminal_theofficialblacksheepco_online": {
+      "name": "web_terminal_theofficialblacksheepco_online",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://terminal.theofficialblacksheepco.online",
+      "last_seen": "2026-06-08T11:15:34.456911+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "varnish"
+      }
+    },
+    "unit2__web_ts_theofficialblacksheepco_info": {
+      "name": "web_ts_theofficialblacksheepco_info",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://ts.theofficialblacksheepco.info",
+      "last_seen": "2026-06-08T11:18:54.199936+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "headscale"
+      }
+    },
+    "unit2__web_glances2_theofficialblacksheepco_info": {
+      "name": "web_glances2_theofficialblacksheepco_info",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://glances2.theofficialblacksheepco.info",
+      "last_seen": "2026-06-08T11:15:34.664657+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "glances2"
+      }
+    },
+    "unit2__lokey-client": {
+      "name": "lokey-client",
+      "host": "unit2",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "container",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:52.806994+00:00",
+      "metadata": {
+        "cpu_usage_percent": 19.3,
+        "cpu_temp_c": null,
+        "mem_total_gb": 3.82,
+        "mem_used_gb": 1.65,
+        "mem_percent": 43.0,
+        "disk_total_gb": 78.16,
+        "disk_used_gb": 61.37,
+        "disk_percent": 82.7,
+        "containers": {
+          "running": [
+            "ebay-handler",
+            "locator",
+            "beast-web",
+            "the-beast-postgres-1",
+            "the-beast-redis-1",
+            "lokey",
+            "ns1-auth",
+            "pdns-db",
+            "traefik",
+            "apache",
+            "openvpn-client",
+            "web-terminal",
+            "cache-warmer",
+            "live-logger",
+            "varnish",
+            "headscale",
+            "wireguard-client",
+            "glances2",
+            "barcode_db",
+            "postgres"
+          ],
+          "all": [
+            {
+              "name": "ebay-handler",
+              "status": "running"
+            },
+            {
+              "name": "locator",
+              "status": "running"
+            },
+            {
+              "name": "beast-web",
+              "status": "running"
+            },
+            {
+              "name": "the-beast-postgres-1",
+              "status": "running"
+            },
+            {
+              "name": "the-beast-redis-1",
+              "status": "running"
+            },
+            {
+              "name": "lokey",
+              "status": "running"
+            },
+            {
+              "name": "ns1-auth",
+              "status": "running"
+            },
+            {
+              "name": "pdns-db",
+              "status": "running"
+            },
+            {
+              "name": "traefik",
+              "status": "running"
+            },
+            {
+              "name": "apache",
+              "status": "running"
+            },
+            {
+              "name": "openvpn-client",
+              "status": "restarting"
+            },
+            {
+              "name": "web-terminal",
+              "status": "running"
+            },
+            {
+              "name": "cache-warmer",
+              "status": "running"
+            },
+            {
+              "name": "live-logger",
+              "status": "running"
+            },
+            {
+              "name": "varnish",
+              "status": "running"
+            },
+            {
+              "name": "anatomy-dashboard",
+              "status": "exited"
+            },
+            {
+              "name": "headscale",
+              "status": "running"
+            },
+            {
+              "name": "wireguard-client",
+              "status": "running"
+            },
+            {
+              "name": "glances2",
+              "status": "running"
+            },
+            {
+              "name": "barcode_db",
+              "status": "running"
+            },
+            {
+              "name": "postgres",
+              "status": "running"
+            }
+          ],
+          "ram": {
+            "ebay-handler": {
+              "mem_mb": 21.8,
+              "mem_pct": 0.6
+            },
+            "locator": {
+              "mem_mb": 82.0,
+              "mem_pct": 2.1
+            },
+            "beast-web": {
+              "mem_mb": 8.0,
+              "mem_pct": 0.2
+            },
+            "the-beast-postgres-1": {
+              "mem_mb": 31.7,
+              "mem_pct": 0.8
+            },
+            "the-beast-redis-1": {
+              "mem_mb": 10.7,
+              "mem_pct": 0.3
+            },
+            "lokey": {
+              "mem_mb": 33.0,
+              "mem_pct": 0.8
+            },
+            "ns1-auth": {
+              "mem_mb": 57.8,
+              "mem_pct": 1.5
+            },
+            "pdns-db": {
+              "mem_mb": 121.3,
+              "mem_pct": 3.1
+            },
+            "traefik": {
+              "mem_mb": 180.4,
+              "mem_pct": 4.6
+            },
+            "apache": {
+              "mem_mb": 21.0,
+              "mem_pct": 0.5
+            },
+            "openvpn-client": {
+              "mem_mb": 0.0,
+              "mem_pct": 0.0
+            },
+            "web-terminal": {
+              "mem_mb": 51.7,
+              "mem_pct": 1.3
+            },
+            "cache-warmer": {
+              "mem_mb": 21.3,
+              "mem_pct": 0.5
+            },
+            "live-logger": {
+              "mem_mb": 39.8,
+              "mem_pct": 1.0
+            },
+            "varnish": {
+              "mem_mb": 20.2,
+              "mem_pct": 0.5
+            },
+            "headscale": {
+              "mem_mb": 36.3,
+              "mem_pct": 0.9
+            },
+            "wireguard-client": {
+              "mem_mb": 3.8,
+              "mem_pct": 0.1
+            },
+            "glances2": {
+              "mem_mb": 72.7,
+              "mem_pct": 1.9
+            },
+            "barcode_db": {
+              "mem_mb": 32.7,
+              "mem_pct": 0.8
+            },
+            "postgres": {
+              "mem_mb": 25.2,
+              "mem_pct": 0.6
+            }
+          }
+        }
+      }
+    },
+    "unit2__web_www_theofficialblacksheepco_com": {
+      "name": "web_www_theofficialblacksheepco_com",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://www.theofficialblacksheepco.com",
+      "last_seen": "2026-06-08T11:18:53.573840+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "apache"
+      }
+    },
+    "unit2__web_nasa_theofficialblacksheepco_online": {
+      "name": "web_nasa_theofficialblacksheepco_online",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://nasa.theofficialblacksheepco.online",
+      "last_seen": "2026-06-08T11:18:53.656174+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "apache"
+      }
+    },
+    "unit2__openvpn-client": {
+      "name": "openvpn-client",
+      "host": "unit2",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:53.815009+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "ghcr.io/wfg/openvpn-client:latest",
+        "mem_usage_mb": 0.0,
+        "mem_limit_mb": 0.0,
+        "mem_percent": 0.0
+      }
+    },
+    "unit2__web_logs_theofficialblacksheepco_info": {
+      "name": "web_logs_theofficialblacksheepco_info",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://logs.theofficialblacksheepco.info",
+      "last_seen": "2026-06-08T11:17:14.304307+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "varnish"
+      }
+    },
+    "unit2__web_ebay_theofficialblacksheepco_info": {
+      "name": "web_ebay_theofficialblacksheepco_info",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://ebay.theofficialblacksheepco.info",
+      "last_seen": "2026-06-08T11:18:52.917772+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "ebay-handler"
+      }
+    },
+    "unit2__beast-web": {
+      "name": "beast-web",
+      "host": "unit2",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:53.023764+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "httpd:latest",
+        "mem_usage_mb": 8.0,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 0.2
+      }
+    },
+    "unit2__web_beast_theofficialblacksheepco_online": {
+      "name": "web_beast_theofficialblacksheepco_online",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://beast.theofficialblacksheepco.online",
+      "last_seen": "2026-06-08T11:18:53.044276+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "beast-web"
+      }
+    },
+    "unit2__web_the_beast_theofficialblacksheepco_online": {
+      "name": "web_the_beast_theofficialblacksheepco_online",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://the-beast.theofficialblacksheepco.online",
+      "last_seen": "2026-06-08T11:18:53.069399+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "beast-web"
+      }
+    },
+    "unit2__ns1-auth": {
+      "name": "ns1-auth",
+      "host": "unit2",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:53.244093+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "psitrax/powerdns:latest",
+        "mem_usage_mb": 57.8,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 1.5
+      }
+    },
+    "unit2__web_auth_theofficialblacksheepco_online": {
+      "name": "web_auth_theofficialblacksheepco_online",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://auth.theofficialblacksheepco.online",
+      "last_seen": "2026-06-08T11:18:53.503301+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "apache"
+      }
+    },
+    "unit2__web_theofficialblacksheepco_info": {
+      "name": "web_theofficialblacksheepco_info",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://theofficialblacksheepco.info",
+      "last_seen": "2026-06-08T11:18:53.596189+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "apache"
+      }
+    },
+    "unit2__web_www_theofficialblacksheepco_info": {
+      "name": "web_www_theofficialblacksheepco_info",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://www.theofficialblacksheepco.info",
+      "last_seen": "2026-06-08T11:18:53.614588+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "apache"
+      }
+    },
+    "unit2__web_ollama_theofficialblacksheepco_online": {
+      "name": "web_ollama_theofficialblacksheepco_online",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://ollama.theofficialblacksheepco.online",
+      "last_seen": "2026-06-08T11:18:53.673961+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "apache"
+      }
+    },
+    "unit2__web_www_theofficialblacksheepco_online": {
+      "name": "web_www_theofficialblacksheepco_online",
+      "host": "unit2",
+      "type": "web",
+      "status": "ONLINE",
+      "category": "web services",
+      "url": "https://www.theofficialblacksheepco.online",
+      "last_seen": "2026-06-08T11:18:53.714316+00:00",
+      "metadata": {
+        "discovered_via": "traefik_labels",
+        "container": "apache"
+      }
+    },
+    "unit2__web-terminal": {
+      "name": "web-terminal",
+      "host": "unit2",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:53.862346+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "blsh-term-web-terminal:latest",
+        "mem_usage_mb": 51.7,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 1.3
+      }
+    },
+    "unit2__live-logger": {
+      "name": "live-logger",
+      "host": "unit2",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:53.947816+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "live-logger-live-logger:latest",
+        "mem_usage_mb": 39.8,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 1.0
+      }
+    },
+    "unit2__headscale": {
+      "name": "headscale",
+      "host": "unit2",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:54.152799+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "headscale/headscale:latest",
+        "mem_usage_mb": 36.3,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 0.9
+      }
+    },
+    "unit2__barcode_db": {
+      "name": "barcode_db",
+      "host": "unit2",
+      "type": "container",
+      "status": "ONLINE",
+      "category": "docker containers",
+      "url": null,
+      "last_seen": "2026-06-08T11:18:54.361641+00:00",
+      "metadata": {
+        "discovered_via": "lokey",
+        "image": "postgres:15",
+        "mem_usage_mb": 32.7,
+        "mem_limit_mb": 3915.9,
+        "mem_percent": 0.8
+      }
+    }
+  },
+  "nodes": {
+    "blacksheepunit4": {
+      "last_seen": "2026-06-08T11:18:48.771675+00:00",
+      "status": "ONLINE",
+      "cpu_percent": 2.5,
+      "mem_percent": 28.4,
+      "disk_percent": 10.0,
+      "disk_total_gb": 78.16,
+      "disk_used_gb": 7.44,
+      "last_metrics": "2026-06-08T11:18:48.497047+00:00"
+    },
+    "unit2": {
+      "last_seen": "2026-06-08T11:18:54.361633+00:00",
+      "status": "ONLINE",
+      "cpu_percent": 19.3,
+      "mem_percent": 43.0,
+      "disk_percent": 82.7,
+      "disk_total_gb": 78.16,
+      "disk_used_gb": 61.37,
+      "last_metrics": "2026-06-08T11:18:52.833946+00:00"
+    }
+  }
+}
