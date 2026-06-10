@@ -1,7 +1,7 @@
 """
 Black Sheep Locator — Universal Service Registry + Load Balancer
 """
-import os, json, uuid, time, threading, subprocess, pathlib, re
+import os, json, uuid, time, threading, subprocess, pathlib, re, http.client, socket
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, render_template_string, Response
 
@@ -24,6 +24,13 @@ BALANCE_STRIKES   = int(os.getenv("BALANCE_STRIKES",      "2"))  # anti-flap con
 OOM_THRESHOLD     = float(os.getenv("OOM_THRESHOLD",      "90")) # % — bypass anti-flap
 GIT_AUTO_PUSH     = os.getenv("GIT_AUTO_PUSH", "true").lower() == "true"
 GIT_REMOTE        = os.getenv("GIT_REMOTE", "")  # e.g. git@gitlab.com:org/compose-backup.git
+
+# ── SELF-ELECTION ─────────────────────────────────────────────────────────────
+# If LOCATOR_IS_PRIMARY=false and a primary responds at LOCATOR_CANONICAL_URL,
+# this instance stops itself via the Docker socket.
+LOCATOR_CANONICAL_URL = os.getenv("LOCATOR_CANONICAL_URL", "https://locator.theofficialblacksheepco.online")
+LOCATOR_IS_PRIMARY    = os.getenv("LOCATOR_IS_PRIMARY", "true").lower() == "true"
+SELF_CONTAINER_NAME   = os.getenv("SELF_CONTAINER_NAME", "locator")
 
 _PINNED_NAMES = {
     "traefik", "powerdns", "locator", "lokey", "tailscale",
@@ -112,6 +119,50 @@ def _git_auto_push():
                 print(f"[locator] git-push: compose files pushed")
         except Exception as e:
             print(f"[locator] git-push error: {e}")
+
+
+
+# ── SELF-ELECTION HELPERS ─────────────────────────────────────────────────────
+
+class _UnixConn(http.client.HTTPConnection):
+    """HTTP connection over a Unix domain socket (Docker API)."""
+    def __init__(self): super().__init__("localhost")
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.connect("/var/run/docker.sock")
+
+def _stop_self():
+    """Stop this container via the Docker API socket — prevents restart-loop."""
+    print(f"[locator] ⛔ Stopping self ({SELF_CONTAINER_NAME}) via Docker API...")
+    try:
+        conn = _UnixConn()
+        conn.request("POST", f"/containers/{SELF_CONTAINER_NAME}/stop?t=5")
+        r = conn.getresponse()
+        print(f"[locator] Docker stop response: HTTP {r.status}")
+    except Exception as e:
+        print(f"[locator] Could not stop self via Docker socket: {e}")
+
+def _self_election():
+    """Background: if we are not primary and the canonical locator is up, stop self."""
+    if LOCATOR_IS_PRIMARY or not LOCATOR_CANONICAL_URL:
+        return
+    time.sleep(20)  # let ourselves fully initialise first
+    for attempt in range(3):
+        try:
+            r = requests.get(f"{LOCATOR_CANONICAL_URL}/health", timeout=5, verify=False)
+            if r.status_code == 200:
+                data = r.json()
+                primary_unit = data.get("unit_name", "")
+                if primary_unit and primary_unit != UNIT_NAME:
+                    print(f"[locator] Primary is UP on '{primary_unit}' — shutting down duplicate on {UNIT_NAME}")
+                    _stop_self()
+                    return
+                print(f"[locator] Canonical responded but same unit_name '{primary_unit}' — staying active")
+                return
+        except Exception as e:
+            print(f"[locator] Election attempt {attempt+1}/3: canonical unreachable ({e})")
+        time.sleep(10)
+    print(f"[locator] Canonical not reachable after 3 attempts — staying active as fallback")
 
 # ── REGISTRATION ──────────────────────────────────────────────────────────────
 @app.route("/register", methods=["POST"])
@@ -627,6 +678,16 @@ setInterval(refresh, 10000);
 </body>
 </html>"""
 
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "ONLINE",
+        "unit_name": UNIT_NAME,
+        "is_primary": LOCATOR_IS_PRIMARY,
+        "timestamp": _now(),
+    })
+
+
 @app.route("/")
 def index():
     return render_template_string(_UI)
@@ -637,4 +698,5 @@ if __name__ == "__main__":
     print(f"[locator] starting on {UNIT_NAME} — BALANCE_DIFF={BALANCE_DIFF}% OOM={OOM_THRESHOLD}%")
     t = threading.Thread(target=_balancer_loop, daemon=True)
     t.start()
+    threading.Thread(target=_self_election, daemon=True).start()
     app.run(host="0.0.0.0", port=5000, threaded=True)

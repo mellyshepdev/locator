@@ -6,6 +6,7 @@ services:
     volumes:
       - ./registry_data:/app/data
       - /home/swoopg111/.ssh:/root/.ssh:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - UNIT_NAME=unit4
       - BALANCE_HIGH=40
@@ -16,6 +17,9 @@ services:
       - GIT_AUTO_PUSH=true
       - GIT_REMOTE=${GIT_REMOTE:-}
       - PYTHONUNBUFFERED=1
+      - LOCATOR_IS_PRIMARY=true
+      - SELF_CONTAINER_NAME=locator
+      - LOCATOR_CANONICAL_URL=https://locator.theofficialblacksheepco.online
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.locator.rule=Host(`locator.theofficialblacksheepco.online`)"
