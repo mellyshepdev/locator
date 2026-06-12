@@ -33,8 +33,10 @@ LOCATOR_IS_PRIMARY    = os.getenv("LOCATOR_IS_PRIMARY", "true").lower() == "true
 SELF_CONTAINER_NAME   = os.getenv("SELF_CONTAINER_NAME", "locator")
 
 _PINNED_NAMES = {
-    "traefik", "powerdns", "locator", "lokey", "tailscale",
-    "apache", "openvpn", "ns1-auth", "ns1",
+    "traefik", "powerdns", "pdns", "locator", "lokey", "tailscale",
+    "apache", "httpd", "openvpn", "wireguard", "headscale",
+    "ns1-auth", "ns1", "bind",
+    "postgres", "postgresql", "redis", "mysql", "mariadb",
 }
 
 # ── LOCKS ─────────────────────────────────────────────────────────────────────
@@ -164,6 +166,63 @@ def _self_election():
         time.sleep(10)
     print(f"[locator] Canonical not reachable after 3 attempts — staying active as fallback")
 
+# ── CROSS-NODE DEDUP ──────────────────────────────────────────────────────────
+_SINGLETON_EXCEPTIONS = _PINNED_NAMES  # pinned names may run on all nodes; others are singletons
+
+def _enforce_dedup(new_name: str, new_host: str):
+    """
+    When a new instance of a non-pinned container registers, evict the oldest
+    running instance on any other node via git_push_and_stop.  The target lokey
+    will then receive a git_pull_only task once the push completes.
+    """
+    import uuid as _uuid
+    if any(p in new_name.lower() for p in _SINGLETON_EXCEPTIONS):
+        return  # allowed on multiple nodes
+
+    with _reg_lock:
+        r = _registry()
+        instances = [
+            svc for svc in r["services"].values()
+            if svc.get("name") == new_name and svc.get("status") == "ONLINE"
+        ]
+
+    if len(instances) <= 1:
+        return  # nothing to evict
+
+    # Sort oldest-first by last_seen; the newest (just registered) should survive
+    instances.sort(key=lambda s: s.get("last_seen", ""))
+    to_evict = instances[:-1]  # keep the newest
+
+    with _mig_lock:
+        m = _migrations()
+        # Don't pile on if a dedup migration is already pending for this name
+        if any(
+            v.get("dedup") and v["status"] in ("PENDING", "IN_PROGRESS")
+            and v.get("container") == new_name
+            for v in m.values()
+        ):
+            return
+        keeper = instances[-1]
+        for svc in to_evict:
+            evict_host = svc.get("host", "")
+            if not evict_host or evict_host == keeper.get("host"):
+                continue
+            mid = _uuid.uuid4().hex[:8] + "-dedup-push"
+            m[mid] = {
+                "id":        mid,
+                "type":      "git_push_and_stop",
+                "unit":      evict_host,
+                "from_node": evict_host,
+                "to_node":   keeper.get("host", new_host),
+                "container": new_name,
+                "status":    "PENDING",
+                "queued_at": _now(),
+                "dedup":     True,
+            }
+            print(f"[locator] DEDUP: evicting {new_name}@{evict_host} → keeping {keeper.get('host')}")
+        _save_migrations(m)
+
+
 # ── REGISTRATION ──────────────────────────────────────────────────────────────
 @app.route("/register", methods=["POST"])
 def register():
@@ -190,6 +249,10 @@ def register():
             "metadata": metadata,
         }
         _save_registry(r)
+
+    if name and status == "ONLINE":
+        _enforce_dedup(name, host)
+
     return jsonify({"ok": True})
 
 
@@ -284,14 +347,37 @@ def claim_migration(mig_id):
 
 @app.route("/api/migrations/complete", methods=["POST"])
 def complete_migration():
-    data = request.get_json(force=True) or {}
+    import uuid as _uuid
+    data    = request.get_json(force=True) or {}
     mig_id  = data.get("id")
     success = data.get("success", False)
     with _mig_lock:
         m = _migrations()
         if mig_id and mig_id in m:
-            m[mig_id]["status"]       = "DONE" if success else "FAILED"
-            m[mig_id]["completed_at"] = _now()
+            mig = m[mig_id]
+            mig["status"]       = "DONE" if success else "FAILED"
+            mig["completed_at"] = _now()
+
+            # When a git_push_and_stop finishes, queue the follow-on pull on the target.
+            # dedup  → git_pull_only   (container already running on target, just sync state)
+            # rebalance → git_pull_and_start (container needs to be started on target)
+            if success and mig.get("type") == "git_push_and_stop":
+                pull_type = "git_pull_only" if mig.get("dedup") else "git_pull_and_start"
+                pull_id   = _uuid.uuid4().hex[:8] + "-pull"
+                m[pull_id] = {
+                    "id":          pull_id,
+                    "type":        pull_type,
+                    "unit":        mig.get("to_node", ""),
+                    "from_node":   mig.get("from_node", ""),
+                    "to_node":     mig.get("to_node", ""),
+                    "container":   mig.get("container", ""),
+                    "project_dir": data.get("project_dir", ""),
+                    "git_remote":  data.get("git_remote", ""),
+                    "status":      "PENDING",
+                    "queued_at":   _now(),
+                }
+                print(f"[locator] auto-queued {pull_type} {pull_id} → {mig.get('to_node')}")
+
             _save_migrations(m)
     return jsonify({"ok": True})
 
