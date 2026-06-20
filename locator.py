@@ -1248,6 +1248,7 @@ _PINNED_NAMES = {
     "php-fpm", "barcode_db",
     "matrix_synapse", "matrix_element", "matrix_sms_bridge",
     "lokey", "lokey-client",
+    "keycloak", "postfix", "dovecot", "wg-easy", "crowdsec", "fail2ban",
 }
 
 def load_balancer():
