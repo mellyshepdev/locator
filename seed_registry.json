@@ -1,0 +1,93 @@
+{
+  "services": {
+    "anatomy-dashboard": {
+      "url": "https://anatomy.theofficialblacksheepco.info",
+      "internal": "http://anatomy-dashboard:80",
+      "host": "unit2",
+      "port": 80,
+      "type": "container"
+    },
+    "beast-telemetry": {
+      "url": "https://logs.theofficialblacksheepco.info",
+      "internal": "http://beast-telemetry:8087",
+      "host": "unit2",
+      "port": 8087,
+      "type": "container"
+    },
+    "state-lighthouse": {
+      "internal": "http://beast-telemetry:9001",
+      "host": "unit2",
+      "port": 9001,
+      "type": "process",
+      "metadata": {
+        "aura_endpoint": "/aura",
+        "logs_endpoint": "/logs"
+      }
+    },
+    "blacksheep-frontend": {
+      "url": "https://theofficialblacksheepco.info",
+      "internal": "http://blacksheepwebsite-frontend-1:80",
+      "host": "unit1",
+      "port": 80,
+      "type": "container"
+    },
+    "blacksheep-backend": {
+      "internal": "http://blacksheepwebsite-backend-1:5004",
+      "host": "unit1",
+      "port": 5004,
+      "type": "container"
+    },
+    "ollama": {
+      "internal": "http://ollama:11434",
+      "host": "unit1",
+      "port": 11434,
+      "type": "container"
+    },
+    "openvpn": {
+      "internal": "http://openvpn:1194",
+      "host": "unit1",
+      "type": "container"
+    },
+    "bind9": {
+      "internal": "http://bind9:53",
+      "host": "unit1",
+      "port": 53,
+      "type": "container"
+    },
+    "mailserver": {
+      "internal": "http://mailserver:25",
+      "host": "unit1",
+      "port": 25,
+      "type": "container"
+    },
+    "webmail": {
+      "internal": "http://webmail:80",
+      "host": "unit1",
+      "port": 80,
+      "type": "container"
+    }
+  },
+  "nodes": {
+    "mac_mini": {
+      "host": "localhost",
+      "type": "brain",
+      "status": "ONLINE",
+      "traefik_api": "https://unit1.theofficialblacksheepco.info/traefik/api",
+      "peripherals": []
+    },
+    "ubuntu_vps_unit4": {
+      "host": "unit4.theofficialblacksheepco.info",
+      "type": "vps",
+      "status": "ONLINE",
+      "traefik_api": "https://unit4.theofficialblacksheepco.info/traefik/api",
+      "peripherals": []
+    },
+    "secondary_vps_unit2": {
+      "host": "unit2.theofficialblacksheepco.info",
+      "type": "lighthouse",
+      "status": "ONLINE",
+      "traefik_api": "https://unit2.theofficialblacksheepco.info/traefik/api",
+      "peripherals": []
+    }
+  }
+}

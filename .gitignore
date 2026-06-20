@@ -1,1 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+data/
 registry_data/
+.env
+*.log

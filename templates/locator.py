@@ -57,12 +57,11 @@ BALANCE_DIFF     = float(os.environ.get("BALANCE_DIFF", "40"))     # % spread be
 BALANCE_STRIKES  = int(os.environ.get("BALANCE_STRIKES", "2"))      # consecutive overloaded checks before migrating
 OOM_THRESHOLD    = float(os.environ.get("OOM_THRESHOLD", "90"))     # % mem — emergency migration, bypasses anti-flap/cooldown
 
+# Self-election: if not primary and the canonical locator answers, stop self
 UNIT_NAME             = os.environ.get("UNIT_NAME", "unknown")
 LOCATOR_CANONICAL_URL = os.environ.get("LOCATOR_CANONICAL_URL", "https://locator.theofficialblacksheepco.online")
 LOCATOR_IS_PRIMARY    = os.environ.get("LOCATOR_IS_PRIMARY", "true").lower() == "true"
 SELF_CONTAINER_NAME   = os.environ.get("SELF_CONTAINER_NAME", "locator")
-
-_STARTED_AT = datetime.now(timezone.utc)  # used by dedup election to find the oldest instance
 
 # Compose-store git backup
 GIT_AUTO_PUSH = os.environ.get("GIT_AUTO_PUSH", "false").lower() == "true"
@@ -122,8 +121,8 @@ def _best_available_node():
 
         ip = (
             info.get("tailscale_ip")
-            or info.get("openvpn_ip", "").split("-")[0].strip().split()[0]
             or info.get("ip", "").split("-")[0].strip().split()[0]
+            or info.get("openvpn_ip", "").split("-")[0].strip().split()[0]
         )
         if not ip or ip in ("", "unknown"):
             continue
@@ -176,44 +175,25 @@ def _stop_self():
 
 
 def _self_election():
-    """
-    Dedup election: only one locator should ever run across all units.
-    On startup, ping the canonical URL. If another instance answers from a
-    different unit, compare started_at times and stop whichever is oldest.
-    The newer instance wins and stops the older one via lokey command.
-    """
-    if not LOCATOR_CANONICAL_URL:
+    """Background: if we are not primary and the canonical locator is up, stop self."""
+    if LOCATOR_IS_PRIMARY or not LOCATOR_CANONICAL_URL:
         return
     time.sleep(20)  # let ourselves fully initialise first
     for attempt in range(3):
         try:
             r = requests.get(f"{LOCATOR_CANONICAL_URL}/health", timeout=5, verify=False)
             if r.status_code == 200:
-                data = r.json()
-                remote_unit = data.get("unit_name", "")
-                if not remote_unit or remote_unit == UNIT_NAME:
-                    # Same unit — no duplicate, nothing to do
-                    return
-                # A different unit has a locator running — dedup by start time
-                remote_started_raw = data.get("started_at")
-                try:
-                    remote_started = datetime.fromisoformat(remote_started_raw)
-                except Exception:
-                    remote_started = None
-
-                if remote_started and _STARTED_AT > remote_started:
-                    # We are newer — stop the older remote instance
-                    print(f"🗳️  Duplicate locator on '{remote_unit}' started {remote_started_raw} (older than us) — evicting it")
-                    _queue_command(remote_unit, SELF_CONTAINER_NAME, "stop", source="dedup")
-                else:
-                    # We are older (or can't compare) — stop self, let the newer one win
-                    print(f"🗳️  Newer locator running on '{remote_unit}' — stopping self on {UNIT_NAME}")
+                primary_unit = r.json().get("unit_name", "")
+                if primary_unit and primary_unit != UNIT_NAME:
+                    print(f"🗳️  Primary is UP on '{primary_unit}' — shutting down duplicate on {UNIT_NAME}")
                     _stop_self()
+                    return
+                print(f"🗳️  Canonical responded but same unit_name '{primary_unit}' — staying active")
                 return
         except Exception as e:
             print(f"🗳️  Election attempt {attempt+1}/3: canonical unreachable ({e})")
         time.sleep(10)
-    print("🗳️  Canonical not reachable after 3 attempts — staying active as sole instance")
+    print("🗳️  Canonical not reachable after 3 attempts — staying active as fallback")
 
 
 # ── COMPOSE GIT BACKUP ──────────────────────────────────────────────────────
@@ -564,8 +544,8 @@ def deploy_compose(name):
             node_info = registry["nodes"].get(forced_node, {})
         ip = (
             node_info.get("tailscale_ip")
-            or node_info.get("openvpn_ip", "").split("-")[0].strip().split()[0]
             or node_info.get("ip", "").split("-")[0].strip().split()[0]
+            or node_info.get("openvpn_ip", "").split("-")[0].strip().split()[0]
         )
         if not ip or ip in ("", "unknown"):
             return jsonify({"error": f"No reachable IP for node '{forced_node}'"}), 400
@@ -577,11 +557,10 @@ def deploy_compose(name):
 
     remote_dir  = f"/tmp/locator_deploy/{name}"
     remote_file = f"{remote_dir}/docker-compose.yml"
-    # Use the SSH config alias (node name) so per-host port/user/key from ~/.ssh/config
-    # are respected (e.g. unit1 tunnels through localhost:2222 with its own key).
-    # Fall back to explicit user@ip only if no config alias exists.
-    ssh_opts   = ["-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"]
-    ssh_target = target_node   # SSH config alias: unit1, unit2, unit3 …
+    ssh_opts    = ["-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"]
+    if SSH_KEY:
+        ssh_opts += ["-i", SSH_KEY]
+    ssh_target  = f"{SSH_USER}@{target_ip}"
 
     try:
         _sp.run(
@@ -704,7 +683,6 @@ def health_check():
         "service": "locator",
         "unit_name": UNIT_NAME,
         "is_primary": LOCATOR_IS_PRIMARY,
-        "started_at": _STARTED_AT.isoformat(),
         "services_registered": service_count,
         "services_online": online_count,
         "nodes_known": node_count,
@@ -726,11 +704,6 @@ def download_registry():
 def mesh_3d():
     """Serve the 3D mesh visualization."""
     return render_template("mesh.html")
-
-
-@app.route("/silent-check-sso.html", methods=["GET"])
-def silent_check_sso():
-    return render_template("silent-check-sso.html")
 
 
 @app.route("/trigger-browse", methods=["POST"])
@@ -1242,7 +1215,7 @@ def heartbeat_reaper():
 # Containers that must never be migrated or deduped automatically
 _PINNED_NAMES = {
     "locator", "traefik", "apache", "apache2", "httpd", "varnish", "bind9", "bind",
-    "openvpn", "openvpn-client", "headscale", "tailscale", "wireguard-client", "wireguard",
+    "openvpn", "headscale", "tailscale", "wireguard-client", "wireguard",
     "powerdns", "pdns", "ns1-auth", "ns1",
     "postgres", "postgresql", "redis", "mysql", "mariadb",
     "php-fpm", "barcode_db",
@@ -1983,59 +1956,6 @@ def website_pinger():
         time.sleep(60)
 
 
-# ── CRITICAL SERVICE WATCHDOG ────────────────────────────────────────────────
-
-# Services that must always be running — immediately queued for restart on OFFLINE
-_WATCHDOG_SERVICES = {
-    "apache",       # welcome site (unit2)
-    "lokey",        # lokey agent (all units)
-    "lokey-client", # lokey agent alt name
-    "locator",      # self (Docker restart=always is primary; this catches lokey-reported gaps)
-}
-_watchdog_cooldown: dict = {}   # key: (unit, container) → datetime of last restart attempt
-WATCHDOG_INTERVAL  = 15         # seconds between watchdog scans
-WATCHDOG_COOLDOWN  = 90         # seconds before re-queuing restart for same service
-WATCHDOG_MAX_AGE   = 3 * 86400  # ignore services OFFLINE for more than 3 days (stale entries)
-
-def critical_service_watchdog():
-    """Immediately queues a start command when a critical service goes OFFLINE."""
-    while True:
-        time.sleep(WATCHDOG_INTERVAL)
-        now = datetime.now(timezone.utc)
-        with lock:
-            services_snap = {k: dict(v) for k, v in registry["services"].items()}
-            nodes_snap    = {k: dict(v) for k, v in registry["nodes"].items()}
-
-        for name, svc in services_snap.items():
-            base = name.split("@")[0].lower()
-            if not any(w == base for w in _WATCHDOG_SERVICES):
-                continue
-            if svc.get("status") != "OFFLINE":
-                continue
-            unit = svc.get("host", "")
-            if not unit:
-                continue
-            # Skip units that are themselves OFFLINE — commands will never be consumed
-            if nodes_snap.get(unit, {}).get("status") != "ONLINE":
-                continue
-            # Skip stale entries — services OFFLINE for more than WATCHDOG_MAX_AGE
-            offline_since = svc.get("offline_since")
-            if offline_since:
-                try:
-                    age = (now - datetime.fromisoformat(offline_since)).total_seconds()
-                    if age > WATCHDOG_MAX_AGE:
-                        continue
-                except (TypeError, ValueError):
-                    pass
-            key = (unit, name)
-            last = _watchdog_cooldown.get(key)
-            if last and (now - last).total_seconds() < WATCHDOG_COOLDOWN:
-                continue
-            _watchdog_cooldown[key] = now
-            _queue_command(unit, name.split("@")[0], "start", source="watchdog")
-            print(f"🚨 WATCHDOG: queued restart for '{name}' on {unit}")
-
-
 # ── STARTUP ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -2095,9 +2015,6 @@ def main():
 
     # Self-election: secondaries stop themselves if the canonical primary is up
     threading.Thread(target=_self_election, daemon=True).start()
-
-    # Critical service watchdog — immediately restarts apache, lokey, locator if OFFLINE
-    threading.Thread(target=critical_service_watchdog, daemon=True).start()
 
     app.run(host="0.0.0.0", port=PORT, threaded=True)
 

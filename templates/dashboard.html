@@ -1,0 +1,1524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>S.H.E.E.P. Unified Registry</title>
+    <!-- Keycloak auth gate -->
+    <script src="https://auth.theofficialblacksheepco.online/js/keycloak.js"></script>
+    <script>
+      (function() {
+        var kc = new Keycloak({
+          url: 'https://auth.theofficialblacksheepco.online',
+          realm: 'TOBSCo',
+          clientId: 'portal-client'
+        });
+        kc.init({ onLoad: 'check-sso', silentCheckSsoRedirectUri: window.location.origin + '/silent-check-sso.html' })
+          .then(function(auth) {
+            if (!auth) {
+              window.location.href = 'https://theofficialblacksheepco.com/login.html?redirect=' + encodeURIComponent(window.location.href);
+            }
+          })
+          .catch(function() {
+            window.location.href = 'https://theofficialblacksheepco.com/login.html?redirect=' + encodeURIComponent(window.location.href);
+          });
+      })();
+    </script>
+    <!-- Include vis-network for graph rendering -->
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <style>
+        :root {
+            /* Shared */
+            --bg: #000510;
+            --primary: #4169E1;
+            --accent: #00f0ff;
+            --danger: #ff003c;
+            --success: #00ff00;
+            /* Grid Specific */
+            --grid-bg: #050505;
+            --neon-green: #00ff00;
+            --neon-green-dim: rgba(0, 255, 0, 0.2);
+            --neon-blue: #00f0ff;
+        }
+
+        body {
+            background-color: var(--bg);
+            color: #fff;
+            font-family: 'Courier New', Courier, monospace;
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            overflow: hidden;
+            background-image: radial-gradient(circle at center, #001030 0%, #000510 100%);
+        }
+
+        /* ── TOGGLE SWITCH ── */
+        #ui-toggle {
+            position: absolute;
+            top: 20px;
+            right: 30px;
+            z-index: 100;
+            display: flex;
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid var(--accent);
+            border-radius: 4px;
+            overflow: hidden;
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.3);
+        }
+        .toggle-btn {
+            background: transparent;
+            color: var(--accent);
+            border: none;
+            padding: 10px 20px;
+            font-family: inherit;
+            font-size: 14px;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            transition: all 0.3s;
+        }
+        .toggle-btn.active {
+            background: var(--accent);
+            color: #000;
+            font-weight: bold;
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.5);
+        }
+
+        /* add docker container button */
+#add-docker-btn {
+    z-index: 9999 !important;
+    background-color: #007bff;
+    color: white;
+    padding: 10px 20px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    box-shadow: 0px 4px 15px rgba(0, 0, 0, 0.3);
+}
+
+#add-docker-btn:hover {
+    background-color: #0056b3;
+}
+
+
+
+        /* ── VIEW CONTAINERS ── */
+        .view-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: none;
+        }
+        .view-container.active {
+            display: block;
+        }
+
+        /* ── MESH MAP STYLES ── */
+        h1.map-title {
+            position: absolute;
+            top: 20px;
+            left: 30px;
+            text-transform: uppercase;
+            letter-spacing: 4px;
+            font-size: 20px;
+            text-shadow: 0 0 15px var(--primary);
+            z-index: 10;
+            pointer-events: none;
+            margin: 0;
+        }
+        #mynetwork {
+            width: 100vw;
+            height: 100vh;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+        #info-panel {
+            position: absolute;
+            bottom: 30px;
+            right: 30px;
+            width: 300px;
+            background: rgba(0, 10, 30, 0.8);
+            border: 1px solid var(--primary);
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 0 20px rgba(65, 105, 225, 0.3);
+            backdrop-filter: blur(5px);
+            z-index: 10;
+            display: none;
+        }
+        .info-title {
+            font-weight: bold;
+            color: var(--accent);
+            margin-bottom: 10px;
+            border-bottom: 1px solid rgba(0, 240, 255, 0.3);
+            padding-bottom: 5px;
+        }
+        .info-row { margin-bottom: 5px; font-size: 13px; }
+        .info-label { color: #aaa; }
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-shadow: 0 0 5px var(--accent); }
+
+        /* ── TACTICAL GRID STYLES ── */
+        #view-grid {
+            background-color: var(--grid-bg);
+            background-image: 
+                linear-gradient(var(--neon-green-dim) 1px, transparent 1px),
+                linear-gradient(90deg, var(--neon-green-dim) 1px, transparent 1px);
+            background-size: 30px 30px;
+            background-position: center center;
+            overflow-y: auto;
+            color: var(--neon-green);
+        }
+        .grid-container {
+            width: 98%;
+            max-width: none;
+            margin: 80px auto 40px auto; /* Push down to avoid toggle switch */
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid var(--neon-green);
+            box-shadow: 0 0 20px var(--neon-green-dim);
+            padding: 20px;
+            backdrop-filter: blur(5px);
+            box-sizing: border-box;
+            overflow: hidden;
+        }
+        .table-scroll {
+            overflow-x: auto;
+            width: 100%;
+        }
+        .grid-green { border: 1px solid #00ff00; box-shadow: 0 0 20px rgba(0, 255, 0, 0.2); color: #00ff00; }
+        .grid-purple { border: 1px solid #a200ff; box-shadow: 0 0 20px rgba(162, 0, 255, 0.2); color: #a200ff; margin-top: 40px;}
+        .grid-blue { border: 1px solid #00f0ff; box-shadow: 0 0 20px rgba(0, 240, 255, 0.2); color: #00f0ff; margin-top: 40px;}
+
+        h1.grid-title {
+            text-align: center;
+            text-transform: uppercase;
+            letter-spacing: 5px;
+            margin-top: 0;
+            margin-bottom: 40px;
+            border-bottom: 2px solid var(--neon-green);
+            padding-bottom: 10px;
+        }
+        
+        .grid-green h1.grid-title { color: #00ff00; border-bottom: 2px solid #00ff00; text-shadow: 0 0 10px #00ff00; }
+        .grid-green th { color: #00ff00; border-bottom: 1px solid rgba(0,255,0,0.3); }
+        .grid-green td { border-bottom: 1px solid rgba(0,255,0,0.1); }
+        
+        .grid-purple th { border-bottom: 1px solid rgba(162,0,255,0.3); }
+        .grid-purple td { border-bottom: 1px solid rgba(162,0,255,0.1); }
+        
+        .grid-blue th { border-bottom: 1px solid rgba(0,240,255,0.3); }
+        .grid-blue td { border-bottom: 1px solid rgba(0,240,255,0.1); }
+
+        .status-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid var(--neon-green-dim);
+        }
+        th {
+            text-transform: uppercase;
+            font-size: 12px;
+            letter-spacing: 2px;
+            color: var(--neon-blue);
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+        }
+        th:hover { opacity: 0.75; }
+        th .sort-arrow {
+            display: inline-block;
+            margin-left: 5px;
+            font-size: 10px;
+            opacity: 0.4;
+        }
+        th.sort-asc .sort-arrow, th.sort-desc .sort-arrow { opacity: 1; }
+        .category-row {
+            background: rgba(255, 255, 255, 0.1);
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+        }
+        .cat-devices { color: #00f0ff; border-left: 5px solid #00f0ff; }
+        .cat-docker { color: #ff00ff; border-left: 5px solid #ff00ff; }
+        .cat-websites { color: #ffff00; border-left: 5px solid #ffff00; }
+        
+        tr:hover { background-color: rgba(0, 255, 0, 0.1); }
+        .status-dot {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+        .online {
+            background-color: var(--neon-green);
+            box-shadow: 0 0 8px var(--neon-green);
+        }
+        .offline {
+            background-color: var(--danger);
+            box-shadow: 0 0 8px var(--danger);
+            animation: pulse 1s infinite;
+        }
+        .node-badge {
+            display: inline-block;
+            padding: 3px 9px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: bold;
+            border: 1px solid;
+            letter-spacing: 0.5px;
+        }
+        /* Per-unit colors */
+        .unit-badge-unit1  { background: rgba(0,255,200,0.12); border-color: #00ffc8; color: #00ffc8; }
+        .unit-badge-unit2  { background: rgba(65,105,225,0.18); border-color: #4169e1; color: #7aa3ff; }
+        .unit-badge-unit3  { background: rgba(255,165,0,0.15); border-color: #ffa500; color: #ffa500; }
+        .unit-badge-unit4  { background: rgba(255,50,50,0.15); border-color: #ff5050; color: #ff7070; }
+        .unit-badge-unit5  { background: rgba(200,0,255,0.15); border-color: #c800ff; color: #dd66ff; }
+        .unit-badge-unit6  { background: rgba(255,230,0,0.15); border-color: #ffe600; color: #ffe600; }
+        .unit-badge-unknown{ background: rgba(120,120,120,0.15); border-color: #888; color: #aaa; }
+
+        .meta-badge {
+            display: inline-block;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: #ccc;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            margin: 2px;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.3; }
+            100% { opacity: 1; }
+        }
+
+        /* ── LIVE NODE METRIC CARDS ── */
+        .node-cards-row {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-bottom: 30px;
+        }
+        .metric-card {
+            flex: 1;
+            min-width: 210px;
+            background: rgba(0, 10, 20, 0.85);
+            border: 1px solid #00f0ff;
+            border-radius: 6px;
+            padding: 14px;
+            position: relative;
+            box-shadow: 0 0 12px rgba(0, 240, 255, 0.15);
+        }
+        .metric-card.oom {
+            border-color: var(--danger);
+            box-shadow: 0 0 16px rgba(255, 0, 60, 0.4);
+            animation: pulse 1.5s infinite;
+        }
+        .metric-card .mc-name { font-weight: bold; font-size: 15px; margin-bottom: 4px; letter-spacing: 1px; }
+        .metric-card .mc-ip { font-size: 10px; color: #6699aa; margin-bottom: 10px; }
+        .metric-card .mc-badge {
+            position: absolute; top: 12px; right: 12px;
+            font-size: 9px; padding: 2px 7px; border-radius: 3px;
+            font-weight: bold; letter-spacing: 1px; border: 1px solid;
+        }
+        .mc-badge.online  { color: var(--neon-green); border-color: var(--neon-green); background: rgba(0,255,0,0.1); }
+        .mc-badge.stale   { color: #ffe600; border-color: #ffe600; background: rgba(255,230,0,0.1); }
+        .mc-badge.offline { color: var(--danger); border-color: var(--danger); background: rgba(255,0,60,0.1); }
+        .metric-card .mc-row { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 3px; }
+        .metric-card .mc-label { color: #6699aa; letter-spacing: 1px; }
+        .metric-card .mc-bar {
+            height: 4px; background: rgba(0, 240, 255, 0.15);
+            border-radius: 2px; margin-bottom: 9px; overflow: hidden;
+        }
+        .metric-card .mc-fill { height: 100%; border-radius: 2px; transition: width .4s ease; }
+
+        /* ── MIGRATION QUEUE ── */
+        .grid-red { border: 1px solid #ff5050; box-shadow: 0 0 20px rgba(255, 80, 80, 0.2); color: #ff7070; margin-top: 40px; }
+        .grid-red th { border-bottom: 1px solid rgba(255,80,80,0.3); }
+        .grid-red td { border-bottom: 1px solid rgba(255,80,80,0.1); }
+        .mig-PENDING     { color: #ffe600; }
+        .mig-IN_PROGRESS { color: #00f0ff; }
+        .mig-DONE        { color: var(--neon-green); }
+        .mig-FAILED      { color: var(--danger); }
+
+        /* ── GRID FILTER BAR ── */
+        .filter-bar {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 25px;
+        }
+        .filter-bar input, .filter-bar select {
+            background: #000;
+            border: 1px solid var(--accent);
+            color: #fff;
+            padding: 8px 12px;
+            font-family: inherit;
+            font-size: 13px;
+            outline: none;
+        }
+        .filter-bar input { width: 280px; }
+        .filter-bar input:focus { box-shadow: 0 0 10px rgba(0, 240, 255, 0.4); }
+        .filter-count { color: #6699aa; font-size: 12px; margin-left: auto; letter-spacing: 1px; }
+
+        /* ── NETWORK PILLS ── */
+        .net-pill {
+            display: inline-block;
+            padding: 2px 7px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-family: monospace;
+            letter-spacing: 0.5px;
+            border: 1px solid;
+            margin: 2px 2px 2px 0;
+            white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- NOTIFICATION SYSTEM -->
+    <div id="notification" style="display:none; position:fixed; top:20px; left:50%; transform:translateX(-50%); background:rgba(0,255,255,0.9); color:#000; padding:15px 30px; border-radius:5px; z-index:20000; font-weight:bold; box-shadow:0 0 20px rgba(0,255,255,0.5);">
+    </div>
+
+    <!-- UI TOGGLE -->
+    <div id="ui-toggle">
+        <button class="toggle-btn active" onclick="switchView('map')">Mesh Map</button>
+        <button class="toggle-btn" onclick="switchView('grid')">Tactical Grid</button>
+        <button class="toggle-btn" onclick="switchView('3js')">3D Mesh</button>
+    </div>
+
+    <!-- Button  -->
+    <div id="upload-container" style="margin-top: 20px; display: flex; justify-content: center; gap: 10px; position: fixed; bottom: 20px; right: 20px; z-index: 9999;">
+      <input type="text" id="manual-path" placeholder="/home/swoopg111/projects/my-app" style="padding: 10px; width: 300px; background: #000; border: 1px solid var(--accent); color: #fff;">
+      <button id="add-docker-btn" class="blue-button" type="button" style="padding: 10px 20px; cursor: pointer; background: var(--primary); color: #fff; border: none; border-radius: 4px;">
+        + Deploy Path
+      </button>
+    </div>
+
+    <!-- MESH MAP VIEW -->
+    <div id="view-map" class="view-container active">
+        <h1 class="map-title">S.H.E.E.P. Mesh Map</h1>
+        <div id="mynetwork"></div>
+        <div id="info-panel">
+            <div class="info-title" id="info-name">Node Name</div>
+            <div class="info-row"><span class="info-label">Type:</span> <span id="info-type"></span></div>
+            <div class="info-row"><span class="info-label">Status:</span> <span id="info-status"></span></div>
+            <div class="info-row" id="row-url"><span class="info-label">URL:</span> <a href="#" target="_blank" id="info-url"></a></div>
+            <div class="info-row" id="row-lastseen"><span class="info-label">Last Seen:</span> <span id="info-lastseen"></span></div>
+        </div>
+    </div>
+
+    <!-- TACTICAL GRID VIEW -->
+    <div id="view-grid" class="view-container">
+
+        <!-- BLUE RECTANGLE: DEVICES -->
+        <div class="grid-container grid-blue">
+            <h1 class="grid-title" style="color: #00f0ff; border-color: #00f0ff; text-shadow: 0 0 10px #00f0ff;">Devices & Nodes</h1>
+            <div class="status-header">
+                <div>MESH NODES ACTIVE: <span id="count-devices" style="color: #00f0ff;">0</span></div>
+                <div>SYSTEM STATUS: <span class="status-dot online" style="background-color: #00f0ff; box-shadow: 0 0 8px #00f0ff;"></span> NOMINAL</div>
+            </div>
+
+            <!-- FILTER BAR -->
+            <div class="filter-bar">
+                <input id="grid-search" placeholder="filter by name, host, url, network..." oninput="if (lastRegistryData) renderGrid(lastRegistryData)">
+                <select id="grid-unit-filter" onchange="if (lastRegistryData) renderGrid(lastRegistryData)">
+                    <option value="">ALL UNITS</option>
+                </select>
+                <span class="filter-count" id="filter-count"></span>
+            </div>
+
+            <!-- LIVE NODE METRICS -->
+            <div class="node-cards-row" id="node-cards"></div>
+            <div class="table-scroll">
+            <table id="table-devices">
+                <thead><tr>
+                    <th style="color:#00f0ff" onclick="sortGrid('devices',0)">Device<span class="sort-arrow">↕</span></th>
+                    <th style="color:#00f0ff" onclick="sortGrid('devices',1)">IP Address<span class="sort-arrow">↕</span></th>
+                    <th style="color:#00f0ff" onclick="sortGrid('devices',2)">Type / OS<span class="sort-arrow">↕</span></th>
+                    <th style="color:#00f0ff" onclick="sortGrid('devices',3)">Status<span class="sort-arrow">↕</span></th>
+                    <th style="color:#00f0ff">Metadata</th>
+                    <th style="color:#00f0ff" onclick="sortGrid('devices',5)">Last Seen<span class="sort-arrow">↕</span></th>
+                </tr></thead>
+                <tbody id="tbody-devices"></tbody>
+            </table>
+            </div>
+        </div>
+
+        <!-- GREEN RECTANGLE: DOCKER CONTAINERS -->
+        <div class="grid-container grid-green">
+            <h1 class="grid-title">Docker Containers</h1>
+            <div class="status-header">
+                <div>ACTIVE CONTAINERS: <span id="count-docker" style="color: #00ff00;">0</span></div>
+                <div style="display:flex; align-items:center; gap:16px;">
+                    <button onclick="openYamlsModal()" style="background:#001a00; color:#00ff88; border:1px solid #00aa44; padding:5px 14px; border-radius:4px; font-size:12px; cursor:pointer; font-family:monospace; letter-spacing:1px;" onmouseover="this.style.background='#002800'" onmouseout="this.style.background='#001a00'">📋 YAMLs</button>
+                    <div>SYSTEM STATUS: <span class="status-dot online"></span> NOMINAL</div>
+                </div>
+            </div>
+            <div class="table-scroll">
+            <table id="table-docker">
+                <thead><tr>
+                    <th onclick="sortGrid('docker',0)">Service<span class="sort-arrow">↕</span></th>
+                    <th onclick="sortGrid('docker',1)">Node / Host<span class="sort-arrow">↕</span></th>
+                    <th onclick="sortGrid('docker',2)">Domain<span class="sort-arrow">↕</span></th>
+                    <th>Networks</th>
+                    <th>Stats (CPU/RAM/Disk)</th>
+                    <th onclick="sortGrid('docker',4)">Status<span class="sort-arrow">↕</span></th>
+                    <th onclick="sortGrid('docker',5)">Uptime<span class="sort-arrow">↕</span></th>
+                    <th>Actions</th>
+                </tr></thead>
+                <tbody id="tbody-docker"></tbody>
+            </table>
+            </div>
+        </div>
+
+        <!-- PURPLE RECTANGLE: WEBSITES -->
+        <div class="grid-container grid-purple">
+            <h1 class="grid-title" style="color: #a200ff; border-color: #a200ff; text-shadow: 0 0 10px #a200ff;">Websites</h1>
+            <div class="status-header">
+                <div>ACTIVE WEBSITES: <span id="count-websites" style="color: #a200ff;">0</span></div>
+                <div>SYSTEM STATUS: <span class="status-dot online" style="background-color: #a200ff; box-shadow: 0 0 8px #a200ff;"></span> NOMINAL</div>
+            </div>
+            <div class="table-scroll">
+            <table id="table-websites">
+                <thead><tr>
+                    <th style="color:#a200ff" onclick="sortGrid('websites',0)">Service<span class="sort-arrow">↕</span></th>
+                    <th style="color:#a200ff" onclick="sortGrid('websites',1)">Node / Host<span class="sort-arrow">↕</span></th>
+                    <th style="color:#a200ff" onclick="sortGrid('websites',2)">URL<span class="sort-arrow">↕</span></th>
+                    <th style="color:#a200ff" onclick="sortGrid('websites',3)">Status<span class="sort-arrow">↕</span></th>
+                    <th style="color:#a200ff">Metadata</th>
+                    <th style="color:#a200ff" onclick="sortGrid('websites',5)">Last Seen<span class="sort-arrow">↕</span></th>
+                </tr></thead>
+                <tbody id="tbody-websites"></tbody>
+            </table>
+            </div>
+        </div>
+
+        <!-- RED RECTANGLE: MIGRATION QUEUE -->
+        <div class="grid-container grid-red">
+            <h1 class="grid-title" style="color: #ff5050; border-color: #ff5050; text-shadow: 0 0 10px #ff5050;">Migration Queue</h1>
+            <div class="status-header">
+                <div>RECENT MIGRATIONS: <span id="count-migrations" style="color: #ff7070;">0</span></div>
+                <div>LOAD BALANCER: <span id="balancer-state" style="color: #ff7070;">—</span></div>
+            </div>
+            <div class="table-scroll">
+            <table id="table-migrations">
+                <thead><tr>
+                    <th style="color:#ff7070">ID</th>
+                    <th style="color:#ff7070">Type</th>
+                    <th style="color:#ff7070">Container</th>
+                    <th style="color:#ff7070">From</th>
+                    <th style="color:#ff7070">To</th>
+                    <th style="color:#ff7070">Status</th>
+                    <th style="color:#ff7070">Queued</th>
+                    <th style="color:#ff7070">Reason</th>
+                </tr></thead>
+                <tbody id="tbody-migrations"></tbody>
+            </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- 3D MESH VIEW -->
+    <div id="view-3js" class="view-container">
+        <iframe src="/3d-mesh" style="width: 100%; height: 100%; border: none;"></iframe>
+    </div>
+
+    <script>
+        // ── UI TOGGLE LOGIC ──
+        function switchView(viewName) {
+            document.querySelectorAll('.toggle-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelectorAll('.view-container').forEach(vc => vc.classList.remove('active'));
+            
+            if (viewName === 'map') {
+                document.querySelector('#ui-toggle button:nth-child(1)').classList.add('active');
+                document.getElementById('view-map').classList.add('active');
+            } else if (viewName === 'grid') {
+                document.querySelector('#ui-toggle button:nth-child(2)').classList.add('active');
+                document.getElementById('view-grid').classList.add('active');
+            } else if (viewName === '3js') {
+                document.querySelector('#ui-toggle button:nth-child(3)').classList.add('active');
+                document.getElementById('view-3js').classList.add('active');
+            }
+        }
+
+        function notify(msg, type='info') {
+            const n = document.getElementById('notification');
+            n.innerText = msg;
+            n.style.display = 'block';
+            n.style.background = type === 'error' ? 'var(--danger)' : 'rgba(0,255,255,0.9)';
+            setTimeout(() => n.style.display = 'none', 5000);
+        }
+    </script>
+
+    <!-- DEPLOYMENT MODAL -->
+    <div id="deploy-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:10000; justify-content:center; align-items:center;">
+        <div style="background:#001030; border:2px solid var(--accent); padding:30px; border-radius:10px; width:400px; box-shadow: 0 0 30px var(--accent);">
+            <h2 style="color:var(--accent); margin-top:0;">🚀 Deploy Configuration</h2>
+            
+            <p style="font-size:14px; color:#aaa;">Select networks to join:</p>
+            <div id="network-list" style="margin-bottom:20px; max-height:100px; overflow-y:auto; border:1px solid #333; padding:10px;">
+                <!-- Dynamically filled -->
+            </div>
+
+            <p style="font-size:14px; color:#aaa;">Target Server:</p>
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:20px;">
+                <label><input type="checkbox" name="srv" value="unit1"> Unit 1</label>
+                <label><input type="checkbox" name="srv" value="unit2"> Unit 2</label>
+                <label><input type="checkbox" name="srv" value="unit3"> Unit 3</label>
+                <label><input type="checkbox" name="srv" value="unit4"> Unit 4</label>
+                <label><input type="checkbox" name="srv" value="unit5"> Unit 5</label>
+                <label><input type="checkbox" name="srv" value="unit6"> Unit 6</label>
+                <label style="grid-column: span 2; color:var(--accent); font-weight:bold;">
+                    <input type="checkbox" name="srv" value="efficient" checked> Most Efficient Option
+                </label>
+            </div>
+
+            <div style="display:flex; justify-content:space-between;">
+                <button onclick="closeDeployModal()" style="background:#444; color:white; border:none; padding:10px 20px; cursor:pointer;">Cancel</button>
+                <button onclick="confirmDeployment()" style="background:var(--accent); color:black; border:none; padding:10px 20px; cursor:pointer; font-weight:bold;">Deploy</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let selectedFolderPath = "";
+
+        function shutdownContainer(name) {
+            if (!confirm(`Send shutdown command to "${name}"?`)) return;
+            notify(`Sending stop command to ${name}…`);
+            fetch(`/api/shutdown/${encodeURIComponent(name)}`, { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.ok) {
+                        notify(`🔴 ${name} stop queued — lokey will execute`, 'info');
+                        setTimeout(loadRegistryData, 3000);
+                    } else {
+                        notify(`❌ Shutdown failed: ${data.error || JSON.stringify(data)}`, 'error');
+                    }
+                })
+                .catch(err => notify(`❌ Shutdown error: ${err}`, 'error'));
+        }
+
+        function deployContainer(name) {
+            if (!confirm(`Deploy "${name}" to the most available node?`)) return;
+            notify(`Deploying ${name}…`);
+            fetch(`/api/deploy/${encodeURIComponent(name)}`, { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.result === 'deployed') {
+                        notify(`✅ ${name} deployed to ${data.node}`, 'success');
+                        loadRegistryData();
+                    } else {
+                        notify(`❌ Deploy failed: ${data.error || JSON.stringify(data)}`, 'error');
+                    }
+                })
+                .catch(err => notify(`❌ Deploy error: ${err}`, 'error'));
+        }
+
+        function openDeployModal(path) {
+            selectedFolderPath = path;
+            const netList = document.getElementById('network-list');
+            netList.innerHTML = "Loading networks...";
+            
+            // Fetch available networks from backend
+            fetch('/api/networks')
+                .then(r => r.json())
+                .then(networks => {
+                    netList.innerHTML = "";
+                    networks.forEach(net => {
+                        netList.innerHTML += `<label style="display:block;"><input type="checkbox" class="net-check" value="${net}"> ${net}</label>`;
+                    });
+                });
+
+            document.getElementById('deploy-modal').style.display = 'flex';
+        }
+
+        function closeDeployModal() {
+            document.getElementById('deploy-modal').style.display = 'none';
+        }
+
+        function confirmDeployment() {
+            const networks = Array.from(document.querySelectorAll('.net-check:checked')).map(cb => cb.value);
+            const servers = Array.from(document.querySelectorAll('input[name="srv"]:checked')).map(cb => cb.value);
+            
+            notify("Deploying services... please wait.");
+            
+            fetch('/trigger-deploy-final', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    folder_path: selectedFolderPath,
+                    networks: networks,
+                    servers: servers
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'Success') {
+                    notify("Deployment Successful!", "success");
+                } else {
+                    notify("Deployment Failed: " + (data.error || "Unknown error"), "error");
+                }
+                closeDeployModal();
+                loadRegistryData();
+            })
+            .catch(err => notify("Critical Deployment Error: " + err, "error"));
+        }
+
+        document.getElementById('add-docker-btn').addEventListener('click', function() {
+            const path = document.getElementById('manual-path').value;
+            if (!path) {
+                notify("Please enter a valid folder path.", "error");
+                return;
+            }
+            openDeployModal(path);
+        });
+
+
+        // ── DATA FETCHING & RENDERING ──
+        let network = null; // Vis network instance
+        const ACCENT_COLOR = '#00f0ff';
+        let lastRegistryData = null;
+
+        // ── NETWORK VISUALIZATION ──
+        let serviceNetworkMap = {};  // normalized_name -> [nets]
+
+        const NET_PALETTE = {
+            'traefik_proxy':          {bg:'rgba(0,240,255,0.10)',   bd:'#00a0aa', tx:'#00f0ff'},
+            'proxy':                  {bg:'rgba(45,212,191,0.10)',  bd:'#1e8a7e', tx:'#2dd4bf'},
+            'bleep_proxy':            {bg:'rgba(245,158,11,0.10)',  bd:'#a06010', tx:'#f59e0b'},
+            'internal':               {bg:'rgba(168,85,247,0.10)',  bd:'#7730b8', tx:'#c084fc'},
+            'webserver_internal':     {bg:'rgba(168,85,247,0.10)',  bd:'#7730b8', tx:'#c084fc'},
+            'web-terminal_internal':  {bg:'rgba(168,85,247,0.10)',  bd:'#7730b8', tx:'#c084fc'},
+            'live-logger_internal':   {bg:'rgba(168,85,247,0.10)',  bd:'#7730b8', tx:'#c084fc'},
+            'hub-internal':           {bg:'rgba(168,85,247,0.10)',  bd:'#7730b8', tx:'#c084fc'},
+            'beast_network':          {bg:'rgba(244,63,94,0.10)',   bd:'#992040', tx:'#f43f5e'},
+            'mcp-network':            {bg:'rgba(59,130,246,0.10)',  bd:'#2555a0', tx:'#60a5fa'},
+            'default':                {bg:'rgba(90,90,90,0.10)',    bd:'#444',    tx:'#888'},
+            'matrix':                 {bg:'rgba(34,197,94,0.10)',   bd:'#16803a', tx:'#4ade80'},
+            'wireguard_net':          {bg:'rgba(34,197,94,0.10)',   bd:'#16803a', tx:'#4ade80'},
+            'wg_client_net':          {bg:'rgba(34,197,94,0.10)',   bd:'#16803a', tx:'#4ade80'},
+            'pdns_net':               {bg:'rgba(251,191,36,0.10)',  bd:'#a07010', tx:'#fbbf24'},
+            'glances-network':        {bg:'rgba(249,115,22,0.10)',  bd:'#a04800', tx:'#fb923c'},
+            'scanner_net':            {bg:'rgba(239,68,68,0.10)',   bd:'#992020', tx:'#f87171'},
+            'partkeepr_net':          {bg:'rgba(99,102,241,0.10)',  bd:'#4040a0', tx:'#818cf8'},
+        };
+
+        // Deterministic color for unknown networks
+        function _netHashColor(name) {
+            let h = 0;
+            for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+            const hue = h % 360;
+            return {
+                bg: `hsla(${hue},60%,50%,0.10)`,
+                bd: `hsl(${hue},45%,35%)`,
+                tx: `hsl(${hue},70%,65%)`
+            };
+        }
+
+        function netPill(netName) {
+            const c = NET_PALETTE[netName] || _netHashColor(netName);
+            return `<span class="net-pill" style="background:${c.bg};border-color:${c.bd};color:${c.tx};">${netName}</span>`;
+        }
+
+        function lookupNetworks(itemName) {
+            if (!itemName) return [];
+            const norm = itemName.toLowerCase().replace(/-/g,'').replace(/_/g,'');
+            return serviceNetworkMap[itemName]
+                || serviceNetworkMap[norm]
+                || serviceNetworkMap[itemName.toLowerCase()]
+                || [];
+        }
+
+        function createNetworkCell(itemName) {
+            const td = document.createElement('td');
+            const nets = lookupNetworks(itemName);
+            if (!nets.length) {
+                td.innerHTML = '<span style="color:#333;font-size:11px;">—</span>';
+            } else {
+                td.innerHTML = nets.map(netPill).join('');
+            }
+            return td;
+        }
+
+        function loadServiceNetworks() {
+            fetch('/api/service-networks')
+                .then(r => r.json())
+                .then(map => { serviceNetworkMap = map; if (lastRegistryData) renderGrid(lastRegistryData); })
+                .catch(() => {});
+        }
+
+        // Sort state per table: { col: number|null, dir: 'asc'|'desc' }
+        const sortState = {
+            devices:  { col: null, dir: 'asc' },
+            docker:   { col: null, dir: 'asc' },
+            websites: { col: null, dir: 'asc' },
+        };
+
+        function getCellText(tableId, item, col) {
+            if (tableId === 'devices') {
+                const vals = [item.id || item.name || '', item.ip || '', item.type || '', item.status || '', '', item.last_seen || ''];
+                return vals[col] || '';
+            }
+            if (tableId === 'docker') {
+                const hosts = (item.hosts || [item.host || '']).join(' ');
+                const vals = [item.name || '', hosts, item.url || '', '', item.status || '', item.last_heartbeat || ''];
+                return vals[col] || '';
+            }
+            if (tableId === 'websites') {
+                const hosts = (item.hosts || [item.host || '']).join(' ');
+                const vals = [item.name || '', hosts, item.url || '', item.status || '', '', item.last_heartbeat || ''];
+                return vals[col] || '';
+            }
+            return '';
+        }
+
+        function sortGrid(tableId, col) {
+            const state = sortState[tableId];
+            if (state.col === col) {
+                state.dir = state.dir === 'asc' ? 'desc' : 'asc';
+            } else {
+                state.col = col;
+                state.dir = 'asc';
+            }
+            if (lastRegistryData) renderGrid(lastRegistryData);
+        }
+
+        function applySort(tableId, items) {
+            const state = sortState[tableId];
+            if (state.col === null) return items;
+            return [...items].sort((a, b) => {
+                const va = getCellText(tableId, a, state.col).toLowerCase();
+                const vb = getCellText(tableId, b, state.col).toLowerCase();
+                // Date columns — sort by raw string (ISO dates sort lexicographically)
+                const cmp = va < vb ? -1 : va > vb ? 1 : 0;
+                return state.dir === 'asc' ? cmp : -cmp;
+            });
+        }
+
+        function updateSortHeaders(tableId) {
+            const state = sortState[tableId];
+            const tableEl = document.getElementById('table-' + tableId);
+            if (!tableEl) return;
+            tableEl.querySelectorAll('thead th').forEach((th, i) => {
+                th.classList.remove('sort-asc', 'sort-desc');
+                const arrow = th.querySelector('.sort-arrow');
+                if (!arrow) return;
+                if (i === state.col) {
+                    th.classList.add(state.dir === 'asc' ? 'sort-asc' : 'sort-desc');
+                    arrow.textContent = state.dir === 'asc' ? '↑' : '↓';
+                } else {
+                    arrow.textContent = '↕';
+                }
+            });
+        }
+
+        function timeSince(dateString) {
+            if (!dateString) return "Unknown";
+            const date = new Date(dateString);
+            const seconds = Math.floor((new Date() - date) / 1000);
+            if (seconds < 60) return "Just now";
+            if (seconds < 3600) return Math.floor(seconds / 60) + "m ago";
+            if (seconds < 86400) return Math.floor(seconds / 3600) + "h ago";
+            return Math.floor(seconds / 86400) + "d ago";
+        }
+
+        function loadRegistryData() {
+            fetch('/api/registry')
+                .then(response => response.json())
+                .then(data => {
+                    renderGrid(data);
+                    renderMap(data);
+                    renderNodeCards(data);
+                })
+                .catch(error => {
+                    console.error("Failed to load registry data:", error);
+                });
+            fetch('/api/balance/status')
+                .then(response => response.json())
+                .then(data => renderMigrations(data))
+                .catch(error => console.error("Failed to load balance status:", error));
+            updateCertAlerts();
+        }
+
+        // ── CERT EXPIRY ALERT BAR ──
+        function updateCertAlerts() {
+            fetch('/api/certs/status')
+                .then(r => r.json())
+                .then(d => {
+                    const flagged = d.expiring || [];
+                    let bar = document.getElementById('cert-alert-bar');
+                    if (!flagged.length) { if (bar) bar.remove(); return; }
+                    if (!bar) {
+                        bar = document.createElement('div');
+                        bar.id = 'cert-alert-bar';
+                        bar.style.cssText = 'position:fixed; top:0; left:0; right:0; z-index:9999;'
+                            + 'background:rgba(64,10,10,0.95); color:#ff6b6b; border-bottom:1px solid #ff4444;'
+                            + 'font-family:monospace; font-size:12px; padding:8px 16px; text-align:center;';
+                        document.body.prepend(bar);
+                    }
+                    bar.textContent = '🔐 TLS CERTS NEED ATTENTION — '
+                        + flagged.map(c => `${c.host} [${c.unit}]: ${c.error ? c.error : c.days_left + 'd left'}`).join('  •  ');
+                })
+                .catch(() => {});
+        }
+
+        // ── LIVE NODE METRIC CARDS ──
+        function pctColor(v) {
+            if (v == null) return '#6699aa';
+            if (v > 90) return '#ff003c';
+            if (v > 70) return '#ffe600';
+            if (v > 40) return '#00f0ff';
+            return '#00ff00';
+        }
+
+        function renderNodeCards(registryData) {
+            const el = document.getElementById('node-cards');
+            const nodes = Object.entries(registryData.nodes || {});
+            el.innerHTML = nodes.map(([id, n]) => {
+                const stale = !n.last_seen || (Date.now() - new Date(n.last_seen)) > 300000;
+                const oom = (n.mem_percent || 0) >= 90;
+                const badge = n.status !== 'ONLINE' ? 'offline' : (stale ? 'stale' : 'online');
+                const ip = n.tailscale_ip || n.ip || 'unknown';
+                const disk = (n.disk_used_gb != null && n.disk_total_gb != null)
+                    ? ` · ${n.disk_used_gb}/${n.disk_total_gb} GB` : '';
+                const bar = (v) => `<div class="mc-bar"><div class="mc-fill" style="width:${Math.min(v || 0, 100)}%;background:${pctColor(v)}"></div></div>`;
+                const row = (label, v) => `<div class="mc-row"><span class="mc-label">${label}</span><span style="color:${pctColor(v)}">${v != null ? v.toFixed(1) + '%' : '—'}</span></div>`;
+                return `<div class="metric-card${oom ? ' oom' : ''}">
+                    <div class="mc-name">${hostBadge(id)}</div>
+                    <div class="mc-ip">${ip}${disk}</div>
+                    <span class="mc-badge ${badge}">${oom ? 'OOM' : badge.toUpperCase()}</span>
+                    ${row('CPU', n.cpu_percent)}${bar(n.cpu_percent)}
+                    ${row('MEM', n.mem_percent)}${bar(n.mem_percent)}
+                    ${row('DISK', n.disk_percent)}${bar(n.disk_percent)}
+                </div>`;
+            }).join('');
+        }
+
+        // ── MIGRATION QUEUE ──
+        function renderMigrations(balanceData) {
+            const tbody = document.getElementById('tbody-migrations');
+            const migs = balanceData.recent_migrations || [];
+            document.getElementById('count-migrations').innerText = migs.length;
+            document.getElementById('balancer-state').innerText = balanceData.enabled ? 'ENABLED' : 'DISABLED';
+            tbody.innerHTML = '';
+            migs.forEach(m => {
+                const tr = document.createElement('tr');
+                const cells = [
+                    m.id || '—',
+                    m.type || (m.dedup ? 'dedup' : 'rsync'),
+                    m.container || '—',
+                    m.from_node || '—',
+                    m.to_node || '—',
+                ];
+                cells.forEach(v => {
+                    const td = document.createElement('td');
+                    td.textContent = v;
+                    tr.appendChild(td);
+                });
+                const tdStatus = document.createElement('td');
+                tdStatus.className = 'mig-' + (m.status || '');
+                tdStatus.textContent = m.status || '—';
+                tr.appendChild(tdStatus);
+                const tdQueued = document.createElement('td');
+                tdQueued.style.cssText = 'font-size:12px; color:#888;';
+                tdQueued.textContent = m.queued_at ? timeSince(m.queued_at) : '—';
+                tr.appendChild(tdQueued);
+                const tdReason = document.createElement('td');
+                tdReason.style.cssText = 'font-size:11px; color:#aa6666; white-space:normal; max-width:320px;';
+                tdReason.textContent = m.reason || '—';
+                tr.appendChild(tdReason);
+                tbody.appendChild(tr);
+            });
+            if (!migs.length) {
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:#664444; padding:20px;">NO MIGRATIONS QUEUED</td></tr>';
+            }
+        }
+
+        // ── GRID FILTERING ──
+        function svcMatchesFilter(item) {
+            const search = (document.getElementById('grid-search').value || '').toLowerCase();
+            const unit = document.getElementById('grid-unit-filter').value;
+            const hostList = item.hosts || [item.host || ''];
+            if (unit && !hostList.includes(unit)) return false;
+            if (search) {
+                const meta = item.metadata || {};
+                const haystack = [
+                    item.name || item.id || '', hostList.join(' '), item.url || '',
+                    item.internal || '', item.type || '', meta.networks || '', meta.image || ''
+                ].join(' ').toLowerCase();
+                if (!haystack.includes(search)) return false;
+            }
+            return true;
+        }
+
+        function updateUnitFilterOptions(registryData) {
+            const sel = document.getElementById('grid-unit-filter');
+            const current = sel.value;
+            const units = Object.keys(registryData.nodes || {}).sort();
+            sel.innerHTML = '<option value="">ALL UNITS</option>' +
+                units.map(u => `<option value="${u}"${u === current ? ' selected' : ''}>${u.toUpperCase()}</option>`).join('');
+        }
+
+        const UNIT_COLORS = {
+            unit1: 'unit-badge-unit1', unit2: 'unit-badge-unit2',
+            unit3: 'unit-badge-unit3', unit4: 'unit-badge-unit4',
+            unit5: 'unit-badge-unit5', unit6: 'unit-badge-unit6'
+        };
+        function hostBadge(h) {
+            const cls = UNIT_COLORS[h] || 'unit-badge-unknown';
+            return `<span class="node-badge ${cls}">${h}</span>`;
+        }
+
+        function renderGrid(registryData) {
+            lastRegistryData = registryData;
+
+            const tbodyDocker = document.getElementById('tbody-docker');
+            const tbodyWebsites = document.getElementById('tbody-websites');
+            const tbodyDevices = document.getElementById('tbody-devices');
+
+            tbodyDocker.innerHTML = '';
+            tbodyWebsites.innerHTML = '';
+            tbodyDevices.innerHTML = '';
+
+            updateUnitFilterOptions(registryData);
+
+            const services = Object.values(registryData.services || {}).filter(svcMatchesFilter);
+            const nodes = Object.entries(registryData.nodes || {})
+                .map(([id, data]) => ({...data, id, category: 'devices', hosts: [id]}))
+                .filter(svcMatchesFilter);
+
+            const dockerList = applySort('docker', services.filter(s => s.category === 'docker containers'));
+            const websiteList = applySort('websites', services.filter(s => s.category === 'websites'));
+            const sortedNodes = applySort('devices', nodes);
+
+            // Containers stopped by the idle reaper — their links become wake links
+            const sleepingContainers = new Set(
+                services.filter(s => s.metadata && s.metadata.idle_stopped).map(s => s.name)
+            );
+
+            document.getElementById('filter-count').innerText =
+                `${nodes.length + dockerList.length + websiteList.length} SHOWN`;
+
+            document.getElementById('count-devices').innerText = nodes.length;
+            document.getElementById('count-docker').innerText = dockerList.length;
+            document.getElementById('count-websites').innerText = websiteList.length;
+
+            updateSortHeaders('devices');
+            updateSortHeaders('docker');
+            updateSortHeaders('websites');
+
+            function createMetaBadges(metadata) {
+                const cell = document.createElement('td');
+                if (!metadata) return cell;
+                Object.entries(metadata).forEach(([k, v]) => {
+                    if (v && v !== 'nan' && v !== 'None' && k !== 'is_openvpn' && 
+                        !['cpu_usage_percent', 'mem_percent', 'cpu_temp_c', 'disk_percent'].includes(k)) {
+                        const badge = document.createElement('span');
+                        badge.className = 'meta-badge';
+                        badge.innerText = `${k}: ${v}`;
+                        cell.appendChild(badge);
+                    }
+                });
+                return cell;
+            }
+
+            function createStatsBadges(item) {
+                const cell = document.createElement('td');
+                if (!item.metadata) return cell;
+                
+                const meta = item.metadata;
+                const stats = [];
+                
+                if (meta.cpu_usage_percent !== undefined) stats.push({l: 'CPU', v: meta.cpu_usage_percent + '%', c: '#00ff00'});
+                if (meta.mem_percent !== undefined) stats.push({l: 'RAM', v: meta.mem_percent + '%', c: '#00f0ff'});
+                if (meta.cpu_temp_c) stats.push({l: 'TEMP', v: meta.cpu_temp_c + '°C', c: '#ff8800'});
+                if (meta.disk_percent !== undefined) stats.push({l: 'DISK', v: meta.disk_percent + '%', c: '#a200ff'});
+                
+                stats.forEach(s => {
+                    const badge = document.createElement('span');
+                    badge.className = 'node-badge';
+                    badge.style.borderColor = s.c;
+                    badge.style.color = s.c;
+                    badge.style.marginRight = '4px';
+                    badge.innerText = `${s.l}: ${s.v}`;
+                    cell.appendChild(badge);
+                });
+                return cell;
+            }
+
+            // --- DEVICES TABLE ---
+            sortedNodes.forEach(item => {
+                const tr = document.createElement('tr');
+                const nodeId = item.id || item.name || 'unknown';
+
+                const tdName = document.createElement('td');
+                tdName.style.fontWeight = 'bold';
+                tdName.innerHTML = hostBadge(nodeId);
+
+                const tdIp = document.createElement('td');
+                tdIp.textContent = item.ip || 'unknown';
+
+                const tdType = document.createElement('td');
+                tdType.textContent = item.type || '-';
+
+                const tdStatus = document.createElement('td');
+                tdStatus.innerHTML = `<span class="status-dot ${item.status === 'ONLINE' ? 'online' : 'offline'}"></span> ${item.status}`;
+
+                const tdLast = document.createElement('td');
+                tdLast.style.cssText = 'font-size:12px; color:#888;';
+                tdLast.textContent = item.last_seen ? timeSince(item.last_seen) : 'Never';
+
+                tr.appendChild(tdName);
+                tr.appendChild(tdIp);
+                tr.appendChild(tdType);
+                tr.appendChild(tdStatus);
+                tr.appendChild(createMetaBadges(item.metadata));
+                tr.appendChild(tdLast);
+                tbodyDevices.appendChild(tr);
+            });
+
+            // --- DOCKER TABLE ---
+            dockerList.forEach(item => {
+                const tr = document.createElement('tr');
+                const hostList = item.hosts || [item.host || 'unknown'];
+                const hostBadgesHtml = hostList.map(h => hostBadge(h)).join(' ');
+
+                const tdName = document.createElement('td');
+                tdName.style.fontWeight = 'bold';
+                tdName.textContent = item.name;
+
+                const tdHost = document.createElement('td');
+                tdHost.innerHTML = hostBadgesHtml;
+
+                const isSleeping = sleepingContainers.has(item.name);
+
+                const tdDomain = document.createElement('td');
+                if (item.url) {
+                    const a = document.createElement('a');
+                    a.href = isSleeping ? '/wake/' + encodeURIComponent(item.name) : item.url;
+                    a.target = '_blank';
+                    a.rel = 'noopener noreferrer';
+                    a.textContent = item.url.replace(/^https?:\/\//, '');
+                    a.style.cssText = 'color:#00f0ff; font-size:11px; text-decoration:underline; text-underline-offset:3px; cursor:pointer;';
+                    tdDomain.appendChild(a);
+                } else {
+                    tdDomain.textContent = '-';
+                }
+
+                const tdStatus = document.createElement('td');
+                tdStatus.innerHTML = isSleeping
+                    ? `<span class="status-dot offline" style="background:#8888ff; box-shadow:0 0 8px #8888ff;"></span> 💤 SLEEPING`
+                    : `<span class="status-dot ${item.status === 'ONLINE' ? 'online' : 'offline'}"></span> ${item.status}`;
+
+                const tdLast = document.createElement('td');
+                tdLast.style.cssText = 'font-size:12px; color:#888;';
+                tdLast.textContent = item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never';
+
+                const tdDeploy = document.createElement('td');
+                if (isSleeping) {
+                    const wakeBtn = document.createElement('button');
+                    wakeBtn.textContent = '🌅 Wake';
+                    wakeBtn.style.cssText = 'background:#1a1a40; color:#aaaaff; border:1px solid #8888ff; padding:3px 8px; border-radius:4px; font-size:11px; cursor:pointer; font-family:monospace; margin-right:4px;';
+                    wakeBtn.onmouseover = () => wakeBtn.style.background = '#252560';
+                    wakeBtn.onmouseout  = () => wakeBtn.style.background = '#1a1a40';
+                    wakeBtn.onclick = () => window.open('/wake/' + encodeURIComponent(item.name), '_blank');
+                    tdDeploy.appendChild(wakeBtn);
+                } else if (item.status === 'ONLINE') {
+                    const shutBtn = document.createElement('button');
+                    shutBtn.textContent = '🔴 Shutdown';
+                    shutBtn.style.cssText = 'background:#200000; color:#ff5555; border:1px solid #cc2222; padding:3px 8px; border-radius:4px; font-size:11px; cursor:pointer; font-family:monospace;';
+                    shutBtn.onmouseover = () => shutBtn.style.background = '#330000';
+                    shutBtn.onmouseout  = () => shutBtn.style.background = '#200000';
+                    shutBtn.onclick = () => shutdownContainer(item.name);
+                    tdDeploy.appendChild(shutBtn);
+                } else {
+                    const deployBtn = document.createElement('button');
+                    deployBtn.textContent = '🚀 Deploy';
+                    deployBtn.style.cssText = 'background:#003020; color:#00ff88; border:1px solid #00ff44; padding:3px 8px; border-radius:4px; font-size:11px; cursor:pointer; font-family:monospace;';
+                    deployBtn.onmouseover = () => deployBtn.style.background = '#004030';
+                    deployBtn.onmouseout  = () => deployBtn.style.background = '#003020';
+                    deployBtn.onclick = () => deployContainer(item.name);
+                    tdDeploy.appendChild(deployBtn);
+                }
+
+                tr.appendChild(tdName);
+                tr.appendChild(tdHost);
+                tr.appendChild(tdDomain);
+                tr.appendChild(createNetworkCell(item.name));
+                tr.appendChild(createStatsBadges(item));
+                tr.appendChild(tdStatus);
+                tr.appendChild(tdLast);
+                tr.appendChild(tdDeploy);
+                tbodyDocker.appendChild(tr);
+            });
+
+            // --- WEBSITES TABLE ---
+            websiteList.forEach(item => {
+                const tr = document.createElement('tr');
+                const hostList = item.hosts || [item.host || 'unknown'];
+                const hostBadgesHtml = hostList.map(h => hostBadge(h)).join(' ');
+                const url = item.url || '';
+
+                // Name
+                const tdName = document.createElement('td');
+                tdName.style.fontWeight = 'bold';
+                tdName.textContent = item.name;
+
+                // Host badges
+                const tdHost = document.createElement('td');
+                tdHost.innerHTML = hostBadgesHtml;
+
+                // Backing container asleep? Send the click through /wake/ instead
+                const backingContainer = (item.metadata || {}).container || '';
+                const webSleeping = backingContainer && sleepingContainers.has(backingContainer);
+
+                // URL — real anchor, opens new tab, stays on locator
+                const tdUrl = document.createElement('td');
+                if (url) {
+                    const a = document.createElement('a');
+                    a.href = webSleeping ? '/wake/' + encodeURIComponent(backingContainer) : url;
+                    a.target = '_blank';
+                    a.rel = 'noopener noreferrer';
+                    a.textContent = url.replace(/^https?:\/\//, '');
+                    a.style.cssText = 'color:#c084fc; text-decoration:underline; text-underline-offset:3px; font-size:12px; cursor:pointer; word-break:break-all;';
+                    a.addEventListener('mouseenter', () => a.style.color = '#e040fb');
+                    a.addEventListener('mouseleave', () => a.style.color = '#c084fc');
+                    tdUrl.appendChild(a);
+                } else {
+                    tdUrl.textContent = '—';
+                    tdUrl.style.color = '#555';
+                }
+
+                // Status
+                const tdStatus = document.createElement('td');
+                const dot = document.createElement('span');
+                dot.className = 'status-dot ' + (item.status === 'ONLINE' ? 'online' : 'offline');
+                dot.style.background = webSleeping ? '#8888ff' : (item.status === 'ONLINE' ? '#a200ff' : '');
+                dot.style.boxShadow = webSleeping ? '0 0 8px #8888ff' : (item.status === 'ONLINE' ? '0 0 8px #a200ff' : '');
+                tdStatus.appendChild(dot);
+                tdStatus.appendChild(document.createTextNode(' ' + (webSleeping ? '💤 SLEEPING' : (item.status || 'UNKNOWN'))));
+
+                // Metadata
+                const tdMeta = createMetaBadges(item.metadata);
+
+                // Last seen
+                const tdLast = document.createElement('td');
+                tdLast.style.cssText = 'font-size:12px; color:#888;';
+                tdLast.textContent = item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never';
+
+                tr.appendChild(tdName);
+                tr.appendChild(tdHost);
+                tr.appendChild(tdUrl);
+                tr.appendChild(tdStatus);
+                tr.appendChild(tdMeta);
+                tr.appendChild(tdLast);
+                tbodyWebsites.appendChild(tr);
+            });
+        }
+
+
+        function renderMap(registryData) {
+            const nodes = new vis.DataSet();
+            const edges = new vis.DataSet();
+            
+            const nodeDict = registryData.nodes || {};
+            const mainUnits = ['unit1', 'unit2', 'unit3', 'unit4', 'unit5', 'unit6'];
+            const vpnNodes = [];
+            
+            // Build the main unit skeleton
+            mainUnits.forEach((uName) => {
+                const nodeData = nodeDict[uName] || { status: 'OFFLINE', ip: 'pending...' };
+                const isOnline = nodeData.status === 'ONLINE';
+                const isOpenVPN = nodeData.is_openvpn_only || uName === 'unit2' || uName === 'unit4';
+                
+                // Red for Unit 2 & 4, Blue for others
+                const color = isOpenVPN ? '#ff003c' : (isOnline ? '#4169E1' : '#2a3b63'); 
+                const glowColor = isOpenVPN ? '#ff003c' : (isOnline ? ACCENT_COLOR : '#4169E1');
+                
+                nodes.add({
+                    id: 'node_' + uName,
+                    label: uName.toUpperCase() + '\n(' + (nodeData.ip || 'unknown') + ')',
+                    shape: 'hexagon',
+                    color: { background: '#001', border: color },
+                    font: { color: color, size: 14, face: 'Courier New' },
+                    size: 35,
+                    shadow: { enabled: true, color: glowColor, size: 25 },
+                    customData: { type: 'Device', status: nodeData.status, ip: nodeData.ip }
+                });
+
+                if (isOpenVPN || nodeData.openvpn_ip) {
+                    vpnNodes.push('node_' + uName);
+                }
+            });
+
+            // STRUCTURAL OPENVPN MESH (Connect every VPN node to every other VPN node)
+            for (let i = 0; i < vpnNodes.length; i++) {
+                for (let j = i + 1; j < vpnNodes.length; j++) {
+                    edges.add({
+                        from: vpnNodes[i],
+                        to: vpnNodes[j],
+                        color: { color: '#440000', highlight: '#ff003c' },
+                        width: 1,
+                        dashes: [2, 10],
+                        length: 400
+                    });
+                }
+            }
+
+            const serviceDict = registryData.services || {};
+            const traefikNodeIds = [];
+            
+            // Find all Traefik instances
+            for (const [srvId, srvData] of Object.entries(serviceDict)) {
+                if (srvData.name.toLowerCase().includes('traefik')) {
+                    traefikNodeIds.push('srv_' + srvId);
+                }
+            }
+
+            for (const [srvId, srvData] of Object.entries(serviceDict)) {
+                const isOnline = srvData.status === 'ONLINE';
+                const isWebsite = srvData.category === 'websites';
+                const lowerName = srvData.name.toLowerCase();
+                
+                let shape, color, size, shadowSize;
+                if (isWebsite) {
+                    shape = 'globe'; color = isOnline ? '#ffff00' : '#888800'; size = 25; shadowSize = 20;
+                } else {
+                    shape = 'box'; color = isOnline ? '#00ff00' : '#007700'; size = 18; shadowSize = 15;
+                    if (lowerName.includes('traefik')) {
+                        shape = 'diamond'; color = isOnline ? '#00f0ff' : '#007788'; size = 30; shadowSize = 30;
+                    } else if (lowerName.includes('apache')) {
+                        shape = 'triangle'; color = isOnline ? '#ff8800' : '#884400'; size = 22;
+                    } else if (lowerName.includes('bind')) {
+                        shape = 'star'; color = isOnline ? '#a200ff' : '#550088'; size = 22;
+                    }
+                }
+                
+                nodes.add({
+                    id: 'srv_' + srvId,
+                    label: srvData.name,
+                    shape: shape,
+                    color: { background: '#000', border: color },
+                    font: { color: color, size: 12, face: 'Courier New', strokeWidth: 2, strokeColor: '#000' },
+                    size: size,
+                    shadow: { enabled: isOnline, color: color, size: shadowSize },
+                    customData: { type: srvData.category, status: srvData.status, url: srvData.url || srvData.internal || 'none', last_seen: timeSince(srvData.last_heartbeat) }
+                });
+                
+                // MULTI-POINT CONNECTIONS
+                if (srvData.category === 'docker containers') {
+                    const hostList = srvData.hosts || ['unit1'];
+                    hostList.forEach(h => {
+                        const target = 'node_' + h;
+                        if (nodes.get(target)) {
+                            edges.add({
+                                from: target,
+                                to: 'srv_' + srvId,
+                                color: { color: isOnline ? '#00ff00' : '#220000', highlight: '#00ff00' },
+                                width: 2,
+                                length: 150
+                            });
+                        }
+                    });
+
+                    // Tie to Traefik instances on the SAME host
+                    traefikNodeIds.forEach(tId => {
+                        const traefikSrvId = tId.replace('srv_', '');
+                        const traefikData = serviceDict[traefikSrvId];
+                        if (traefikData) {
+                            const traefikHosts = traefikData.hosts || [traefikData.host || 'unknown'];
+                            const intersection = hostList.filter(h => traefikHosts.includes(h));
+                            if (intersection.length > 0 && 'srv_' + srvId !== tId) {
+                                edges.add({
+                                    from: tId,
+                                    to: 'srv_' + srvId,
+                                    color: { color: isOnline ? ACCENT_COLOR : '#003344', highlight: ACCENT_COLOR },
+                                    width: 1,
+                                    length: 250,
+                                    dashes: [2, 5]
+                                });
+                            }
+                        }
+                    });
+                } else if (isWebsite) {
+                    // Tie websites to all Traefiks
+                    traefikNodeIds.forEach(tId => {
+                        edges.add({
+                            from: tId,
+                            to: 'srv_' + srvId,
+                            color: { color: '#ffff00', highlight: '#ffff00' },
+                            width: 1,
+                            length: 200,
+                            dashes: [5, 10]
+                        });
+                    });
+                }
+            }
+
+            // Initialize Network if it doesn't exist, otherwise update data
+            if (!network) {
+                const container = document.getElementById('mynetwork');
+                const data = { nodes: nodes, edges: edges };
+                const options = {
+                    nodes: { borderWidth: 2, borderWidthSelected: 4 },
+                    physics: {
+                        solver: 'forceAtlas2Based',
+                        forceAtlas2Based: {
+                            gravitationalConstant: -100,
+                            centralGravity: 0.01,
+                            springLength: 100,
+                            springConstant: 0.08
+                        }
+                    },
+                    interaction: { hover: true, tooltipDelay: 200 }
+                };
+                network = new vis.Network(container, data, options);
+
+                network.on("click", function (params) {
+                    if (params.nodes.length > 0) {
+                        const nodeId = params.nodes[0];
+                        const node = nodes.get(nodeId);
+                        if (nodeId === 'root') {
+                            document.getElementById('info-panel').style.display = 'none';
+                            return;
+                        }
+                        
+                        const cData = node.customData;
+                        document.getElementById('info-name').innerText = node.label.split('\n')[0];
+                        document.getElementById('info-type').innerText = cData.type;
+                        document.getElementById('info-status').innerText = cData.status;
+                        document.getElementById('info-status').style.color = (cData.status === 'ONLINE') ? 'var(--success)' : 'var(--danger)';
+                        
+                        if (cData.type === 'Service') {
+                            document.getElementById('row-url').style.display = 'block';
+                            document.getElementById('row-lastseen').style.display = 'block';
+                            document.getElementById('info-url').innerText = cData.url;
+                            document.getElementById('info-url').href = cData.url.startsWith('http') ? cData.url : 'https://' + cData.url;
+                            document.getElementById('info-lastseen').innerText = cData.last_seen;
+                        } else {
+                            document.getElementById('row-url').style.display = 'none';
+                            document.getElementById('row-lastseen').style.display = 'none';
+                        }
+                        
+                        document.getElementById('info-panel').style.display = 'block';
+                    } else {
+                        document.getElementById('info-panel').style.display = 'none';
+                    }
+                });
+            } else {
+                network.setData({ nodes: nodes, edges: edges });
+            }
+        }
+
+        // Auto-refresh data every 10 seconds
+        loadRegistryData();
+        loadServiceNetworks();
+        setInterval(loadRegistryData, 10000);
+        setInterval(loadServiceNetworks, 60000);
+
+    </script>
+
+    <!-- YAMLS MODAL -->
+    <div id="yamls-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.88); z-index:10000; justify-content:center; align-items:flex-start; overflow-y:auto; padding:40px 0;">
+        <div style="background:#020f02; border:1px solid #00cc44; width:min(900px, 94vw); margin:auto; border-radius:6px; box-shadow:0 0 40px rgba(0,200,60,0.2); overflow:hidden;">
+            <!-- header -->
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:18px 24px; border-bottom:1px solid #00441a; background:#010c01;">
+                <div style="font-family:monospace; font-size:15px; color:#00ff88; letter-spacing:2px; text-transform:uppercase;">📋 Registered Compose Files</div>
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <input id="yaml-search" placeholder="filter…" oninput="filterYamlList()" style="background:#000; border:1px solid #00aa44; color:#fff; padding:6px 10px; font-family:monospace; font-size:12px; width:200px; outline:none;">
+                    <button onclick="closeYamlsModal()" style="background:#220000; color:#ff5555; border:1px solid #882222; padding:6px 14px; cursor:pointer; font-family:monospace; font-size:13px; border-radius:4px;">✕ Close</button>
+                </div>
+            </div>
+            <!-- list pane -->
+            <div style="display:flex; height:60vh; min-height:340px;">
+                <div id="yaml-list" style="width:260px; border-right:1px solid #00441a; overflow-y:auto; background:#010c01; flex-shrink:0;"></div>
+                <!-- viewer pane -->
+                <div style="flex:1; overflow:auto; position:relative;">
+                    <pre id="yaml-viewer" style="margin:0; padding:20px; font-family:'Courier New',monospace; font-size:12px; color:#99ffbb; background:transparent; white-space:pre; line-height:1.5;">← select a compose file</pre>
+                </div>
+            </div>
+            <!-- footer count -->
+            <div id="yaml-footer" style="padding:10px 24px; border-top:1px solid #00441a; font-family:monospace; font-size:11px; color:#336633; letter-spacing:1px;"></div>
+        </div>
+    </div>
+
+    <script>
+        let allYamlNames = [];
+
+        function openYamlsModal() {
+            document.getElementById('yamls-modal').style.display = 'flex';
+            document.getElementById('yaml-viewer').textContent = '← select a compose file';
+            document.getElementById('yaml-search').value = '';
+            fetch('/api/compose')
+                .then(r => r.json())
+                .then(list => {
+                    allYamlNames = list.map(e => e.name || e).sort();
+                    renderYamlList(allYamlNames);
+                })
+                .catch(err => {
+                    document.getElementById('yaml-list').innerHTML = `<div style="padding:16px;color:#ff5555;font-family:monospace;font-size:12px;">Error loading: ${err}</div>`;
+                });
+        }
+
+        function closeYamlsModal() {
+            document.getElementById('yamls-modal').style.display = 'none';
+        }
+
+        function renderYamlList(names) {
+            const el = document.getElementById('yaml-list');
+            document.getElementById('yaml-footer').textContent = `${names.length} COMPOSE FILE${names.length !== 1 ? 'S' : ''}`;
+            if (!names.length) {
+                el.innerHTML = '<div style="padding:16px;color:#556655;font-family:monospace;font-size:12px;">no matches</div>';
+                return;
+            }
+            el.innerHTML = names.map(n =>
+                `<div class="yaml-item" data-name="${n}" onclick="loadYaml('${n}')"
+                    style="padding:10px 16px; cursor:pointer; border-bottom:1px solid #001a00; font-family:monospace; font-size:12px; color:#00cc66; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
+                    onmouseover="this.style.background='#001a00'" onmouseout="this.style.background=''">${n}</div>`
+            ).join('');
+        }
+
+        function filterYamlList() {
+            const q = document.getElementById('yaml-search').value.toLowerCase();
+            renderYamlList(allYamlNames.filter(n => n.toLowerCase().includes(q)));
+        }
+
+        function loadYaml(name) {
+            document.querySelectorAll('.yaml-item').forEach(el => {
+                el.style.background = el.dataset.name === name ? '#003310' : '';
+                el.style.color = el.dataset.name === name ? '#00ff88' : '#00cc66';
+            });
+            const viewer = document.getElementById('yaml-viewer');
+            viewer.textContent = 'Loading…';
+            fetch(`/api/compose/${encodeURIComponent(name)}`)
+                .then(r => r.text())
+                .then(txt => { viewer.textContent = txt; })
+                .catch(err => { viewer.textContent = `Error: ${err}`; });
+        }
+
+        // Close on backdrop click
+        document.getElementById('yamls-modal').addEventListener('click', function(e) {
+            if (e.target === this) closeYamlsModal();
+        });
+    </script>
+</body>
+</html>

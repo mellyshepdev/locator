@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3D Network Mesh — Dynamic Registry View</title>
+<script src="https://auth.theofficialblacksheepco.online/js/keycloak.js"></script>
+<script>
+  (function() {
+    var kc = new Keycloak({
+      url: 'https://auth.theofficialblacksheepco.online',
+      realm: 'TOBSCo',
+      clientId: 'portal-client'
+    });
+    kc.init({ onLoad: 'check-sso', silentCheckSsoRedirectUri: window.location.origin + '/silent-check-sso.html' })
+      .then(function(auth) {
+        if (!auth) {
+          window.location.href = 'https://theofficialblacksheepco.com/login.html?redirect=' + encodeURIComponent(window.location.href);
+        }
+      })
+      .catch(function() {
+        window.location.href = 'https://theofficialblacksheepco.com/login.html?redirect=' + encodeURIComponent(window.location.href);
+      });
+  })();
+</script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; }
+canvas { display: block; }
+
+#ui {
+  position: absolute; top: 20px; left: 20px;
+  color: #0ff; font-size: 13px; pointer-events: none;
+  text-shadow: 0 0 8px #0ff;
+  z-index: 100;
+}
+#ui h1 { font-size: 20px; margin-bottom: 6px; letter-spacing: 2px; }
+#ui .stat { margin: 3px 0; opacity: 0.8; }
+
+#legend {
+  position: absolute; bottom: 20px; left: 20px;
+  color: #aaa; font-size: 12px;
+  background: rgba(0,10,30,0.8); padding: 14px 18px;
+  border: 1px solid #0ff; border-radius: 8px;
+  box-shadow: 0 0 10px rgba(0,255,255,0.2);
+}
+#legend div { margin: 4px 0; display: flex; align-items: center; gap: 8px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+
+#tooltip {
+  position: absolute; display: none;
+  background: rgba(0,10,30,0.95); border: 1px solid #0ff;
+  color: #fff; padding: 12px 16px; border-radius: 6px;
+  font-size: 12px; pointer-events: none;
+  box-shadow: 0 0 20px rgba(0,255,255,0.4);
+  max-width: 280px;
+  z-index: 1000;
+}
+#tooltip .label { color: #0ff; font-weight: bold; font-size: 15px; margin-bottom: 6px; border-bottom: 1px solid rgba(0,255,255,0.3); padding-bottom: 4px; }
+#tooltip .info { color: #8af; line-height: 1.4; }
+#tooltip .meta { color: #aaa; font-size: 11px; margin-top: 5px; }
+
+#controls {
+  position: absolute; top: 20px; right: 20px;
+  display: flex; flex-direction: column; gap: 8px;
+  z-index: 100;
+}
+#controls button {
+  background: rgba(0,255,255,0.1); border: 1px solid #0ff;
+  color: #0ff; padding: 8px 14px; border-radius: 6px;
+  cursor: pointer; font-family: 'Courier New', monospace;
+  font-size: 12px; transition: all 0.3s;
+}
+#controls button:hover { background: rgba(0,255,255,0.3); box-shadow: 0 0 10px #0ff; }
+
+#focus-hint {
+    position: absolute; bottom: 20px; right: 20px;
+    color: #0ff; font-size: 11px; opacity: 0.6;
+    pointer-events: none;
+}
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <h1>⬡ DYNAMIC NETWORK MESH</h1>
+  <div class="stat">Nodes: <span id="nodeCount">0</span> online</div>
+  <div class="stat">Services: <span id="serviceCount">0</span> running</div>
+  <div class="stat">Active Connections: <span id="connCount">0</span></div>
+  <div class="stat" id="fps">FPS: --</div>
+</div>
+
+<div id="legend">
+  <div><span class="dot" style="background:#0ff;box-shadow:0 0 6px #0ff"></span> Mesh Node (Unit)</div>
+  <div><span class="dot" style="background:#0f0;box-shadow:0 0 6px #0f0"></span> Docker Container</div>
+  <div><span class="dot" style="background:#ffff00;box-shadow:0 0 6px #ffff00"></span> Website</div>
+  <div><span class="dot" style="background:#f44;box-shadow:0 0 6px #f44"></span> Offline</div>
+</div>
+
+<div id="tooltip">
+  <div class="label"></div>
+  <div class="info"></div>
+  <div class="meta"></div>
+</div>
+
+<div id="controls">
+  <button onclick="toggleRotation()">⟳ Toggle Rotation</button>
+  <button onclick="refreshData(true)">🔄 Force Refresh</button>
+  <button onclick="resetView()">⌂ Reset View</button>
+</div>
+
+<div id="focus-hint">TIP: Click any node to lock focus</div>
+
+<script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+// ── Utils ──
+function getDeterministicOffset(id, salt) {
+    let hash = 0;
+    const str = id + salt;
+    for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) - hash) + str.charCodeAt(i);
+        hash |= 0;
+    }
+    return (Math.abs(hash) % 1000) / 1000;
+}
+
+// ── Scene Setup ──
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000511, 0.006);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 2000);
+camera.position.set(0, 100, 200);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.4;
+
+// ── Lighting ──
+scene.add(new THREE.AmbientLight(0x112244, 0.7));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+dirLight.position.set(50, 100, 50);
+scene.add(dirLight);
+
+// ── Starfield ──
+const starGeo = new THREE.BufferGeometry();
+const starVerts = [];
+for (let i = 0; i < 3000; i++) {
+  starVerts.push((Math.random() - 0.5) * 1000, (Math.random() - 0.5) * 1000, (Math.random() - 0.5) * 1000);
+}
+starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starVerts, 3));
+const starMat = new THREE.PointsMaterial({ color: 0x88aaff, size: 0.4, transparent: true, opacity: 0.6 });
+scene.add(new THREE.Points(starGeo, starMat));
+
+// ── Objects & Groups ──
+const nodeGroup = new THREE.Group();
+const serviceGroup = new THREE.Group();
+const connectionGroup = new THREE.Group();
+const particleGroup = new THREE.Group();
+scene.add(nodeGroup, serviceGroup, connectionGroup, particleGroup);
+
+let nodes = {}; 
+let services = [];
+let connections = [];
+let particles = [];
+let lastDataJson = "";
+
+// ── Data Fetching ──
+async function refreshData(force = false) {
+  try {
+    const response = await fetch('/api/registry');
+    const data = await response.json();
+    const currentJson = JSON.stringify(data);
+    
+    if (!force && currentJson === lastDataJson) return;
+    lastDataJson = currentJson;
+
+    clearScene();
+    buildFromRegistry(data);
+  } catch (err) {
+    console.error("Failed to fetch registry:", err);
+  }
+}
+
+function clearScene() {
+  while(nodeGroup.children.length) nodeGroup.remove(nodeGroup.children[0]);
+  while(serviceGroup.children.length) serviceGroup.remove(serviceGroup.children[0]);
+  while(connectionGroup.children.length) connectionGroup.remove(connectionGroup.children[0]);
+  while(particleGroup.children.length) particleGroup.remove(particleGroup.children[0]);
+  nodes = {};
+  services = [];
+  connections = [];
+  particles = [];
+}
+
+function buildFromRegistry(data) {
+  const registryNodes = data.nodes || {};
+  const registryServices = data.services || {};
+  
+  // Sort node IDs for stable circle placement
+  const nodeIds = Object.keys(registryNodes).sort();
+  const totalNodes = nodeIds.length;
+  
+  // 1. Create Nodes in a stable circle
+  nodeIds.forEach((id, i) => {
+    const angle = (i / totalNodes) * Math.PI * 2;
+    const radius = 80 + (totalNodes * 2);
+    const x = Math.cos(angle) * radius;
+    const z = Math.sin(angle) * radius;
+    const y = (getDeterministicOffset(id, "y_off") - 0.5) * 30;
+    
+    const nodeData = registryNodes[id];
+    const mesh = createNodeMesh(id, nodeData, { x, y, z });
+    nodes[id] = mesh;
+    nodeGroup.add(mesh);
+  });
+
+  // 2. Create inter-node links (Unit Mesh)
+  nodeIds.forEach((id, i) => {
+    for (let j = i + 1; j < nodeIds.length; j++) {
+      const id2 = nodeIds[j];
+      createLink(nodes[id], nodes[id2], 0x004488, 0.15);
+    }
+  });
+
+  // 3. Create Services around their hosts
+  Object.entries(registryServices).forEach(([sId, sData]) => {
+    const hostList = sData.hosts || (sData.host ? [sData.host] : []);
+    const isOnline = sData.status === 'ONLINE';
+    
+    if (hostList.length === 0) return;
+    
+    const primaryHost = nodes[hostList[0]];
+    if (!primaryHost) return;
+    
+    // Deterministic placement near host
+    const angle = getDeterministicOffset(sId, "angle") * Math.PI * 2;
+    const dist = 20 + getDeterministicOffset(sId, "dist") * 25;
+    const hOff = (getDeterministicOffset(sId, "h_off") - 0.5) * 20;
+    
+    const pos = {
+      x: primaryHost.position.x + Math.cos(angle) * dist,
+      y: primaryHost.position.y + hOff,
+      z: primaryHost.position.z + Math.sin(angle) * dist
+    };
+    
+    const sMesh = createServiceMesh(sId, sData, pos);
+    serviceGroup.add(sMesh);
+    services.push(sMesh);
+    
+    // Link to ALL host units
+    hostList.forEach((hId) => {
+      const parentNode = nodes[hId];
+      if (!parentNode) return;
+      
+      let linkColor = 0x00ff88;
+      if (sData.category === 'websites') linkColor = 0xffff00;
+      if (!isOnline) linkColor = 0xff0000;
+      
+      const link = createLink(parentNode, sMesh, linkColor, isOnline ? 0.4 : 0.1);
+      if (isOnline) {
+        for(let p=0; p<2; p++) createParticle(link);
+      }
+    });
+  });
+
+  document.getElementById('nodeCount').textContent = Object.values(registryNodes).filter(n => n.status === 'ONLINE').length;
+  document.getElementById('serviceCount').textContent = Object.values(registryServices).filter(s => s.status === 'ONLINE').length;
+  document.getElementById('connCount').textContent = connections.length;
+}
+
+function createNodeMesh(id, data, pos) {
+  const group = new THREE.Group();
+  const isOnline = data.status === 'ONLINE';
+  const color = isOnline ? 0x00ffff : 0x444444;
+
+  const geo = new THREE.CylinderGeometry(5, 5, 2, 6);
+  const mat = new THREE.MeshPhongMaterial({ color: 0x001122, emissive: color, emissiveIntensity: 0.3, transparent: true, opacity: 0.8 });
+  const mesh = new THREE.Mesh(geo, mat);
+  group.add(mesh);
+
+  const ringGeo = new THREE.TorusGeometry(5.5, 0.3, 8, 6);
+  const ringMat = new THREE.MeshBasicMaterial({ color: color });
+  const ring = new THREE.Mesh(ringGeo, ringMat);
+  ring.rotation.x = Math.PI / 2;
+  group.add(ring);
+
+  const label = makeTextSprite(data.name || id, { fontSize: 24, color: isOnline ? '#00ffff' : '#888888' });
+  label.position.y = 10;
+  label.scale.set(15, 5, 1);
+  group.add(label);
+
+  group.position.set(pos.x, pos.y, pos.z);
+  group.userData = { type: 'node', id, ...data };
+  return group;
+}
+
+function createServiceMesh(id, data, pos) {
+  const group = new THREE.Group();
+  const isOnline = data.status === 'ONLINE';
+  const isWebsite = data.category === 'websites';
+  
+  let color = isOnline ? (isWebsite ? 0xffff00 : 0x00ff88) : 0xff0000;
+  
+  let geo;
+  if (isWebsite) geo = new THREE.SphereGeometry(2.5, 12, 12);
+  else geo = new THREE.BoxGeometry(4, 4, 4);
+  
+  const mat = new THREE.MeshPhongMaterial({ color: 0x000000, emissive: color, emissiveIntensity: 0.4, transparent: true, opacity: 0.9 });
+  const mesh = new THREE.Mesh(geo, mat);
+  group.add(mesh);
+
+  if (isOnline) {
+    const glowGeo = new THREE.SphereGeometry(isWebsite ? 3 : 4.5, 12, 12);
+    const glowMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.1 });
+    group.add(new THREE.Mesh(glowGeo, glowMat));
+  }
+
+  const label = makeTextSprite(data.name || id, { fontSize: 18, color: isOnline ? '#ffffff' : '#ff4444' });
+  label.position.y = 7;
+  label.scale.set(12, 4, 1);
+  group.add(label);
+
+  group.position.set(pos.x, pos.y, pos.z);
+  group.userData = { type: 'service', id, ...data };
+  return group;
+}
+
+function createLink(a, b, color, opacity) {
+  const points = [a.position, b.position];
+  const mid = new THREE.Vector3().lerpVectors(a.position, b.position, 0.5);
+  mid.y += 5;
+  const curve = new THREE.QuadraticBezierCurve3(a.position, mid, b.position);
+  const geo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(20));
+  
+  const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity });
+  const line = new THREE.Line(geo, mat);
+  line.userData = { curve, color, opacity };
+  
+  connectionGroup.add(line);
+  connections.push(line);
+  return line;
+}
+
+function createParticle(link) {
+  const { curve, color } = link.userData;
+  const geo = new THREE.SphereGeometry(0.3, 6, 6);
+  const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.8 });
+  const p = new THREE.Mesh(geo, mat);
+  p.userData = { curve, t: Math.random(), speed: 0.001 + Math.random() * 0.003 };
+  particleGroup.add(p);
+  particles.push(p);
+}
+
+function makeTextSprite(text, { fontSize = 24, color = '#ffffff' } = {}) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256; canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.font = `bold ${fontSize}px Courier New`;
+  ctx.fillStyle = color;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 128, 32);
+  const tex = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  return sprite;
+}
+
+// ── Interactivity ──
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+const tooltip = document.getElementById('tooltip');
+let hovered = null;
+
+window.addEventListener('mousemove', e => {
+  mouse.x = (e.clientX / innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  const intersects = raycaster.intersectObjects([...nodeGroup.children, ...serviceGroup.children], true);
+  
+  if (intersects.length > 0) {
+    let obj = intersects[0].object;
+    while(obj.parent && !obj.userData.type) obj = obj.parent;
+    if (obj !== hovered) {
+      hovered = obj;
+      showTooltip(e, obj.userData);
+    }
+    tooltip.style.left = (e.clientX + 15) + 'px';
+    tooltip.style.top = (e.clientY + 15) + 'px';
+  } else {
+    hovered = null;
+    tooltip.style.display = 'none';
+  }
+});
+
+window.addEventListener('click', e => {
+  if (hovered) {
+    const targetPos = hovered.position.clone();
+    controls.target.copy(targetPos);
+    controls.autoRotate = false; // Stop rotating once focused
+  }
+});
+
+function showTooltip(e, d) {
+  tooltip.style.display = 'block';
+  tooltip.querySelector('.label').textContent = (d.type === 'node' ? '🖥 ' : '⚙ ') + (d.name || d.id);
+  
+  let info = '';
+  if (d.type === 'node') {
+    info = `IP: ${d.ip || '?'}<br>Status: ${d.status}<br>OS: ${d.type || '?'}`;
+  } else {
+    info = `Hosts: ${d.hosts?.join(', ') || d.host}<br>Status: ${d.status}<br>URL: ${d.url || d.internal || '-'}`;
+  }
+  tooltip.querySelector('.info').innerHTML = info;
+  
+  let meta = '';
+  if (d.metadata) {
+    Object.entries(d.metadata).forEach(([k, v]) => {
+      if (v && v !== 'nan' && v !== 'None' && k !== 'is_openvpn') meta += `${k}: ${v} | `;
+    });
+  }
+  tooltip.querySelector('.meta').textContent = meta;
+}
+
+// ── Animation Loop ──
+let time = 0;
+let frameCount = 0;
+let lastFpsTime = performance.now();
+
+function animate() {
+  requestAnimationFrame(animate);
+  time += 0.01;
+  frameCount++;
+
+  if (performance.now() - lastFpsTime > 1000) {
+    document.getElementById('fps').textContent = 'FPS: ' + frameCount;
+    frameCount = 0; lastFpsTime = performance.now();
+  }
+
+  particles.forEach(p => {
+    p.userData.t += p.userData.speed;
+    if (p.userData.t > 1) p.userData.t = 0;
+    p.position.copy(p.userData.curve.getPoint(p.userData.t));
+  });
+
+  [...nodeGroup.children, ...serviceGroup.children].forEach((obj, i) => {
+    obj.position.y += Math.sin(time + i) * 0.02;
+    if (obj === hovered) obj.scale.setScalar(1.2);
+    else obj.scale.setScalar(1.0);
+  });
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+function toggleRotation() { controls.autoRotate = !controls.autoRotate; }
+function resetView() { 
+    camera.position.set(0, 100, 200); 
+    controls.target.set(0,0,0); 
+    controls.autoRotate = true;
+}
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+refreshData();
+animate();
+setInterval(refreshData, 20000); 
+</script>
+</body>
+</html>
