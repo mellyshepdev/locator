@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: locator
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    # LOCATOR_PORT is mapped to Render's injected $PORT at start time.
+    # Registry rebuilds from lokey heartbeats within ~10 min of each deploy
+    # (all units POST their state; no data loss, just a brief cold start).
+    startCommand: LOCATOR_PORT=$PORT python locator.py
+    envVars:
+      - key: UNIT_NAME
+        value: render
