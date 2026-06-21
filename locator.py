@@ -125,6 +125,127 @@ def _send_alert(service_name: str, status: str, extra: str = ""):
         pass
 
 
+
+# ── INSTANCE LIMITS ──────────────────────────────────────────────────────────
+
+# Containers that may run up to 3 instances; everything else is singleton (max 1).
+TRIPLE_ALLOWED = {"traefik", "apache", "lokey", "openvpn", "wireguard", "headscale", "tailscale", "bind"}
+
+def _base_name(container_name: str) -> str:
+    """Derive a canonical base name by stripping project prefixes and numeric suffixes."""
+    name = container_name.lower()
+    name = re.sub(r'[-_]v?\d+$', '', name)
+    for segment in re.split(r'[-_]', name):
+        for known in TRIPLE_ALLOWED:
+            if known in segment:
+                return known
+    return name
+
+def _max_instances(container_name: str) -> int:
+    base = _base_name(container_name)
+    for known in TRIPLE_ALLOWED:
+        if known in base:
+            return 3
+    return 1
+
+def enforce_instance_limits(container_name: str):
+    """Stop the oldest running containers that exceed the limit for this service type."""
+    if not docker_client:
+        return
+    base  = _base_name(container_name)
+    limit = _max_instances(container_name)
+    try:
+        running = docker_client.containers.list()
+        peers = [c for c in running if _base_name(c.name) == base and c.name != container_name]
+        peers.sort(key=lambda c: c.attrs.get('State', {}).get('StartedAt', ''))
+        while len(peers) >= limit:
+            oldest = peers.pop(0)
+            print(f"\u26a1 LIMIT ({limit}) exceeded for '{base}': stopping oldest \u2192 {oldest.name}")
+            oldest.stop(timeout=10)
+    except Exception as e:
+        print(f"\u26a0\ufe0f Instance limit enforcement error: {e}")
+
+def enforce_instance_limits_global(new_name: str, new_host: str):
+    """Cross-node singleton/triple enforcement via the migration queue."""
+    import uuid as _uuid_module
+    base  = _base_name(new_name)
+    limit = _max_instances(new_name)
+    with lock:
+        instances = [
+            (svc_id, svc)
+            for svc_id, svc in registry["services"].items()
+            if _base_name(svc.get("name", "")) == base
+            and svc.get("status") == "ONLINE"
+        ]
+    if len(instances) <= limit:
+        return
+    with migrations_lock:
+        already = any(
+            m.get("dedup") and m["status"] in ("pending", "in_progress")
+            and _base_name(m.get("container", "")) == base
+            for m in migration_queue.values()
+        )
+    if already:
+        return
+    instances.sort(key=lambda x: x[1].get("registered_at", ""))
+    to_evict = instances[: len(instances) - limit]
+    keeper_svc  = instances[-1][1]
+    keeper_host = keeper_svc.get("host") or (keeper_svc.get("hosts") or [new_host])[0]
+    now = datetime.now(timezone.utc).isoformat()
+    for i, (svc_id, svc) in enumerate(to_evict):
+        evict_host = svc.get("host") or (svc.get("hosts") or ["unknown"])[0]
+        if evict_host == keeper_host:
+            continue
+        push_id = f"{_uuid_module.uuid4().hex[:8]}-dedup-push"
+        with migrations_lock:
+            migration_queue[push_id] = {
+                "id":        push_id,
+                "type":      "git_push_and_stop",
+                "unit":      evict_host,
+                "from_node": evict_host,
+                "to_node":   keeper_host,
+                "container": svc.get("name", new_name),
+                "status":    "pending",
+                "queued_at": now,
+                "dedup":     True,
+            }
+        beast_log(
+            f"\U0001f502 DEDUP: {svc.get('name', new_name)} \u2014 "
+            f"evicting {evict_host} (oldest), keeping {keeper_host} (newest)"
+        )
+
+def get_container_project_dir(container_name: str):
+    """Return the docker-compose project.working_dir label for a container (running or stopped)."""
+    if not docker_client:
+        return None
+    try:
+        c = docker_client.containers.get(container_name)
+        return c.labels.get("com.docker.compose.project.working_dir")
+    except Exception:
+        try:
+            results = docker_client.containers.list(all=True, filters={"name": container_name})
+            if results:
+                return results[0].labels.get("com.docker.compose.project.working_dir")
+        except Exception:
+            pass
+    return None
+
+def git_pull_in_dir(project_dir: str):
+    """Run git pull in a host-mounted project directory (best-effort)."""
+    if not project_dir or not os.path.isdir(project_dir):
+        return
+    try:
+        result = subprocess.run(
+            ["git", "-C", project_dir, "pull"],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            print(f"\U0001f4e5 git pull OK: {project_dir}")
+        else:
+            print(f"\u26a0\ufe0f git pull warning ({project_dir}): {result.stderr.strip()}")
+    except Exception as e:
+        print(f"\u26a0\ufe0f git pull skipped ({project_dir}): {e}")
+
 # ── REGISTRY STATE ──────────────────────────────────────────────────────────
 
 registry = {
@@ -496,6 +617,66 @@ def deregister_service(name):
     return jsonify({"result": "marked_offline", "retained_for": "90 days", "service": name}), 200
 
 
+
+@app.route("/api/toggle", methods=["POST"])
+def toggle_container():
+    """Start or stop a Docker container via the Locator UI."""
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "No JSON body"}), 400
+    name   = data.get("name", "").strip()
+    action = data.get("action", "").strip()
+    if not name or action not in ("start", "stop"):
+        return jsonify({"error": "Provide 'name' and 'action' (start|stop)"}), 400
+    if not docker_client:
+        return jsonify({"error": "Docker socket unavailable"}), 503
+    project_dir = get_container_project_dir(name)
+    try:
+        if action == "start":
+            git_pull_in_dir(project_dir)
+            enforce_instance_limits(name)
+            try:
+                container = docker_client.containers.get(name)
+                container.start()
+                msg = "started"
+            except docker.errors.NotFound:
+                if project_dir:
+                    result = subprocess.run(
+                        ["docker", "compose", "up", "-d"],
+                        cwd=project_dir, capture_output=True, text=True, timeout=120
+                    )
+                    if result.returncode != 0:
+                        return jsonify({"error": result.stderr.strip()}), 500
+                    msg = "created_and_started"
+                else:
+                    return jsonify({"error": f"Container '{name}' not found and no compose dir known"}), 404
+            now = datetime.now(timezone.utc).isoformat()
+            with lock:
+                for svc in registry["services"].values():
+                    if svc.get("name", "").lower() == name.lower():
+                        svc["status"] = "ONLINE"
+                        svc["last_heartbeat"] = now
+            persist_registry()
+            print(f"\u25b6\ufe0f  TOGGLE: {name} \u2192 ONLINE")
+            return jsonify({"result": msg, "container": name, "status": "ONLINE"})
+        else:
+            container = docker_client.containers.get(name)
+            container.stop(timeout=15)
+            git_pull_in_dir(project_dir)
+            now = datetime.now(timezone.utc).isoformat()
+            with lock:
+                for svc in registry["services"].values():
+                    if svc.get("name", "").lower() == name.lower():
+                        svc["status"] = "OFFLINE"
+                        svc["last_heartbeat"] = now
+            persist_registry()
+            print(f"\u23f9\ufe0f  TOGGLE: {name} \u2192 OFFLINE")
+            return jsonify({"result": "stopped", "container": name, "status": "OFFLINE"})
+    except docker.errors.NotFound:
+        return jsonify({"error": f"Container '{name}' not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/compose", methods=["GET"])
 def list_compose_files():
     """List all stored compose files."""
@@ -590,6 +771,56 @@ def delete_compose_file(name):
     print(f"🗑️  COMPOSE DELETED: {name}")
     return jsonify({"result": "deleted", "name": name}), 200
 
+
+
+@app.route("/api/yamls", methods=["GET"])
+def list_yamls():
+    """Return all docker-compose files discovered via live Docker container labels."""
+    seen = set()
+    results = []
+    if docker_client:
+        try:
+            for c in docker_client.containers.list(all=True):
+                proj_dir = c.labels.get("com.docker.compose.project.working_dir")
+                if not proj_dir or proj_dir in seen:
+                    continue
+                seen.add(proj_dir)
+                for fname in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"):
+                    fpath = os.path.join(proj_dir, fname)
+                    if os.path.isfile(fpath):
+                        results.append({"label": os.path.basename(proj_dir), "container": c.name, "path": fpath})
+                        break
+        except Exception as e:
+            print(f"\u26a0\ufe0f YAML scan error: {e}")
+    results.sort(key=lambda x: x["label"])
+    return jsonify(results)
+
+@app.route("/api/yaml", methods=["GET"])
+def get_yaml():
+    path = request.args.get("path", "")
+    if not path or not os.path.isfile(path):
+        return jsonify({"error": "Not found"}), 404
+    try:
+        with open(path, "r", errors="replace") as f:
+            return jsonify({"path": path, "content": f.read()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/yaml", methods=["POST"])
+def save_yaml():
+    path = request.args.get("path", "")
+    if not path:
+        return jsonify({"error": "No path"}), 400
+    data = request.get_json(silent=True)
+    if not data or "content" not in data:
+        return jsonify({"error": "No content"}), 400
+    try:
+        with open(path, "w") as f:
+            f.write(data["content"])
+        beast_log(f"\U0001f4dd YAML saved: {path}")
+        return jsonify({"ok": True, "status": "saved"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/deploy/<name>", methods=["POST"])
 def deploy_compose(name):
@@ -979,6 +1210,13 @@ def complete_migration():
 
     return jsonify({"result": "acknowledged"})
 
+
+
+@app.route("/api/migrations", methods=["GET"])
+def list_migrations():
+    """Return all migrations (pending, in_progress, and completed) for dashboard visibility."""
+    with migrations_lock:
+        return jsonify(list(migration_queue.values()))
 
 @app.route("/api/balance/status", methods=["GET"])
 def balance_status():
