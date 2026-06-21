@@ -14,6 +14,7 @@ import http.client
 import threading
 import time
 import uuid
+import queue as _queue_module
 import requests
 import re
 import pandas as pd
@@ -59,6 +60,10 @@ OOM_THRESHOLD    = float(os.environ.get("OOM_THRESHOLD", "90"))     # % mem — 
 
 UNIT_NAME             = os.environ.get("UNIT_NAME", "unknown")
 LOCATOR_CANONICAL_URL = os.environ.get("LOCATOR_CANONICAL_URL", "https://locator.theofficialblacksheepco.online")
+
+# ── ALERT / TELEMETRY CONFIG ─────────────────────────────────────────────────
+TELEMETRY_URL     = os.environ.get("TELEMETRY_URL", "http://beast-telemetry:8087")
+ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL", "")
 LOCATOR_IS_PRIMARY    = os.environ.get("LOCATOR_IS_PRIMARY", "true").lower() == "true"
 SELF_CONTAINER_NAME   = os.environ.get("SELF_CONTAINER_NAME", "locator")
 
@@ -74,6 +79,51 @@ try:
     docker_client = docker.from_env()
 except Exception:
     docker_client = None
+
+# ── TELEMETRY / LOGGING ───────────────────────────────────────────────────────
+
+_log_queue = _queue_module.Queue(maxsize=500)
+
+
+def _log_forwarder():
+    """Background thread: drains _log_queue and POSTs to beast-telemetry."""
+    session = requests.Session()
+    while True:
+        batch = []
+        try:
+            batch.append(_log_queue.get(timeout=2))
+            while not _log_queue.empty() and len(batch) < 50:
+                batch.append(_log_queue.get_nowait())
+        except _queue_module.Empty:
+            continue
+        try:
+            session.post(f"{TELEMETRY_URL}/api/log", json=batch, timeout=3)
+        except Exception:
+            pass  # beast-telemetry may not be reachable; silently drop
+
+
+def beast_log(line: str, source: str = "locator"):
+    """Print to stdout AND enqueue for live-logger display in beast-telemetry."""
+    print(line)
+    try:
+        _log_queue.put_nowait({"source": source, "line": line})
+    except _queue_module.Full:
+        pass
+
+
+def _send_alert(service_name: str, status: str, extra: str = ""):
+    """Fire-and-forget alert to ALERT_WEBHOOK_URL (Slack, Discord, or custom)."""
+    if not ALERT_WEBHOOK_URL:
+        return
+    emoji = "🔴" if status == "OFFLINE" else "🟢"
+    text = f"{emoji} *LOCATOR ALERT* — `{service_name}` is now *{status}*"
+    if extra:
+        text += f"\n{extra}"
+    try:
+        requests.post(ALERT_WEBHOOK_URL, json={"text": text}, timeout=5)
+    except Exception:
+        pass
+
 
 # ── REGISTRY STATE ──────────────────────────────────────────────────────────
 
@@ -1175,6 +1225,38 @@ def load_seed():
         except Exception as e:
             print(f"⚠️  Failed to restore persisted registry: {e}")
 
+    ensure_core_services()
+
+
+def ensure_core_services():
+    """Ensures every known node has an entry for Apache, Bind, Traefik, and Lokey-Client."""
+    now = datetime.now(timezone.utc).isoformat()
+    core_services = ["apache", "bind", "traefik", "lokey-client"]
+
+    with lock:
+        nodes = list(registry["nodes"].keys())
+        for node_id in nodes:
+            for core in core_services:
+                already_exists = any(
+                    (svc["name"].lower() == core
+                     or (core == "bind" and "bind" in svc["name"].lower())
+                     or (core == "apache" and "httpd" in svc["name"].lower())
+                     or (core == "lokey-client" and "lokey" in svc["name"].lower()))
+                    and node_id in svc.get("hosts", [])
+                    for svc in registry["services"].values()
+                )
+                if not already_exists:
+                    registry["services"][f"{core}_{node_id}"] = {
+                        "name": core,
+                        "category": "docker containers",
+                        "hosts": [node_id],
+                        "status": "OFFLINE",
+                        "last_heartbeat": "",
+                        "registered_at": now,
+                        "metadata": {"discovered_via": "core_enforcement"}
+                    }
+        registry["updated"] = now
+    print(f"🛡️  Core services enforced for {len(nodes)} nodes")
 
 
 # ── HEARTBEAT REAPER ────────────────────────────────────────────────────────
@@ -2061,6 +2143,9 @@ def main():
     load_seed()
     persist_registry()
 
+    # Forward logs to beast-telemetry / live-logger
+    threading.Thread(target=_log_forwarder, daemon=True).start()
+
     # Start the heartbeat reaper in the background
     reaper = threading.Thread(target=heartbeat_reaper, daemon=True)
     reaper.start()
@@ -2100,6 +2185,7 @@ def main():
     # Critical service watchdog — immediately restarts apache, lokey, locator if OFFLINE
     threading.Thread(target=critical_service_watchdog, daemon=True).start()
 
+    beast_log("🔦 LOCATOR online — registry loaded, telemetry forwarder active")
     app.run(host="0.0.0.0", port=PORT, threaded=True)
 
 
