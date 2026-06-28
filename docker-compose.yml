@@ -5,6 +5,7 @@ services:
     restart: always
     volumes:
       - ./registry_data:/app/data
+      - ./templates:/app/templates
       - /home/swoopg111/.ssh:/root/.ssh:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:

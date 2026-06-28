@@ -64,20 +64,6 @@
             box-shadow: inset 0 0 10px rgba(0,0,0,0.5);
         }
 
-        .yaml-item {
-            padding: 8px 14px;
-            font-size: 12px;
-            color: var(--neon-green);
-            cursor: pointer;
-            border-bottom: 1px solid var(--neon-green-dim);
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            letter-spacing: 1px;
-        }
-        .yaml-item:hover { background: rgba(0,255,70,0.08); }
-        .yaml-item.active { background: rgba(0,255,70,0.18); font-weight: bold; }
-
         /* add docker container button */
 #add-docker-btn {
     z-index: 9999 !important;
@@ -180,10 +166,6 @@
         .grid-green { border: 1px solid #00ff00; box-shadow: 0 0 20px rgba(0, 255, 0, 0.2); color: #00ff00; }
         .grid-purple { border: 1px solid #a200ff; box-shadow: 0 0 20px rgba(162, 0, 255, 0.2); color: #a200ff; margin-top: 40px;}
         .grid-blue { border: 1px solid #00f0ff; box-shadow: 0 0 20px rgba(0, 240, 255, 0.2); color: #00f0ff; margin-top: 40px;}
-        .grid-amber { border: 1px solid #ff8800; box-shadow: 0 0 20px rgba(255, 136, 0, 0.2); color: #ff8800; margin-top: 40px;}
-        .grid-amber h1.grid-title { color: #ff8800; border-bottom: 2px solid #ff8800; text-shadow: 0 0 10px #ff8800; }
-        .grid-amber th { color: #ff8800; border-bottom: 1px solid rgba(255,136,0,0.3); }
-        .grid-amber td { border-bottom: 1px solid rgba(255,136,0,0.1); }
 
         h1.grid-title {
             text-align: center;
@@ -253,56 +235,6 @@
             box-shadow: 0 0 8px var(--danger);
             animation: pulse 1s infinite;
         }
-        .status-toggle-btn {
-            background: transparent;
-            border: 1px solid currentColor;
-            border-radius: 4px;
-            padding: 4px 10px;
-            cursor: pointer;
-            font-family: inherit;
-            font-size: 12px;
-            letter-spacing: 1px;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            transition: background 0.2s;
-        }
-        .status-toggle-btn:hover { background: rgba(255,255,255,0.1); }
-        .status-toggle-btn.is-online { color: var(--neon-green); }
-        .status-toggle-btn.is-offline { color: var(--danger); }
-        /* Toggle confirmation modal */
-        #toggle-modal {
-            display: none;
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.85);
-            z-index: 20000;
-            justify-content: center;
-            align-items: center;
-        }
-        #toggle-modal .modal-box {
-            background: #001030;
-            border: 2px solid var(--accent);
-            border-radius: 10px;
-            padding: 30px 40px;
-            min-width: 340px;
-            box-shadow: 0 0 40px var(--accent);
-            text-align: center;
-        }
-        #toggle-modal h3 { color: var(--accent); margin-top: 0; letter-spacing: 2px; }
-        #toggle-modal p  { color: #ccc; font-size: 14px; margin-bottom: 24px; }
-        .modal-btn-row { display: flex; gap: 16px; justify-content: center; }
-        .modal-btn-row button {
-            padding: 10px 28px;
-            border: none;
-            border-radius: 4px;
-            font-family: inherit;
-            font-size: 14px;
-            font-weight: bold;
-            cursor: pointer;
-            letter-spacing: 1px;
-        }
-        #toggle-confirm-btn { background: var(--accent); color: #000; }
-        #toggle-cancel-btn  { background: #333; color: #fff; }
         .node-badge {
             background: var(--neon-green-dim);
             padding: 4px 8px;
@@ -341,7 +273,6 @@
         <button class="toggle-btn active" onclick="switchView('map')">Mesh Map</button>
         <button class="toggle-btn" onclick="switchView('grid')">Tactical Grid</button>
         <button class="toggle-btn" onclick="switchView('3js')">3D Mesh</button>
-        <button class="toggle-btn" onclick="switchView('yamls')">YAMLs</button>
     </div>
 
     <!-- Button  -->
@@ -406,98 +337,6 @@
                 <tbody id="tbody-websites"></tbody>
             </table>
         </div>
-
-        <!-- AMBER RECTANGLE: VIRTUAL MACHINES -->
-        <div class="grid-container grid-amber">
-            <h1 class="grid-title" style="color: #ff8800; border-color: #ff8800; text-shadow: 0 0 10px #ff8800;">Virtual Machines</h1>
-            <div class="status-header">
-                <div>ACTIVE VMs: <span id="count-vms" style="color: #ff8800;">0</span></div>
-                <div>HYPERVISOR: <span class="status-dot online" style="background-color: #ff8800; box-shadow: 0 0 8px #ff8800;"></span> VirtualBox 7.0</div>
-            </div>
-            <table>
-                <thead><tr><th style="color: #ff8800;">VM Name</th><th style="color: #ff8800;">Node / Host</th><th style="color: #ff8800;">Internal URL</th><th style="color: #ff8800;">Public URL</th><th style="color: #ff8800;">Status</th><th style="color: #ff8800;">Metadata</th><th style="color: #ff8800;">Last Seen</th></tr></thead>
-                <tbody id="tbody-vms"></tbody>
-            </table>
-        </div>
-
-        <!-- CLOUD PLATFORMS SECTION -->
-        <div class="grid-container" style="border: 1px solid #00ccff; box-shadow: 0 0 20px rgba(0, 204, 255, 0.2); color: #00ccff; margin-top: 40px;">
-            <h1 class="grid-title" style="color: #00ccff; border-bottom: 2px solid #00ccff; text-shadow: 0 0 10px #00ccff;">Cloud &amp; Native Platforms</h1>
-            <div class="status-header">
-                <div style="color: #00ccff;">EXTERNAL INFRASTRUCTURE: <span style="color:#00ccff;">Active</span></div>
-                <div>STATUS: <span class="status-dot online" style="background-color: #00ccff; box-shadow: 0 0 8px #00ccff;"></span> MONITORED</div>
-            </div>
-            <div class="table-scroll">
-            <table>
-                <thead><tr>
-                    <th style="color:#00ccff">Platform</th>
-                    <th style="color:#00ccff">Host / Node</th>
-                    <th style="color:#00ccff">Software / Services</th>
-                    <th style="color:#00ccff">Web URL</th>
-                    <th style="color:#00ccff">Dashboard</th>
-                    <th style="color:#00ccff">Notes</th>
-                </tr></thead>
-                <tbody>
-                  <tr>
-                    <td style="color:#00ccff; font-weight:bold">Netlify</td>
-                    <td>cloud / CDN</td>
-                    <td>Static site hosting, JAMstack, serverless functions</td>
-                    <td>—</td>
-                    <td><a href="https://app.netlify.com" target="_blank" style="color:#00ccff">app.netlify.com</a></td>
-                    <td>Static frontends, deploy previews</td>
-                  </tr>
-                  <tr>
-                    <td style="color:#00ccff; font-weight:bold">Vercel</td>
-                    <td>cloud / CDN</td>
-                    <td>Next.js hosting, edge functions, static deployments</td>
-                    <td>—</td>
-                    <td><a href="https://vercel.com/dashboard" target="_blank" style="color:#00ccff">vercel.com/dashboard</a></td>
-                    <td>Next.js apps, serverless</td>
-                  </tr>
-                  <tr>
-                    <td style="color:#00ccff; font-weight:bold">Render</td>
-                    <td>cloud / PaaS</td>
-                    <td>Container hosting, web services, cron jobs, databases</td>
-                    <td>—</td>
-                    <td><a href="https://dashboard.render.com" target="_blank" style="color:#00ccff">dashboard.render.com</a></td>
-                    <td>Containerized backend services</td>
-                  </tr>
-                  <tr>
-                    <td style="color:#00ccff; font-weight:bold">Fly.io</td>
-                    <td>cloud / PaaS</td>
-                    <td>Container deployments, global edge, Postgres</td>
-                    <td>—</td>
-                    <td><a href="https://fly.io/dashboard" target="_blank" style="color:#00ccff">fly.io/dashboard</a></td>
-                    <td>Edge container hosting</td>
-                  </tr>
-                  <tr style="border-top: 1px solid rgba(0,204,255,0.3);">
-                    <td style="color:#00ccff; font-weight:bold">Unit 3 — Mac mini</td>
-                    <td>unit3 / LAN 10.0.0.196</td>
-                    <td>Keycloak 24.0.5, PostgreSQL 16, MCP Tools (7 servers)</td>
-                    <td><a href="https://auth.theofficialblacksheepco.com" target="_blank" style="color:#00ccff">auth.*</a></td>
-                    <td>SSH: unit3 | ssh unit3</td>
-                    <td>macOS Monterey 8GB RAM — native (no Docker)</td>
-                  </tr>
-                  <tr>
-                    <td style="color:#00ccff; font-weight:bold">Unit 3 — Keycloak</td>
-                    <td>unit3 :8180</td>
-                    <td>Keycloak 24.0.5 (Quarkus) + PostgreSQL 16 backend</td>
-                    <td><a href="https://auth.theofficialblacksheepco.com" target="_blank" style="color:#00ccff">auth.theofficialblacksheepco.com</a></td>
-                    <td><a href="https://auth.theofficialblacksheepco.com/admin" target="_blank" style="color:#00ccff">Keycloak Admin</a></td>
-                    <td>Migrated from unit1 Docker 2026-06-25</td>
-                  </tr>
-                  <tr>
-                    <td style="color:#00ccff; font-weight:bold">Unit 3 — MCP Tools</td>
-                    <td>unit3 :8001–8009</td>
-                    <td>filesystem, github, brave-search, puppeteer, memory, sequential-thinking, slack</td>
-                    <td>—</td>
-                    <td>SSE via mcp-gateway → 10.0.0.196:800X</td>
-                    <td>Used by Claude Code, The Beast, Gemini</td>
-                  </tr>
-                </tbody>
-            </table>
-            </div>
-        </div>
     </div>
 
     <!-- 3D MESH VIEW -->
@@ -505,38 +344,22 @@
         <iframe src="/3d-mesh" style="width: 100%; height: 100%; border: none;"></iframe>
     </div>
 
-    <!-- YAMLS VIEW -->
-    <div id="view-yamls" class="view-container" style="background:var(--grid-bg); background-image:linear-gradient(var(--neon-green-dim) 1px,transparent 1px),linear-gradient(90deg,var(--neon-green-dim) 1px,transparent 1px); background-size:30px 30px; overflow:hidden; display:flex; flex-direction:column;">
-        <div style="padding:16px 30px 8px; border-bottom:1px solid var(--neon-green); flex-shrink:0; display:flex; align-items:center; gap:20px;">
-            <h2 style="margin:0; color:var(--neon-green); text-transform:uppercase; letter-spacing:4px; font-size:16px; text-shadow:0 0 10px var(--neon-green);">Docker Compose YAMLs</h2>
-            <span id="yaml-save-status" style="font-size:12px; color:#555;"></span>
-        </div>
-        <div style="display:flex; flex:1; overflow:hidden;">
-            <!-- File list -->
-            <div id="yaml-list" style="width:260px; flex-shrink:0; border-right:1px solid var(--neon-green); overflow-y:auto; padding:10px 0;"></div>
-            <!-- Editor -->
-            <div style="flex:1; display:flex; flex-direction:column; overflow:hidden;">
-                <div style="padding:8px 16px; border-bottom:1px solid rgba(0,255,0,0.2); display:flex; align-items:center; justify-content:space-between; flex-shrink:0;">
-                    <span id="yaml-editor-path" style="font-size:11px; color:#555; font-family:monospace;"></span>
-                    <button id="yaml-save-btn" onclick="saveYaml()" style="display:none; background:var(--neon-green); color:#000; border:none; padding:6px 20px; font-family:inherit; font-size:12px; font-weight:bold; letter-spacing:2px; cursor:pointer; border-radius:3px;">SAVE</button>
-                </div>
-                <textarea id="yaml-editor" spellcheck="false" style="flex:1; background:#000; color:var(--neon-green); font-family:'Courier New',monospace; font-size:13px; border:none; outline:none; resize:none; padding:16px; line-height:1.6; tab-size:2;" placeholder="Select a file from the list..."></textarea>
-            </div>
-        </div>
-    </div>
-
     <script>
         // ── UI TOGGLE LOGIC ──
         function switchView(viewName) {
             document.querySelectorAll('.toggle-btn').forEach(btn => btn.classList.remove('active'));
             document.querySelectorAll('.view-container').forEach(vc => vc.classList.remove('active'));
-
-            const viewMap = { map: [1, 'view-map'], grid: [2, 'view-grid'], '3js': [3, 'view-3js'], yamls: [4, 'view-yamls'] };
-            const [btnIdx, viewId] = viewMap[viewName] || [1, 'view-map'];
-            document.querySelector(`#ui-toggle button:nth-child(${btnIdx})`).classList.add('active');
-            document.getElementById(viewId).classList.add('active');
-
-            if (viewName === 'yamls') loadYamlList();
+            
+            if (viewName === 'map') {
+                document.querySelector('#ui-toggle button:nth-child(1)').classList.add('active');
+                document.getElementById('view-map').classList.add('active');
+            } else if (viewName === 'grid') {
+                document.querySelector('#ui-toggle button:nth-child(2)').classList.add('active');
+                document.getElementById('view-grid').classList.add('active');
+            } else if (viewName === '3js') {
+                document.querySelector('#ui-toggle button:nth-child(3)').classList.add('active');
+                document.getElementById('view-3js').classList.add('active');
+            }
         }
 
         function notify(msg, type='info') {
@@ -546,83 +369,7 @@
             n.style.background = type === 'error' ? 'var(--danger)' : 'rgba(0,255,255,0.9)';
             setTimeout(() => n.style.display = 'none', 5000);
         }
-
-        // ── YAMLS FEATURE ──────────────────────────────────────────────
-        let _yamlCurrentPath = null;
-
-        async function loadYamlList() {
-            const list = document.getElementById('yaml-list');
-            list.innerHTML = '<div style="color:var(--neon-green);padding:12px;opacity:0.6;">Loading...</div>';
-            try {
-                const res = await fetch('/api/yamls');
-                const data = await res.json();
-                list.innerHTML = '';
-                if (!data.length) {
-                    list.innerHTML = '<div style="color:var(--neon-green);padding:12px;opacity:0.5;">No compose files found.</div>';
-                    return;
-                }
-                data.forEach(item => {
-                    const div = document.createElement('div');
-                    div.className = 'yaml-item';
-                    div.textContent = item.label;
-                    div.title = item.path;
-                    div.onclick = () => selectYaml(item.path, item.label);
-                    list.appendChild(div);
-                });
-            } catch(e) {
-                list.innerHTML = '<div style="color:var(--danger);padding:12px;">Error loading list.</div>';
-            }
-        }
-
-        async function selectYaml(path, label) {
-            document.querySelectorAll('.yaml-item').forEach(el => el.classList.remove('active'));
-            const clicked = [...document.querySelectorAll('.yaml-item')].find(el => el.title === path);
-            if (clicked) clicked.classList.add('active');
-
-            _yamlCurrentPath = path;
-            document.getElementById('yaml-path-display').textContent = path;
-            document.getElementById('yaml-editor').value = 'Loading...';
-            document.getElementById('yaml-save-btn').style.display = 'none';
-
-            try {
-                const res = await fetch('/api/yaml?path=' + encodeURIComponent(path));
-                const data = await res.json();
-                document.getElementById('yaml-editor').value = data.content;
-                document.getElementById('yaml-save-btn').style.display = 'inline-block';
-            } catch(e) {
-                document.getElementById('yaml-editor').value = 'Error loading file.';
-            }
-        }
-
-        async function saveYaml() {
-            if (!_yamlCurrentPath) return;
-            const content = document.getElementById('yaml-editor').value;
-            try {
-                const res = await fetch('/api/yaml?path=' + encodeURIComponent(_yamlCurrentPath), {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content })
-                });
-                const data = await res.json();
-                if (data.ok) notify('Saved: ' + _yamlCurrentPath, 'info');
-                else notify('Save failed: ' + (data.error || 'unknown'), 'error');
-            } catch(e) {
-                notify('Save error: ' + e.message, 'error');
-            }
-        }
     </script>
-
-    <!-- TOGGLE CONFIRMATION MODAL -->
-    <div id="toggle-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:20000; justify-content:center; align-items:center;">
-        <div class="modal-box">
-            <h3 id="toggle-modal-title">CONFIRM ACTION</h3>
-            <p id="toggle-modal-body">Are you sure?</p>
-            <div class="modal-btn-row">
-                <button id="toggle-cancel-btn" onclick="closeToggleModal()">Cancel</button>
-                <button id="toggle-confirm-btn" onclick="confirmToggle()">Confirm</button>
-            </div>
-        </div>
-    </div>
 
     <!-- DEPLOYMENT MODAL -->
     <div id="deploy-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:10000; justify-content:center; align-items:center;">
@@ -747,24 +494,20 @@
             const tbodyDocker = document.getElementById('tbody-docker');
             const tbodyWebsites = document.getElementById('tbody-websites');
             const tbodyDevices = document.getElementById('tbody-devices');
-            const tbodyVMs = document.getElementById('tbody-vms');
-
+            
             tbodyDocker.innerHTML = '';
             tbodyWebsites.innerHTML = '';
             tbodyDevices.innerHTML = '';
-            tbodyVMs.innerHTML = '';
-
+            
             const services = Object.values(registryData.services || {});
             const nodes = Object.entries(registryData.nodes || {}).map(([id, data]) => ({...data, id, category: 'devices'}));
-
+            
             const dockerList = services.filter(s => s.category === 'docker containers');
             const websiteList = services.filter(s => s.category === 'websites');
-            const vmList = services.filter(s => s.category === 'virtual machines');
-
+            
             document.getElementById('count-devices').innerText = nodes.length;
             document.getElementById('count-docker').innerText = dockerList.length;
             document.getElementById('count-websites').innerText = websiteList.length;
-            document.getElementById('count-vms').innerText = vmList.filter(v => v.status === 'ONLINE').length + '/' + vmList.length;
 
             function createMetaBadges(metadata) {
                 const cell = document.createElement('td');
@@ -783,21 +526,16 @@
 
             function createStatsBadges(item) {
                 const cell = document.createElement('td');
-                if (!item.metadata) return cell;
+                if (item.name !== 'lokey-client' || !item.metadata) return cell;
+                
                 const meta = item.metadata;
                 const stats = [];
-
-                if (item.name === 'lokey-client') {
-                    if (meta.cpu_usage_percent !== undefined) stats.push({l: 'CPU',  v: meta.cpu_usage_percent + '%', c: '#00ff00'});
-                    if (meta.mem_percent       !== undefined) stats.push({l: 'RAM',  v: meta.mem_percent       + '%', c: '#00f0ff'});
-                    if (meta.cpu_temp_c)                     stats.push({l: 'TEMP', v: meta.cpu_temp_c        + '°C', c: '#ff8800'});
-                    if (meta.disk_percent      !== undefined) stats.push({l: 'DISK', v: meta.disk_percent      + '%', c: '#a200ff'});
-                } else {
-                    if (meta.mem_usage_mb  != null) stats.push({l: 'MEM',  v: meta.mem_usage_mb  + ' MB', c: '#00f0ff'});
-                    if (meta.mem_percent   != null) stats.push({l: 'MEM%', v: meta.mem_percent    + '%',   c: '#00f0ff'});
-                    if (meta.mem_limit_mb  != null) stats.push({l: 'LIM',  v: meta.mem_limit_mb  + ' MB', c: '#007788'});
-                }
-
+                
+                if (meta.cpu_usage_percent !== undefined) stats.push({l: 'CPU', v: meta.cpu_usage_percent + '%', c: '#00ff00'});
+                if (meta.mem_percent !== undefined) stats.push({l: 'RAM', v: meta.mem_percent + '%', c: '#00f0ff'});
+                if (meta.cpu_temp_c) stats.push({l: 'TEMP', v: meta.cpu_temp_c + '°C', c: '#ff8800'});
+                if (meta.disk_percent !== undefined) stats.push({l: 'DISK', v: meta.disk_percent + '%', c: '#a200ff'});
+                
                 stats.forEach(s => {
                     const badge = document.createElement('span');
                     badge.className = 'node-badge';
@@ -832,9 +570,7 @@
                 const tr = document.createElement('tr');
                 const hostList = item.hosts || [item.host || 'unknown'];
                 const hostBadges = hostList.map(h => `<span class="node-badge">${h}</span>`).join('');
-                const isOnline = item.status === 'ONLINE';
-                const safeName = (item.name || '').replace(/'/g, "\\'");
-
+                
                 tr.innerHTML = `
                     <td style="font-weight:bold">${item.name}</td>
                     <td>${hostBadges}</td>
@@ -842,20 +578,16 @@
                     <td>${item.internal || '-'}</td>
                     <td>${item.url ? `<a href="${item.url}" target="_blank">${item.url}</a>` : '-'}</td>
                 `;
-
+                
                 // Stats Column
                 tr.appendChild(createStatsBadges(item));
-
-                // Clickable status toggle button
-                const statusTd = document.createElement('td');
-                statusTd.innerHTML = `
-                    <button class="status-toggle-btn ${isOnline ? 'is-online' : 'is-offline'}"
-                            onclick="openToggleModal('${safeName}', '${isOnline ? 'ONLINE' : 'OFFLINE'}')">
-                        <span class="status-dot ${isOnline ? 'online' : 'offline'}"></span>
-                        ${isOnline ? 'Shutdown' : 'Deploy'}
-                    </button>`;
-                tr.appendChild(statusTd);
-
+                
+                tr.innerHTML += `
+                    <td>
+                        <span class="status-dot ${item.status === 'ONLINE' ? 'online' : 'offline'}"></span>
+                        ${item.status}
+                    </td>
+                `;
                 tr.appendChild(createMetaBadges(item.metadata));
                 tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never'}</td>`;
                 tbodyDocker.appendChild(tr);
@@ -879,28 +611,6 @@
                 tr.appendChild(createMetaBadges(item.metadata));
                 tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never'}</td>`;
                 tbodyWebsites.appendChild(tr);
-            });
-
-            // --- VIRTUAL MACHINES TABLE ---
-            vmList.forEach(item => {
-                const tr = document.createElement('tr');
-                const hostList = item.hosts || [item.host || 'unknown'];
-                const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:#ff8800;color:#ff8800">${h}</span>`).join('');
-                const isOnline = item.status === 'ONLINE';
-
-                tr.innerHTML = `
-                    <td style="font-weight:bold;color:#ff8800">${item.name}</td>
-                    <td>${hostBadges}</td>
-                    <td>${item.internal ? `<a href="${item.internal}" target="_blank" style="color:#ff8800">${item.internal}</a>` : '-'}</td>
-                    <td>${item.url ? `<a href="${item.url}" target="_blank" style="color:#ff8800">${item.url}</a>` : '-'}</td>
-                    <td>
-                        <span class="status-dot ${isOnline ? 'online' : 'offline'}" style="${isOnline ? 'background:#ff8800;box-shadow:0 0 8px #ff8800' : ''}"></span>
-                        <span style="color:${isOnline ? '#ff8800' : '#666'}">${item.status}</span>
-                    </td>
-                `;
-                tr.appendChild(createMetaBadges(item.metadata));
-                tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never'}</td>`;
-                tbodyVMs.appendChild(tr);
             });
         }
 
@@ -1101,59 +811,6 @@
         // Auto-refresh data every 10 seconds
         loadRegistryData();
         setInterval(loadRegistryData, 10000);
-
-        // ── CONTAINER TOGGLE LOGIC ──
-        let _togglePending = { name: null, action: null };
-
-        function openToggleModal(containerName, currentStatus) {
-            _togglePending.name   = containerName;
-            _togglePending.action = currentStatus === 'ONLINE' ? 'stop' : 'start';
-            const targetStatus    = currentStatus === 'ONLINE' ? 'OFFLINE' : 'ONLINE';
-
-            document.getElementById('toggle-modal-title').innerText =
-                `TOGGLE ${containerName.toUpperCase()}`;
-            document.getElementById('toggle-modal-body').innerHTML =
-                `Are you sure you want to set <strong>${containerName}</strong> → <strong>${targetStatus}</strong>?`;
-
-            document.getElementById('toggle-confirm-btn').style.background =
-                _togglePending.action === 'stop' ? 'var(--danger)' : 'var(--accent)';
-
-            document.getElementById('toggle-modal').style.display = 'flex';
-        }
-
-        function closeToggleModal() {
-            document.getElementById('toggle-modal').style.display = 'none';
-            _togglePending = { name: null, action: null };
-        }
-
-        function confirmToggle() {
-            const { name, action } = _togglePending;
-            if (!name || !action) return;
-
-            closeToggleModal();
-            notify(`${action === 'start' ? 'Starting' : 'Stopping'} ${name}…`);
-
-            fetch('/api/container/toggle', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, action })
-            })
-            .then(r => r.json())
-            .then(data => {
-                if (data.error) {
-                    notify(`Error: ${data.error}`, 'error');
-                } else {
-                    notify(`${name} is now ${data.status || (action === 'start' ? 'ONLINE' : 'OFFLINE')}`);
-                    loadRegistryData();
-                }
-            })
-            .catch(err => notify(`Request failed: ${err}`, 'error'));
-        }
-
-        // Close modal on backdrop click
-        document.getElementById('toggle-modal').addEventListener('click', function(e) {
-            if (e.target === this) closeToggleModal();
-        });
 
     </script>
 </body>

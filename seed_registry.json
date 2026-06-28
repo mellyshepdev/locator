@@ -65,6 +65,66 @@
       "host": "unit1",
       "port": 80,
       "type": "container"
+    },
+    "netlify": {
+      "url": "https://app.netlify.com",
+      "host": "external",
+      "type": "external",
+      "tags": [
+        "hosting",
+        "static",
+        "cdn"
+      ],
+      "metadata": {
+        "provider": "Netlify",
+        "description": "Static site & JAMstack hosting \u2014 dashboard at app.netlify.com",
+        "health_url": "https://app.netlify.com"
+      }
+    },
+    "vercel": {
+      "url": "https://vercel.com/dashboard",
+      "host": "external",
+      "type": "external",
+      "tags": [
+        "hosting",
+        "static",
+        "nextjs"
+      ],
+      "metadata": {
+        "provider": "Vercel",
+        "description": "Next.js & static site hosting \u2014 dashboard at vercel.com",
+        "health_url": "https://vercel.com"
+      }
+    },
+    "render": {
+      "url": "https://dashboard.render.com",
+      "host": "external",
+      "type": "external",
+      "tags": [
+        "hosting",
+        "containers",
+        "paas"
+      ],
+      "metadata": {
+        "provider": "Render",
+        "description": "Container & web service hosting \u2014 dashboard at dashboard.render.com",
+        "health_url": "https://dashboard.render.com"
+      }
+    },
+    "fly-io": {
+      "url": "https://fly.io/dashboard",
+      "host": "external",
+      "type": "external",
+      "tags": [
+        "hosting",
+        "containers",
+        "paas"
+      ],
+      "metadata": {
+        "provider": "Fly.io",
+        "description": "Container app hosting \u2014 dashboard at fly.io/dashboard",
+        "health_url": "https://fly.io"
+      }
     }
   },
   "nodes": {
