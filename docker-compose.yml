@@ -2,14 +2,14 @@ services:
   locator:
     build: .
     container_name: locator
-    restart: always
+    restart: "no"
     volumes:
       - ./registry_data:/app/data
       - ./templates:/app/templates
       - /home/swoopg111/.ssh:/root/.ssh:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      - UNIT_NAME=unit4
+      - UNIT_NAME=unit1
       - COMPOSE_DIR=/app/data/compose
       - BALANCE_HIGH=65
       - BALANCE_DIFF=5
@@ -19,7 +19,7 @@ services:
       - GIT_AUTO_PUSH=true
       - GIT_REMOTE=${GIT_REMOTE:-}
       - PYTHONUNBUFFERED=1
-      - LOCATOR_IS_PRIMARY=true
+      - LOCATOR_IS_PRIMARY=false
       - SELF_CONTAINER_NAME=locator
       - LOCATOR_CANONICAL_URL=https://locator.theofficialblacksheepco.online
     labels:
