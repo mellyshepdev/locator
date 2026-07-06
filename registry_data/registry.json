@@ -575,7 +575,7 @@
       "type": "container",
       "name": "ollama",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:44:28.450935+00:00"
     },
     "openvpn": {
@@ -586,7 +586,7 @@
       "port": null,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:44:28.450935+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -604,7 +604,7 @@
       "port": 53,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:44:28.450935+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -622,7 +622,7 @@
       "port": 25,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:44:28.450935+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -732,7 +732,7 @@
       "port": null,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:50:31.583119+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -750,7 +750,7 @@
       "port": null,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:50:31.586106+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -768,7 +768,7 @@
       "port": null,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:50:31.589189+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -786,7 +786,7 @@
       "port": null,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:50:31.592259+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -804,7 +804,7 @@
       "port": null,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:50:31.595577+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -822,7 +822,7 @@
       "port": null,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:50:31.598620+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -872,8 +872,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "status": "OFFLINE",
+      "last_heartbeat": "2026-07-06T02:00:47.568166+00:00",
       "registered_at": "2026-06-04T08:50:31.608441+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -906,7 +906,7 @@
       "port": null,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:50:31.614837+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -939,7 +939,7 @@
       "port": null,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:50:31.621585+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -957,7 +957,7 @@
       "port": null,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:50:31.624773+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -1074,7 +1074,7 @@
       "port": null,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:50:31.655192+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -1092,7 +1092,7 @@
       "port": null,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:50:31.662628+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -1110,7 +1110,7 @@
       "port": null,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:50:31.666050+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -1191,7 +1191,7 @@
       "port": null,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:50:31.692310+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -1275,7 +1275,7 @@
       "port": null,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:50:31.717725+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -1377,7 +1377,7 @@
       "port": null,
       "type": "container",
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-04T08:50:31.796802+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -1791,7 +1791,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-05T03:14:59.615037+00:00",
       "type": "container",
       "metadata": {
@@ -1807,7 +1807,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-05T03:15:59.935422+00:00",
       "type": "container",
       "metadata": {
@@ -1855,7 +1855,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-05T05:08:04.495047+00:00",
       "type": "container",
       "metadata": {
@@ -2167,7 +2167,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-08T06:48:45.725210+00:00",
       "type": "container",
       "metadata": {
@@ -2183,7 +2183,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-08T06:48:45.725210+00:00",
       "type": "container",
       "metadata": {
@@ -2199,7 +2199,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-08T06:48:45.725210+00:00",
       "type": "container",
       "metadata": {
@@ -2215,7 +2215,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-08T06:48:45.725210+00:00",
       "type": "container",
       "metadata": {
@@ -2263,7 +2263,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-11T12:52:00.989580+00:00",
       "type": "container",
       "metadata": {
@@ -2279,7 +2279,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-21T18:23:59.607094+00:00",
       "type": "container",
       "metadata": {
@@ -2295,7 +2295,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-21T18:23:59.607094+00:00",
       "type": "container",
       "metadata": {
@@ -2327,7 +2327,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-24T05:38:08.404768+00:00",
       "type": "container",
       "metadata": {
@@ -2737,7 +2737,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-06-26T22:48:12.850528+00:00",
       "type": "container",
       "metadata": {
@@ -2753,7 +2753,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-07-05T21:17:45.791258+00:00",
       "type": "container",
       "metadata": {
@@ -2769,7 +2769,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-07-05T21:17:45.791258+00:00",
       "type": "container",
       "metadata": {
@@ -2785,7 +2785,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-07-05T21:17:45.791258+00:00",
       "type": "container",
       "metadata": {
@@ -2801,7 +2801,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-07-05T21:17:45.791258+00:00",
       "type": "container",
       "metadata": {
@@ -2817,7 +2817,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-07-05T21:17:45.791258+00:00",
       "type": "container",
       "metadata": {
@@ -2833,7 +2833,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-07-05T21:17:45.791258+00:00",
       "type": "container",
       "metadata": {
@@ -2849,7 +2849,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-07-05T21:17:45.791258+00:00",
       "type": "container",
       "metadata": {
@@ -2865,7 +2865,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-07-05T21:17:45.791258+00:00",
       "type": "container",
       "metadata": {
@@ -2881,7 +2881,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-07-05T21:17:45.791258+00:00",
       "type": "container",
       "metadata": {
@@ -2897,7 +2897,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-07-05T21:17:45.791258+00:00",
       "type": "container",
       "metadata": {
@@ -2913,7 +2913,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-07-05T21:17:45.791258+00:00",
       "type": "container",
       "metadata": {
@@ -2929,7 +2929,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-07-05T21:17:45.791258+00:00",
       "type": "container",
       "metadata": {
@@ -2945,7 +2945,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-07-05T21:17:45.791258+00:00",
       "type": "container",
       "metadata": {
@@ -2961,7 +2961,7 @@
         "unit1"
       ],
       "status": "ONLINE",
-      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "last_heartbeat": "2026-07-06T02:01:47.838636+00:00",
       "registered_at": "2026-07-05T21:17:45.791258+00:00",
       "type": "container",
       "metadata": {
