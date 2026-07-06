@@ -574,8 +574,8 @@
       "port": 11434,
       "type": "container",
       "name": "ollama",
-      "status": "PENDING",
-      "last_heartbeat": "",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:44:28.450935+00:00"
     },
     "openvpn": {
@@ -585,8 +585,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:44:28.450935+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -603,8 +603,8 @@
       "host": "unit1",
       "port": 53,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-06T14:55:43.767888+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:44:28.450935+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -621,8 +621,8 @@
       "host": "unit1",
       "port": 25,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:44:28.450935+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -731,8 +731,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:50:31.583119+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -749,8 +749,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-25T18:31:55.534362+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:50:31.586106+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -767,8 +767,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-25T18:31:55.534362+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:50:31.589189+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -785,8 +785,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-25T18:31:55.534362+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:50:31.592259+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -803,8 +803,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-25T18:31:55.534362+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:50:31.595577+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -821,8 +821,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-25T18:31:55.534362+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:50:31.598620+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -872,8 +872,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:54:21.740248+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:50:31.608441+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -905,8 +905,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:50:31.614837+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -938,8 +938,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:50:31.621585+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -956,8 +956,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:50:31.624773+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -1073,8 +1073,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:50:31.655192+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -1091,8 +1091,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:50:31.662628+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -1109,8 +1109,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:50:31.666050+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -1190,8 +1190,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:50:31.692310+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -1274,8 +1274,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:50:31.717725+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -1376,8 +1376,8 @@
       "host": "unit1",
       "port": null,
       "type": "container",
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-04T08:50:31.796802+00:00",
       "metadata": {
         "discovered_via": "lokey",
@@ -1790,8 +1790,8 @@
       "hosts": [
         "unit1"
       ],
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-25T18:31:55.534362+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-05T03:14:59.615037+00:00",
       "type": "container",
       "metadata": {
@@ -1806,8 +1806,8 @@
       "hosts": [
         "unit1"
       ],
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-25T18:31:55.534362+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-05T03:15:59.935422+00:00",
       "type": "container",
       "metadata": {
@@ -1854,8 +1854,8 @@
       "hosts": [
         "unit1"
       ],
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-05T05:08:04.495047+00:00",
       "type": "container",
       "metadata": {
@@ -2166,8 +2166,8 @@
       "hosts": [
         "unit1"
       ],
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-08T06:48:45.725210+00:00",
       "type": "container",
       "metadata": {
@@ -2182,8 +2182,8 @@
       "hosts": [
         "unit1"
       ],
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-08T06:48:45.725210+00:00",
       "type": "container",
       "metadata": {
@@ -2198,8 +2198,8 @@
       "hosts": [
         "unit1"
       ],
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-08T06:48:45.725210+00:00",
       "type": "container",
       "metadata": {
@@ -2214,8 +2214,8 @@
       "hosts": [
         "unit1"
       ],
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-08T06:48:45.725210+00:00",
       "type": "container",
       "metadata": {
@@ -2262,8 +2262,8 @@
       "hosts": [
         "unit1"
       ],
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-11T12:52:00.989580+00:00",
       "type": "container",
       "metadata": {
@@ -2278,8 +2278,8 @@
       "hosts": [
         "unit1"
       ],
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-21T18:23:59.607094+00:00",
       "type": "container",
       "metadata": {
@@ -2294,8 +2294,8 @@
       "hosts": [
         "unit1"
       ],
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-21T18:23:59.607094+00:00",
       "type": "container",
       "metadata": {
@@ -2326,8 +2326,8 @@
       "hosts": [
         "unit1"
       ],
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-24T05:38:08.404768+00:00",
       "type": "container",
       "metadata": {
@@ -2736,12 +2736,236 @@
       "hosts": [
         "unit1"
       ],
-      "status": "OFFLINE",
-      "last_heartbeat": "2026-06-26T22:55:45.616828+00:00",
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
       "registered_at": "2026-06-26T22:48:12.850528+00:00",
       "type": "container",
       "metadata": {
         "image": "apache2-certbot:latest",
+        "discovered_via": "local_docker"
+      }
+    },
+    "battle-stages-frontend": {
+      "name": "battle-stages-frontend",
+      "category": "docker containers",
+      "host": "unit1",
+      "hosts": [
+        "unit1"
+      ],
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "registered_at": "2026-07-05T21:17:45.791258+00:00",
+      "type": "container",
+      "metadata": {
+        "image": "httpd:2.4",
+        "discovered_via": "local_docker"
+      }
+    },
+    "battle-stages-server": {
+      "name": "battle-stages-server",
+      "category": "docker containers",
+      "host": "unit1",
+      "hosts": [
+        "unit1"
+      ],
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "registered_at": "2026-07-05T21:17:45.791258+00:00",
+      "type": "container",
+      "metadata": {
+        "image": "battle-stages-server:latest",
+        "discovered_via": "local_docker"
+      }
+    },
+    "mcp-firecrawl": {
+      "name": "mcp-firecrawl",
+      "category": "docker containers",
+      "host": "unit1",
+      "hosts": [
+        "unit1"
+      ],
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "registered_at": "2026-07-05T21:17:45.791258+00:00",
+      "type": "container",
+      "metadata": {
+        "image": "node:22-alpine",
+        "discovered_via": "local_docker"
+      }
+    },
+    "mcp-lore-keeper": {
+      "name": "mcp-lore-keeper",
+      "category": "docker containers",
+      "host": "unit1",
+      "hosts": [
+        "unit1"
+      ],
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "registered_at": "2026-07-05T21:17:45.791258+00:00",
+      "type": "container",
+      "metadata": {
+        "image": "lore-keeper-lore-keeper:latest",
+        "discovered_via": "local_docker"
+      }
+    },
+    "mcp-balance-checker": {
+      "name": "mcp-balance-checker",
+      "category": "docker containers",
+      "host": "unit1",
+      "hosts": [
+        "unit1"
+      ],
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "registered_at": "2026-07-05T21:17:45.791258+00:00",
+      "type": "container",
+      "metadata": {
+        "image": "balance-checker-balance-checker:latest",
+        "discovered_via": "local_docker"
+      }
+    },
+    "mcp-multi-server-manager": {
+      "name": "mcp-multi-server-manager",
+      "category": "docker containers",
+      "host": "unit1",
+      "hosts": [
+        "unit1"
+      ],
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "registered_at": "2026-07-05T21:17:45.791258+00:00",
+      "type": "container",
+      "metadata": {
+        "image": "multi-server-manager-multi-server-manager:latest",
+        "discovered_via": "local_docker"
+      }
+    },
+    "mcp-deck-validator": {
+      "name": "mcp-deck-validator",
+      "category": "docker containers",
+      "host": "unit1",
+      "hosts": [
+        "unit1"
+      ],
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "registered_at": "2026-07-05T21:17:45.791258+00:00",
+      "type": "container",
+      "metadata": {
+        "image": "deck-validator-deck-validator:latest",
+        "discovered_via": "local_docker"
+      }
+    },
+    "mcp-synergy-engine": {
+      "name": "mcp-synergy-engine",
+      "category": "docker containers",
+      "host": "unit1",
+      "hosts": [
+        "unit1"
+      ],
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "registered_at": "2026-07-05T21:17:45.791258+00:00",
+      "type": "container",
+      "metadata": {
+        "image": "synergy-engine-synergy-engine:latest",
+        "discovered_via": "local_docker"
+      }
+    },
+    "mcp-card-art-generator": {
+      "name": "mcp-card-art-generator",
+      "category": "docker containers",
+      "host": "unit1",
+      "hosts": [
+        "unit1"
+      ],
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "registered_at": "2026-07-05T21:17:45.791258+00:00",
+      "type": "container",
+      "metadata": {
+        "image": "card-art-generator-card-art-generator:latest",
+        "discovered_via": "local_docker"
+      }
+    },
+    "mcp-card-generator": {
+      "name": "mcp-card-generator",
+      "category": "docker containers",
+      "host": "unit1",
+      "hosts": [
+        "unit1"
+      ],
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "registered_at": "2026-07-05T21:17:45.791258+00:00",
+      "type": "container",
+      "metadata": {
+        "image": "card-generator-card-generator:latest",
+        "discovered_via": "local_docker"
+      }
+    },
+    "ddns-updater": {
+      "name": "ddns-updater",
+      "category": "docker containers",
+      "host": "unit1",
+      "hosts": [
+        "unit1"
+      ],
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "registered_at": "2026-07-05T21:17:45.791258+00:00",
+      "type": "container",
+      "metadata": {
+        "image": "alpine:latest",
+        "discovered_via": "local_docker"
+      }
+    },
+    "mcp-dns-domain-tools": {
+      "name": "mcp-dns-domain-tools",
+      "category": "docker containers",
+      "host": "unit1",
+      "hosts": [
+        "unit1"
+      ],
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "registered_at": "2026-07-05T21:17:45.791258+00:00",
+      "type": "container",
+      "metadata": {
+        "image": "node:20-alpine",
+        "discovered_via": "local_docker"
+      }
+    },
+    "mcp-ai-tools": {
+      "name": "mcp-ai-tools",
+      "category": "docker containers",
+      "host": "unit1",
+      "hosts": [
+        "unit1"
+      ],
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "registered_at": "2026-07-05T21:17:45.791258+00:00",
+      "type": "container",
+      "metadata": {
+        "image": "node:20-alpine",
+        "discovered_via": "local_docker"
+      }
+    },
+    "mcp-deployment-tools": {
+      "name": "mcp-deployment-tools",
+      "category": "docker containers",
+      "host": "unit1",
+      "hosts": [
+        "unit1"
+      ],
+      "status": "ONLINE",
+      "last_heartbeat": "2026-07-05T21:17:45.791258+00:00",
+      "registered_at": "2026-07-05T21:17:45.791258+00:00",
+      "type": "container",
+      "metadata": {
+        "image": "node:20-alpine",
         "discovered_via": "local_docker"
       }
     }
@@ -2880,5 +3104,5 @@
       "peripherals": []
     }
   },
-  "updated": "2026-06-27T02:08:41.252526+00:00"
+  "updated": "2026-07-05T21:17:45.584555+00:00"
 }
