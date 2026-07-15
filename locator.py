@@ -1561,7 +1561,7 @@ def heartbeat_reaper():
 
 # Containers that must never be migrated or deduped automatically
 _PINNED_NAMES = {
-    "locator", "traefik", "apache", "apache2", "httpd", "varnish", "bind9", "bind",
+    "traefik", "apache", "apache2", "httpd", "varnish", "bind9", "bind",
     "openvpn", "openvpn-client", "headscale", "tailscale", "wireguard-client", "wireguard",
     "powerdns", "pdns", "ns1-auth", "ns1",
     "postgres", "postgresql", "redis", "mysql", "mariadb",
