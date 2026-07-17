@@ -543,6 +543,29 @@ def _enforce_dedup(new_name, new_host):
             print(f"🧹 DEDUP: evicting {new_name}@{evict_host} → keeping {keeper.get('host')}")
 
 
+# URLs on these domains are serverless/PaaS deployments (Fly, Vercel, Netlify,
+# Supabase, Render, Cloudflare, GitLab/GitHub Pages, ...)
+SERVERLESS_URL_PATTERN = re.compile(
+    r"(fly\.dev|vercel\.app|netlify\.app|onrender\.com|supabase\.co|pages\.dev|"
+    r"workers\.dev|railway\.app|herokuapp\.com|gitlab\.io|github\.io|web\.app|firebaseapp\.com)",
+    re.IGNORECASE)
+
+
+def _infer_category(svc_type, url=""):
+    """Default category when a registration doesn't declare one."""
+    if svc_type == "native":
+        return "devices"
+    if svc_type == "vm":
+        return "virtual machines"
+    if svc_type in ("serverless", "paas"):
+        return "serverless"
+    if svc_type == "website":
+        return "websites"
+    if url and SERVERLESS_URL_PATTERN.search(str(url)):
+        return "serverless"
+    return "docker containers"
+
+
 @app.route("/register", methods=["POST"])
 def register_service():
     """
@@ -572,7 +595,7 @@ def register_service():
         existing = registry["services"].get(service_id, {})
 
         _svc_type = data.get("type", existing.get("type", "container"))
-        _default_cat = "devices" if _svc_type == "native" else "docker containers"
+        _default_cat = _infer_category(_svc_type, data.get("url", existing.get("url", "")))
         registry["services"][service_id] = {
             "name": name,
             "category": data.get("category", existing.get("category", _default_cat)),
@@ -1436,10 +1459,11 @@ def load_seed():
             # ... existing JSON load logic ...
             now = datetime.now(timezone.utc).isoformat()
             for name, svc in seed.get("services", {}).items():
-                svc["name"] = name
+                svc["name"] = svc.get("name", name)
                 svc["status"] = svc.get("status", "PENDING")
                 svc["last_heartbeat"] = ""
                 svc["registered_at"] = now
+                svc.setdefault("category", _infer_category(svc.get("type", "container"), svc.get("url", "")))
                 registry["services"][name] = svc
             for node_name, node_info in seed.get("nodes", {}).items():
                 registry["nodes"][node_name] = node_info
