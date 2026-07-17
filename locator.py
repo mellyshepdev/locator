@@ -1544,8 +1544,12 @@ def heartbeat_reaper():
 
                 if status == "ONLINE" and svc.get("last_heartbeat"):
                     try:
+                        # Websites/serverless are refreshed by the URL checker (every
+                        # URL_CHECK_INTERVAL), not by agent heartbeats — give them slack.
+                        _timeout = max(HEARTBEAT_TIMEOUT, URL_CHECK_INTERVAL * 5) \
+                            if svc.get("category") in ("websites", "serverless") else HEARTBEAT_TIMEOUT
                         last = datetime.fromisoformat(svc["last_heartbeat"])
-                        if (now - last).total_seconds() > HEARTBEAT_TIMEOUT:
+                        if (now - last).total_seconds() > _timeout:
                             svc["status"] = "OFFLINE"
                             # Only start the 90-day clock now — don't overwrite an existing one
                             if not svc.get("offline_since"):
@@ -2328,6 +2332,54 @@ def website_pinger():
         time.sleep(60)
 
 
+# ── URL STATUS CHECKER ───────────────────────────────────────────────────────
+
+URL_CHECK_INTERVAL = int(os.environ.get("URL_CHECK_INTERVAL", 60))
+
+def url_status_checker():
+    """Health-checks 'websites' and 'serverless' entries by their public URL.
+
+    Unlike website_pinger this needs no Docker socket, so it runs on the Fly.io
+    primary too. Offline sites stay in the registry as OFFLINE; the heartbeat
+    reaper purges them only after RETENTION_DAYS (90d) of inactivity.
+    """
+    while True:
+        with lock:
+            targets = [(sid, svc.get("url")) for sid, svc in registry["services"].items()
+                       if svc.get("category") in ("websites", "serverless")
+                       and str(svc.get("url", "")).startswith("http")]
+
+        changed = False
+        for sid, url in targets:
+            try:
+                r = requests.get(url, timeout=10, allow_redirects=True)
+                up = r.status_code < 500
+            except Exception:
+                up = False
+            now = datetime.now(timezone.utc).isoformat()
+            with lock:
+                svc = registry["services"].get(sid)
+                if not svc:
+                    continue
+                if up:
+                    svc["status"] = "ONLINE"
+                    svc["last_heartbeat"] = now
+                    svc.pop("offline_since", None)
+                    changed = True
+                else:
+                    if svc.get("status") != "OFFLINE":
+                        svc["status"] = "OFFLINE"
+                        changed = True
+                    # Start the 90-day retention clock once; never reset it while down
+                    if not svc.get("offline_since"):
+                        svc["offline_since"] = now
+                        changed = True
+
+        if changed:
+            persist_registry()
+        time.sleep(URL_CHECK_INTERVAL)
+
+
 # ── CRITICAL SERVICE WATCHDOG ────────────────────────────────────────────────
 
 # Services that must always be running — immediately queued for restart on OFFLINE
@@ -2427,6 +2479,9 @@ def main():
     # Start the website pinger
     pinger = threading.Thread(target=website_pinger, daemon=True)
     pinger.start()
+
+    # Start the URL status checker (websites + serverless, no Docker needed)
+    threading.Thread(target=url_status_checker, daemon=True).start()
 
     # Start the load balancer
     if BALANCE_ENABLED:
