@@ -420,6 +420,19 @@
             </table>
         </div>
 
+        <!-- PINK RECTANGLE: SERVERLESS / PaaS -->
+        <div class="grid-container" style="border: 1px solid #ff2d95; box-shadow: 0 0 20px rgba(255, 45, 149, 0.2);">
+            <h1 class="grid-title" style="color: #ff2d95; border-color: #ff2d95; text-shadow: 0 0 10px #ff2d95;">Serverless / PaaS</h1>
+            <div class="status-header">
+                <div>ACTIVE SERVERLESS: <span id="count-serverless" style="color: #ff2d95;">0</span></div>
+                <div>PLATFORMS: <span class="status-dot online" style="background-color: #ff2d95; box-shadow: 0 0 8px #ff2d95;"></span> Vercel · Netlify · Fly.io · Supabase · Render · GitLab Pages</div>
+            </div>
+            <table>
+                <thead><tr><th style="color: #ff2d95;">Service</th><th style="color: #ff2d95;">Platform</th><th style="color: #ff2d95;">URL</th><th style="color: #ff2d95;">Status</th><th style="color: #ff2d95;">Metadata</th><th style="color: #ff2d95;">Last Seen</th></tr></thead>
+                <tbody id="tbody-serverless"></tbody>
+            </table>
+        </div>
+
         <!-- CLOUD PLATFORMS SECTION -->
         <div class="grid-container" style="border: 1px solid #00ccff; box-shadow: 0 0 20px rgba(0, 204, 255, 0.2); color: #00ccff; margin-top: 40px;">
             <h1 class="grid-title" style="color: #00ccff; border-bottom: 2px solid #00ccff; text-shadow: 0 0 10px #00ccff;">Cloud &amp; Native Platforms</h1>
@@ -748,11 +761,13 @@
             const tbodyWebsites = document.getElementById('tbody-websites');
             const tbodyDevices = document.getElementById('tbody-devices');
             const tbodyVMs = document.getElementById('tbody-vms');
+            const tbodyServerless = document.getElementById('tbody-serverless');
 
             tbodyDocker.innerHTML = '';
             tbodyWebsites.innerHTML = '';
             tbodyDevices.innerHTML = '';
             tbodyVMs.innerHTML = '';
+            tbodyServerless.innerHTML = '';
 
             const services = Object.values(registryData.services || {});
             const nodes = Object.entries(registryData.nodes || {}).map(([id, data]) => ({...data, id, category: 'devices'}));
@@ -760,11 +775,13 @@
             const dockerList = services.filter(s => s.category === 'docker containers');
             const websiteList = services.filter(s => s.category === 'websites');
             const vmList = services.filter(s => s.category === 'virtual machines');
+            const serverlessList = services.filter(s => s.category === 'serverless');
 
             document.getElementById('count-devices').innerText = nodes.length;
             document.getElementById('count-docker').innerText = dockerList.length;
             document.getElementById('count-websites').innerText = websiteList.length;
             document.getElementById('count-vms').innerText = vmList.filter(v => v.status === 'ONLINE').length + '/' + vmList.length;
+            document.getElementById('count-serverless').innerText = serverlessList.filter(s => s.status === 'ONLINE').length + '/' + serverlessList.length;
 
             function createMetaBadges(metadata) {
                 const cell = document.createElement('td');
@@ -901,6 +918,26 @@
                 tr.appendChild(createMetaBadges(item.metadata));
                 tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never'}</td>`;
                 tbodyVMs.appendChild(tr);
+            });
+
+            // --- SERVERLESS / PaaS TABLE ---
+            serverlessList.forEach(item => {
+                const tr = document.createElement('tr');
+                const platform = (item.metadata && item.metadata.platform) || item.host || '-';
+                const isOnline = item.status === 'ONLINE';
+
+                tr.innerHTML = `
+                    <td style="font-weight:bold;color:#ff2d95">${item.name}</td>
+                    <td><span class="node-badge" style="border-color:#ff2d95;color:#ff2d95">${platform}</span></td>
+                    <td>${item.url ? `<a href="${item.url}" target="_blank" style="color:#ff2d95">${item.url}</a>` : '-'}</td>
+                    <td>
+                        <span class="status-dot ${isOnline ? 'online' : 'offline'}" style="${isOnline ? 'background:#ff2d95;box-shadow:0 0 8px #ff2d95' : ''}"></span>
+                        <span style="color:${isOnline ? '#ff2d95' : '#666'}">${item.status}</span>
+                    </td>
+                `;
+                tr.appendChild(createMetaBadges(item.metadata));
+                tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never'}</td>`;
+                tbodyServerless.appendChild(tr);
             });
         }
 
