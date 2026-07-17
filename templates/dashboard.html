@@ -652,6 +652,7 @@
                 <label><input type="checkbox" name="srv" value="unit1"> Unit 1</label>
                 <label><input type="checkbox" name="srv" value="unit2"> Unit 2</label>
                 <label><input type="checkbox" name="srv" value="unit3"> Unit 3</label>
+                <label><input type="checkbox" name="srv" value="unit4"> Unit 4</label>
                 <label><input type="checkbox" name="srv" value="unit5"> Unit 5</label>
                 <label><input type="checkbox" name="srv" value="unit6"> Unit 6</label>
                 <label style="grid-column: span 2; color:var(--accent); font-weight:bold;">
@@ -946,14 +947,14 @@
             const edges = new vis.DataSet();
             
             const nodeDict = registryData.nodes || {};
-            const mainUnits = ['unit1', 'unit2', 'unit3', 'unit5', 'unit6'];
+            const mainUnits = ['unit1', 'unit2', 'unit3', 'unit4', 'unit5', 'unit6'];
             const vpnNodes = [];
             
             // Build the main unit skeleton
             mainUnits.forEach((uName) => {
                 const nodeData = nodeDict[uName] || { status: 'OFFLINE', ip: 'pending...' };
                 const isOnline = nodeData.status === 'ONLINE';
-                const isOpenVPN = nodeData.is_openvpn_only || uName === 'unit2';
+                const isOpenVPN = nodeData.is_openvpn_only || uName === 'unit2' || uName === 'unit4';
                 
                 // Red for Unit 2 & 4, Blue for others
                 const color = isOpenVPN ? '#ff003c' : (isOnline ? '#4169E1' : '#2a3b63'); 
