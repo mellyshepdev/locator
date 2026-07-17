@@ -230,13 +230,6 @@
       "traefik_api": "https://unit1.theofficialblacksheepco.info/traefik/api",
       "peripherals": []
     },
-    "ubuntu_vps_unit4": {
-      "host": "unit4.theofficialblacksheepco.info",
-      "type": "vps",
-      "status": "ONLINE",
-      "traefik_api": "https://unit4.theofficialblacksheepco.info/traefik/api",
-      "peripherals": []
-    },
     "secondary_vps_unit2": {
       "host": "unit2.theofficialblacksheepco.info",
       "type": "lighthouse",
