@@ -911,11 +911,27 @@
             
             const nodeDict = registryData.nodes || {};
             const mainUnits = ['unit1', 'unit2', 'unit3', 'unit4', 'unit5', 'unit6'];
+            // Node registration has drifted to descriptive keys instead of unitN — alias them so
+            // the grid still finds real data (found 2026-07-25: hexagons rendered all-OFFLINE
+            // placeholders because none of these matched nodeDict's actual keys).
+            const UNIT_NODE_ALIASES = {
+                unit1: ['unit1'],
+                unit2: ['unit2', 'secondary_vps_unit2'],
+                unit3: ['unit3', 'mac_mini'],
+                unit4: ['unit4', 'ubuntu_vps_unit4'],
+                unit5: ['unit5'],
+                unit6: ['unit6'],
+            };
             const vpnNodes = [];
-            
+
             // Build the main unit skeleton
             mainUnits.forEach((uName) => {
-                const nodeData = nodeDict[uName] || { status: 'OFFLINE', ip: 'pending...' };
+                const aliases = UNIT_NODE_ALIASES[uName] || [uName];
+                let nodeData = null;
+                for (const alias of aliases) {
+                    if (nodeDict[alias]) { nodeData = nodeDict[alias]; break; }
+                }
+                nodeData = nodeData || { status: 'OFFLINE', ip: 'pending...' };
                 const isOnline = nodeData.status === 'ONLINE';
                 const isOpenVPN = nodeData.is_openvpn_only || uName === 'unit2' || uName === 'unit4';
                 
