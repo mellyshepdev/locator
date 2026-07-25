@@ -335,15 +335,26 @@ class _UnixConn(http.client.HTTPConnection):
 
 
 def _stop_self():
-    """Stop this container via the Docker API socket — prevents restart-loop."""
-    print(f"⛔ Stopping self ({SELF_CONTAINER_NAME}) via Docker API...")
-    try:
-        conn = _UnixConn()
-        conn.request("POST", f"/containers/{SELF_CONTAINER_NAME}/stop?t=5")
-        r = conn.getresponse()
-        print(f"   Docker stop response: HTTP {r.status}")
-    except Exception as e:
-        print(f"   Could not stop self via Docker socket: {e}")
+    """
+    Stop this instance — prevents restart-loop / duplicate serving after
+    losing self-election. Uses the Docker API socket when running in a
+    container; on a native (Docker-less) host like unit3, just exits the
+    process instead — there's no restart-loop risk unless the caller wraps
+    this in a supervisor with auto-restart (launchd KeepAlive, systemd
+    Restart=always), which native deployments should set to false/no.
+    """
+    if os.path.exists("/var/run/docker.sock"):
+        print(f"⛔ Stopping self ({SELF_CONTAINER_NAME}) via Docker API...")
+        try:
+            conn = _UnixConn()
+            conn.request("POST", f"/containers/{SELF_CONTAINER_NAME}/stop?t=5")
+            r = conn.getresponse()
+            print(f"   Docker stop response: HTTP {r.status}")
+            return
+        except Exception as e:
+            print(f"   Could not stop self via Docker socket: {e}")
+    print(f"⛔ Stopping self (native process on '{UNIT_NAME}', no Docker socket) — exiting")
+    os._exit(0)
 
 
 def _self_election():
