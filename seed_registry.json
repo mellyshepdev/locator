@@ -125,6 +125,101 @@
         "description": "Container app hosting \u2014 dashboard at fly.io/dashboard",
         "health_url": "https://fly.io"
       }
+    },
+    "web_theofficialblacksheepco_info": {
+      "name": "theofficialblacksheepco.info",
+      "category": "websites",
+      "type": "website",
+      "url": "https://theofficialblacksheepco.info",
+      "host": "unit1",
+      "hosts": [
+        "unit1"
+      ],
+      "metadata": {
+        "container": "blacksheep-frontend"
+      }
+    },
+    "web_anatomy_theofficialblacksheepco_info": {
+      "name": "anatomy.theofficialblacksheepco.info",
+      "category": "websites",
+      "type": "website",
+      "url": "https://anatomy.theofficialblacksheepco.info",
+      "host": "unit2",
+      "hosts": [
+        "unit2"
+      ],
+      "metadata": {
+        "container": "anatomy-dashboard"
+      }
+    },
+    "web_logs_theofficialblacksheepco_info": {
+      "name": "logs.theofficialblacksheepco.info",
+      "category": "websites",
+      "type": "website",
+      "url": "https://logs.theofficialblacksheepco.info",
+      "host": "unit2",
+      "hosts": [
+        "unit2"
+      ],
+      "metadata": {
+        "container": "beast-telemetry"
+      }
+    },
+    "web_auth_theofficialblacksheepco_com": {
+      "name": "auth.theofficialblacksheepco.com",
+      "category": "websites",
+      "type": "website",
+      "url": "https://auth.theofficialblacksheepco.com",
+      "host": "unit3",
+      "hosts": [
+        "unit3"
+      ],
+      "metadata": {
+        "service": "keycloak",
+        "native": "true"
+      }
+    },
+    "web_search_theofficialblacksheepco_com": {
+      "name": "search.theofficialblacksheepco.com",
+      "category": "websites",
+      "type": "website",
+      "url": "https://search.theofficialblacksheepco.com",
+      "host": "mesh",
+      "hosts": [
+        "mesh"
+      ],
+      "metadata": {
+        "app": "searchsearcher"
+      }
+    },
+    "sls_tobsco_locator": {
+      "name": "tobsco-locator",
+      "category": "serverless",
+      "type": "serverless",
+      "url": "https://tobsco-locator.fly.dev",
+      "host": "fly",
+      "hosts": [
+        "fly"
+      ],
+      "metadata": {
+        "platform": "Fly.io",
+        "region": "iad",
+        "app": "tobsco-locator"
+      }
+    },
+    "sls_business_card": {
+      "name": "business-card",
+      "category": "serverless",
+      "type": "serverless",
+      "url": "https://blackshepherddeveloper-group.gitlab.io/business-card/",
+      "host": "gitlab-pages",
+      "hosts": [
+        "gitlab-pages"
+      ],
+      "metadata": {
+        "platform": "GitLab Pages",
+        "repo": "blackshepherddeveloper-group/business-card"
+      }
     }
   },
   "nodes": {
@@ -135,18 +230,18 @@
       "traefik_api": "https://unit1.theofficialblacksheepco.info/traefik/api",
       "peripherals": []
     },
-    "ubuntu_vps_unit4": {
-      "host": "unit4.theofficialblacksheepco.info",
-      "type": "vps",
-      "status": "ONLINE",
-      "traefik_api": "https://unit4.theofficialblacksheepco.info/traefik/api",
-      "peripherals": []
-    },
     "secondary_vps_unit2": {
       "host": "unit2.theofficialblacksheepco.info",
       "type": "lighthouse",
       "status": "ONLINE",
       "traefik_api": "https://unit2.theofficialblacksheepco.info/traefik/api",
+      "peripherals": []
+    },
+    "ubuntu_vps_unit4": {
+      "host": "unit4.theofficialblacksheepco.info",
+      "type": "vps",
+      "status": "OFFLINE",
+      "traefik_api": "https://unit4.theofficialblacksheepco.info/traefik/api",
       "peripherals": []
     }
   }

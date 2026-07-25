@@ -554,6 +554,29 @@ def _enforce_dedup(new_name, new_host):
             print(f"🧹 DEDUP: evicting {new_name}@{evict_host} → keeping {keeper.get('host')}")
 
 
+# URLs on these domains are serverless/PaaS deployments (Fly, Vercel, Netlify,
+# Supabase, Render, Cloudflare, GitLab/GitHub Pages, ...)
+SERVERLESS_URL_PATTERN = re.compile(
+    r"(fly\.dev|vercel\.app|netlify\.app|onrender\.com|supabase\.co|pages\.dev|"
+    r"workers\.dev|railway\.app|herokuapp\.com|gitlab\.io|github\.io|web\.app|firebaseapp\.com)",
+    re.IGNORECASE)
+
+
+def _infer_category(svc_type, url=""):
+    """Default category when a registration doesn't declare one."""
+    if svc_type == "native":
+        return "devices"
+    if svc_type == "vm":
+        return "virtual machines"
+    if svc_type in ("serverless", "paas"):
+        return "serverless"
+    if svc_type == "website":
+        return "websites"
+    if url and SERVERLESS_URL_PATTERN.search(str(url)):
+        return "serverless"
+    return "docker containers"
+
+
 @app.route("/register", methods=["POST"])
 def register_service():
     """
@@ -583,7 +606,7 @@ def register_service():
         existing = registry["services"].get(service_id, {})
 
         _svc_type = data.get("type", existing.get("type", "container"))
-        _default_cat = "devices" if _svc_type == "native" else "docker containers"
+        _default_cat = _infer_category(_svc_type, data.get("url", existing.get("url", "")))
         registry["services"][service_id] = {
             "name": name,
             "category": data.get("category", existing.get("category", _default_cat)),
@@ -1447,10 +1470,11 @@ def load_seed():
             # ... existing JSON load logic ...
             now = datetime.now(timezone.utc).isoformat()
             for name, svc in seed.get("services", {}).items():
-                svc["name"] = name
+                svc["name"] = svc.get("name", name)
                 svc["status"] = svc.get("status", "PENDING")
                 svc["last_heartbeat"] = ""
                 svc["registered_at"] = now
+                svc.setdefault("category", _infer_category(svc.get("type", "container"), svc.get("url", "")))
                 registry["services"][name] = svc
             for node_name, node_info in seed.get("nodes", {}).items():
                 registry["nodes"][node_name] = node_info
@@ -1531,8 +1555,12 @@ def heartbeat_reaper():
 
                 if status == "ONLINE" and svc.get("last_heartbeat"):
                     try:
+                        # Websites/serverless are refreshed by the URL checker (every
+                        # URL_CHECK_INTERVAL), not by agent heartbeats — give them slack.
+                        _timeout = max(HEARTBEAT_TIMEOUT, URL_CHECK_INTERVAL * 5) \
+                            if svc.get("category") in ("websites", "serverless") else HEARTBEAT_TIMEOUT
                         last = datetime.fromisoformat(svc["last_heartbeat"])
-                        if (now - last).total_seconds() > HEARTBEAT_TIMEOUT:
+                        if (now - last).total_seconds() > _timeout:
                             svc["status"] = "OFFLINE"
                             # Only start the 90-day clock now — don't overwrite an existing one
                             if not svc.get("offline_since"):
@@ -2315,6 +2343,54 @@ def website_pinger():
         time.sleep(60)
 
 
+# ── URL STATUS CHECKER ───────────────────────────────────────────────────────
+
+URL_CHECK_INTERVAL = int(os.environ.get("URL_CHECK_INTERVAL", 60))
+
+def url_status_checker():
+    """Health-checks 'websites' and 'serverless' entries by their public URL.
+
+    Unlike website_pinger this needs no Docker socket, so it runs on the Fly.io
+    primary too. Offline sites stay in the registry as OFFLINE; the heartbeat
+    reaper purges them only after RETENTION_DAYS (90d) of inactivity.
+    """
+    while True:
+        with lock:
+            targets = [(sid, svc.get("url")) for sid, svc in registry["services"].items()
+                       if svc.get("category") in ("websites", "serverless")
+                       and str(svc.get("url", "")).startswith("http")]
+
+        changed = False
+        for sid, url in targets:
+            try:
+                r = requests.get(url, timeout=10, allow_redirects=True)
+                up = r.status_code < 500
+            except Exception:
+                up = False
+            now = datetime.now(timezone.utc).isoformat()
+            with lock:
+                svc = registry["services"].get(sid)
+                if not svc:
+                    continue
+                if up:
+                    svc["status"] = "ONLINE"
+                    svc["last_heartbeat"] = now
+                    svc.pop("offline_since", None)
+                    changed = True
+                else:
+                    if svc.get("status") != "OFFLINE":
+                        svc["status"] = "OFFLINE"
+                        changed = True
+                    # Start the 90-day retention clock once; never reset it while down
+                    if not svc.get("offline_since"):
+                        svc["offline_since"] = now
+                        changed = True
+
+        if changed:
+            persist_registry()
+        time.sleep(URL_CHECK_INTERVAL)
+
+
 # ── CRITICAL SERVICE WATCHDOG ────────────────────────────────────────────────
 
 # Services that must always be running — immediately queued for restart on OFFLINE
@@ -2414,6 +2490,9 @@ def main():
     # Start the website pinger
     pinger = threading.Thread(target=website_pinger, daemon=True)
     pinger.start()
+
+    # Start the URL status checker (websites + serverless, no Docker needed)
+    threading.Thread(target=url_status_checker, daemon=True).start()
 
     # Start the load balancer
     if BALANCE_ENABLED:
