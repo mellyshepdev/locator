@@ -4,6 +4,40 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>3D Network Mesh — Dynamic Registry View</title>
+<!-- Client-side error reporter (added 2026-07-27) — see templates/dashboard.html
+     for the full rationale. Placed before the Keycloak/THREE.js scripts so it
+     catches failures in either of those too (e.g. an unreachable auth domain
+     throwing "Keycloak is not defined"). -->
+<script>
+(function() {
+    function report(message, sourceUrl, line, col, stack) {
+        try {
+            fetch('/api/client-error', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    message: String(message || ''),
+                    stack: stack || '',
+                    sourceUrl: sourceUrl || '',
+                    pageUrl: window.location.href,
+                    line: line || null,
+                    col: col || null,
+                    userAgent: navigator.userAgent
+                }),
+                keepalive: true
+            }).catch(function() {});
+        } catch (e) {}
+    }
+    window.__reportClientError = report;
+    window.addEventListener('error', function(e) {
+        report(e.message, e.filename, e.lineno, e.colno, e.error && e.error.stack);
+    });
+    window.addEventListener('unhandledrejection', function(e) {
+        var reason = e.reason;
+        report((reason && reason.message) || String(reason), window.location.href, null, null, reason && reason.stack);
+    });
+})();
+</script>
 <script src="https://auth.theofficialblacksheepco.online/js/keycloak.js"></script>
 <script>
   (function() {
@@ -18,7 +52,13 @@
           window.location.href = 'https://theofficialblacksheepco.com/login.html?redirect=' + encodeURIComponent(window.location.href);
         }
       })
-      .catch(function() {
+      .catch(function(err) {
+        if (window.__reportClientError) {
+          window.__reportClientError(
+            'Keycloak init/check-sso failed: ' + (err && err.message ? err.message : JSON.stringify(err)),
+            window.location.href, null, null, err && err.stack
+          );
+        }
         window.location.href = 'https://theofficialblacksheepco.com/login.html?redirect=' + encodeURIComponent(window.location.href);
       });
   })();

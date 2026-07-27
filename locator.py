@@ -256,6 +256,16 @@ registry = {
 
 lock = threading.Lock()
 
+# ── CLIENT-SIDE ERROR LOG ────────────────────────────────────────────────────
+# Browser JS errors (window.onerror / unhandledrejection) reported from the
+# dashboard, /3d-mesh, etc. Bounded in-memory ring buffer + stdout (so `fly
+# logs` / any log shipper captures them permanently even across restarts).
+# Added 2026-07-27 after a silent tactical-grid rendering crash went
+# undiagnosed for hours with no client-side error visibility anywhere.
+CLIENT_ERROR_MAX = 300
+client_errors: list = []
+client_error_lock = threading.Lock()
+
 # Migration queue — keyed by migration ID
 migration_queue: dict = {}
 migration_lock  = threading.Lock()
@@ -1026,6 +1036,40 @@ def health_check():
         "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT,
         "timestamp": datetime.now(timezone.utc).isoformat()
     })
+
+
+@app.route("/api/client-error", methods=["POST"])
+def report_client_error():
+    """Receive a browser-side JS error report (window.onerror / unhandledrejection
+    / an explicit try/catch) from the dashboard or any page that includes the
+    error-reporter snippet. Stored in-memory (bounded) and printed to stdout so
+    it survives in `fly logs` even if the process restarts."""
+    payload = request.get_json(silent=True) or {}
+    entry = {
+        "received_at": datetime.now(timezone.utc).isoformat(),
+        "message": str(payload.get("message", ""))[:2000],
+        "stack": str(payload.get("stack", ""))[:4000],
+        "source_url": str(payload.get("sourceUrl", ""))[:500],
+        "page_url": str(payload.get("pageUrl", ""))[:500],
+        "line": payload.get("line"),
+        "col": payload.get("col"),
+        "user_agent": str(payload.get("userAgent", ""))[:300],
+    }
+    with client_error_lock:
+        client_errors.append(entry)
+        if len(client_errors) > CLIENT_ERROR_MAX:
+            del client_errors[: len(client_errors) - CLIENT_ERROR_MAX]
+
+    print(f"\U0001f6a8 CLIENT-ERROR [{entry['page_url']}]: {entry['message']} "
+          f"({entry['source_url']}:{entry['line']}:{entry['col']})")
+    return jsonify({"status": "logged"}), 200
+
+
+@app.route("/api/client-errors", methods=["GET"])
+def list_client_errors():
+    """Return recently reported browser-side JS errors, newest first."""
+    with client_error_lock:
+        return jsonify(list(reversed(client_errors)))
 
 
 @app.route("/registry.json", methods=["GET"])

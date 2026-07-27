@@ -4,6 +4,51 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>S.H.E.E.P. Unified Registry</title>
+    <!-- Client-side error reporter (added 2026-07-27): catches otherwise-silent
+         browser JS errors (like a tactical-grid rendering crash that went
+         undiagnosed for hours with zero visibility anywhere) and reports them
+         to the locator backend (POST /api/client-error) so they show up in
+         `fly logs` / GET /api/client-errors instead of only living in a
+         DevTools console nobody happens to be watching. Placed before every
+         other script so it can catch errors those scripts throw too. -->
+    <script>
+    (function() {
+        function report(message, sourceUrl, line, col, stack) {
+            try {
+                fetch('/api/client-error', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        message: String(message || ''),
+                        stack: stack || '',
+                        sourceUrl: sourceUrl || '',
+                        pageUrl: window.location.href,
+                        line: line || null,
+                        col: col || null,
+                        userAgent: navigator.userAgent
+                    }),
+                    keepalive: true
+                }).catch(function() { /* nothing more we can do if this itself fails */ });
+            } catch (e) { /* the error reporter must never itself throw */ }
+        }
+        // Expose so existing try/catch and .catch() blocks (which never
+        // trigger window 'error'/'unhandledrejection', since they're handled,
+        // not uncaught) can explicitly report too.
+        window.__reportClientError = report;
+        window.addEventListener('error', function(e) {
+            report(e.message, e.filename, e.lineno, e.colno, e.error && e.error.stack);
+        });
+        window.addEventListener('unhandledrejection', function(e) {
+            var reason = e.reason;
+            report(
+                (reason && reason.message) || String(reason),
+                window.location.href,
+                null, null,
+                reason && reason.stack
+            );
+        });
+    })();
+    </script>
     <!-- Include vis-network for graph rendering -->
     <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
     <style>
@@ -329,22 +374,6 @@
             100% { opacity: 1; }
         }
     </style>
-<!-- Matomo -->
-<script>
-  var _paq = window._paq = window._paq || [];
-  /* tracker methods like "setCustomDimension" should be called before "trackPageView" */
-  _paq.push(['trackPageView']);
-  _paq.push(['enableLinkTracking']);
-  (function() {
-    var u="//bsco-matomo.fly.dev/";
-    _paq.push(['setTrackerUrl', u+'matomo.php']);
-    _paq.push(['setSiteId', '4']);
-    var d=document, g=d.createElement('script'), s=d.getElementsByTagName('script')[0];
-    g.async=true; g.src=u+'matomo.js'; s.parentNode.insertBefore(g,s);
-  })();
-</script>
-<!-- End Matomo Code -->
-
 </head>
 <body>
 
@@ -769,6 +798,12 @@
                 })
                 .catch(error => {
                     console.error("Failed to load registry data:", error);
+                    if (window.__reportClientError) {
+                        window.__reportClientError(
+                            "loadRegistryData failed: " + (error && error.message),
+                            window.location.href, null, null, error && error.stack
+                        );
+                    }
                 });
         }
 
