@@ -141,7 +141,30 @@ def get_docker_containers():
         return {"running": [], "all": [], "error": str(e)}
 
 def get_tailscale_ip():
-    """Return host's Tailscale IP (100.x.x.x) by reading host network namespace."""
+    """Return host's Tailscale IP (100.x.x.x).
+
+    Tries, in order:
+      1. `tailscale ip -4` — portable across Linux/macOS/Windows, and the only
+         option that works for NATIVE (non-Docker) installs, since those already
+         run in the host's own network namespace (no nsenter available/needed —
+         nsenter doesn't even exist on macOS, and requires root on Linux).
+      2. `nsenter -t 1 -n ip addr show tailscale0` — Docker-only fallback, for
+         containers that don't have the `tailscale` CLI itself but do have host
+         PID/net namespace access, reading the HOST's tailscale0 interface.
+      3. `ip -4 addr show tailscale0` directly — covers native Linux boxes where
+         the `tailscale` CLI isn't on PATH but the interface is still visible.
+    """
+    try:
+        result = subprocess.run(
+            ["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            ip = result.stdout.strip().splitlines()[0].strip() if result.stdout.strip() else ""
+            if ip:
+                return ip
+    except Exception:
+        pass
+
     try:
         result = subprocess.run(
             ["nsenter", "-t", "1", "-n", "ip", "-4", "addr", "show", "tailscale0"],
@@ -154,6 +177,20 @@ def get_tailscale_ip():
                     return line.split()[1].split("/")[0]
     except Exception:
         pass
+
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "addr", "show", "tailscale0"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if line.startswith("inet "):
+                    return line.split()[1].split("/")[0]
+    except Exception:
+        pass
+
     return None
 
 
