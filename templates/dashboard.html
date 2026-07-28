@@ -969,6 +969,8 @@
             // --- DOCKER TABLE ---
             dockerList.forEach(item => {
                 const tr = document.createElement('tr');
+                tr.className = 'clickable-row';
+                tr.title = 'Click for full data sheet';
                 const hostList = item.hosts || [item.host || 'unknown'];
                 const hostBadges = hostList.map(h => `<span class="node-badge">${h}</span>`).join('');
                 const isOnline = item.status === 'ONLINE';
@@ -979,7 +981,7 @@
                     <td>${hostBadges}</td>
                     <td>${item.port || '-'}</td>
                     <td>${item.internal || '-'}</td>
-                    <td>${item.url ? `<a href="${item.url}" target="_blank">${item.url}</a>` : '-'}</td>
+                    <td>${item.url ? `<a href="${item.url}" target="_blank" onclick="event.stopPropagation()">${item.url}</a>` : '-'}</td>
                 `;
 
                 // Stats Column
@@ -989,7 +991,7 @@
                 const statusTd = document.createElement('td');
                 statusTd.innerHTML = `
                     <button class="status-toggle-btn ${isOnline ? 'is-online' : 'is-offline'}"
-                            onclick="openToggleModal('${safeName}', '${isOnline ? 'ONLINE' : 'OFFLINE'}')">
+                            onclick="event.stopPropagation(); openToggleModal('${safeName}', '${isOnline ? 'ONLINE' : 'OFFLINE'}')">
                         <span class="status-dot ${isOnline ? 'online' : 'offline'}"></span>
                         ${isOnline ? 'Shutdown' : 'Deploy'}
                     </button>`;
@@ -997,19 +999,22 @@
 
                 tr.appendChild(createMetaBadges(item.metadata));
                 tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never'}</td>`;
+                tr.addEventListener('click', () => openDeviceModal(item));
                 tbodyDocker.appendChild(tr);
             });
 
             // --- WEBSITES TABLE ---
             websiteList.forEach(item => {
                 const tr = document.createElement('tr');
+                tr.className = 'clickable-row';
+                tr.title = 'Click for full data sheet';
                 const hostList = item.hosts || [item.host || 'unknown'];
                 const hostBadges = hostList.map(h => `<span class="node-badge">${h}</span>`).join('');
 
                 tr.innerHTML = `
                     <td style="font-weight:bold">${item.name}</td>
                     <td>${hostBadges}</td>
-                    <td><a href="${item.url}" target="_blank">${item.url}</a></td>
+                    <td><a href="${item.url}" target="_blank" onclick="event.stopPropagation()">${item.url}</a></td>
                     <td>
                         <span class="status-dot ${item.status === 'ONLINE' ? 'online' : 'offline'}"></span>
                         ${item.status}
@@ -1017,12 +1022,15 @@
                 `;
                 tr.appendChild(createMetaBadges(item.metadata));
                 tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never'}</td>`;
+                tr.addEventListener('click', () => openDeviceModal(item));
                 tbodyWebsites.appendChild(tr);
             });
 
             // --- VIRTUAL MACHINES TABLE ---
             vmList.forEach(item => {
                 const tr = document.createElement('tr');
+                tr.className = 'clickable-row';
+                tr.title = 'Click for full data sheet';
                 const hostList = item.hosts || [item.host || 'unknown'];
                 const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:#ff8800;color:#ff8800">${h}</span>`).join('');
                 const isOnline = item.status === 'ONLINE';
@@ -1030,8 +1038,8 @@
                 tr.innerHTML = `
                     <td style="font-weight:bold;color:#ff8800">${item.name}</td>
                     <td>${hostBadges}</td>
-                    <td>${item.internal ? `<a href="${item.internal}" target="_blank" style="color:#ff8800">${item.internal}</a>` : '-'}</td>
-                    <td>${item.url ? `<a href="${item.url}" target="_blank" style="color:#ff8800">${item.url}</a>` : '-'}</td>
+                    <td>${item.internal ? `<a href="${item.internal}" target="_blank" style="color:#ff8800" onclick="event.stopPropagation()">${item.internal}</a>` : '-'}</td>
+                    <td>${item.url ? `<a href="${item.url}" target="_blank" style="color:#ff8800" onclick="event.stopPropagation()">${item.url}</a>` : '-'}</td>
                     <td>
                         <span class="status-dot ${isOnline ? 'online' : 'offline'}" style="${isOnline ? 'background:#ff8800;box-shadow:0 0 8px #ff8800' : ''}"></span>
                         <span style="color:${isOnline ? '#ff8800' : '#666'}">${item.status}</span>
@@ -1039,19 +1047,22 @@
                 `;
                 tr.appendChild(createMetaBadges(item.metadata));
                 tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never'}</td>`;
+                tr.addEventListener('click', () => openDeviceModal(item));
                 tbodyVMs.appendChild(tr);
             });
 
             // --- SERVERLESS / PaaS TABLE ---
             serverlessList.forEach(item => {
                 const tr = document.createElement('tr');
+                tr.className = 'clickable-row';
+                tr.title = 'Click for full data sheet';
                 const platform = (item.metadata && item.metadata.platform) || item.host || '-';
                 const isOnline = item.status === 'ONLINE';
 
                 tr.innerHTML = `
                     <td style="font-weight:bold;color:#ff2d95">${item.name}</td>
                     <td><span class="node-badge" style="border-color:#ff2d95;color:#ff2d95">${platform}</span></td>
-                    <td>${item.url ? `<a href="${item.url}" target="_blank" style="color:#ff2d95">${item.url}</a>` : '-'}</td>
+                    <td>${item.url ? `<a href="${item.url}" target="_blank" style="color:#ff2d95" onclick="event.stopPropagation()">${item.url}</a>` : '-'}</td>
                     <td>
                         <span class="status-dot ${isOnline ? 'online' : 'offline'}" style="${isOnline ? 'background:#ff2d95;box-shadow:0 0 8px #ff2d95' : ''}"></span>
                         <span style="color:${isOnline ? '#ff2d95' : '#666'}">${item.status}</span>
@@ -1059,6 +1070,7 @@
                 `;
                 tr.appendChild(createMetaBadges(item.metadata));
                 tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never'}</td>`;
+                tr.addEventListener('click', () => openDeviceModal(item));
                 tbodyServerless.appendChild(tr);
             });
         }
