@@ -1588,6 +1588,26 @@ def heartbeat_reaper():
                 changed = True
                 print(f"🗑️  PURGED: {name} (offline > {RETENTION_DAYS} days)")
 
+            # Nodes whose own last_seen has expired go OFFLINE directly, independent of
+            # whether a matching "lokey"-named service exists — the check above only
+            # catches nodes whose heartbeat comes through a service named after lokey;
+            # self-registered devices and any node with a stale-but-present last_seen
+            # were previously stuck ONLINE forever with no way to expire.
+            for node_id, node in registry["nodes"].items():
+                if node.get("status") != "ONLINE":
+                    continue
+                last_seen = node.get("last_seen")
+                if not last_seen:
+                    continue
+                try:
+                    last = datetime.fromisoformat(last_seen)
+                    if (now - last).total_seconds() > HEARTBEAT_TIMEOUT:
+                        node["status"] = "OFFLINE"
+                        changed = True
+                        print(f"💀 NODE OFFLINE (stale heartbeat): {node_id}")
+                except (ValueError, TypeError):
+                    pass
+
         if changed:
             persist_registry()
 
