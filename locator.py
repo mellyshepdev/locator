@@ -1111,6 +1111,8 @@ def update_node_metrics(node_id):
         node["disk_percent"]  = data.get("disk_percent")
         node["disk_total_gb"] = data.get("disk_total_gb")
         node["disk_used_gb"]  = data.get("disk_used_gb")
+        if data.get("ip"):
+            node["ip"] = data["ip"]
         if data.get("tailscale_ip"):
             node["tailscale_ip"] = data["tailscale_ip"]
         node["last_seen"]     = now
