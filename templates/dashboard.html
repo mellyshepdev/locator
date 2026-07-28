@@ -1036,18 +1036,23 @@
             tbodyServerless.innerHTML = '';
 
             const services = Object.values(registryData.services || {});
-            const nodes = Object.entries(registryData.nodes || {}).map(([id, data]) => ({...data, id, category: 'devices'}));
+            const allNodes = Object.entries(registryData.nodes || {}).map(([id, data]) => ({...data, id, category: 'devices'}));
+
+            updateUnitFilterOptions(registryData);
+            const nodes = allNodes.filter(n => nodeMatchesFilter(n.id, n));
 
             const dockerList = services.filter(s => s.category === 'docker containers');
             const websiteList = services.filter(s => s.category === 'websites');
             const vmList = services.filter(s => s.category === 'virtual machines');
             const serverlessList = services.filter(s => s.category === 'serverless');
 
-            document.getElementById('count-devices').innerText = nodes.length;
+            document.getElementById('count-devices').innerText = allNodes.length;
             document.getElementById('count-docker').innerText = dockerList.length;
             document.getElementById('count-websites').innerText = websiteList.length;
             document.getElementById('count-vms').innerText = vmList.filter(v => v.status === 'ONLINE').length + '/' + vmList.length;
             document.getElementById('count-serverless').innerText = serverlessList.filter(s => s.status === 'ONLINE').length + '/' + serverlessList.length;
+            const filterCountEl = document.getElementById('filter-count');
+            if (filterCountEl) filterCountEl.innerText = `${nodes.length} SHOWN`;
 
             function createMetaBadges(metadata) {
                 const cell = document.createElement('td');
