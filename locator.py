@@ -435,6 +435,13 @@ def index():
     """Serve the unified dashboard UI."""
     return render_template("dashboard.html")
 
+
+@app.route("/register-device", methods=["GET"])
+def register_device_page():
+    """Mobile-friendly page: self-register this phone/tablet into the registry
+    and, on Android, download the Lokey app for live heartbeats."""
+    return render_template("register_device.html")
+
 @app.route("/api/registry", methods=["GET"])
 def get_full_registry():
     """Return the full registry — services + nodes."""
