@@ -17,6 +17,8 @@ import uuid
 import queue as _queue_module
 import requests
 import re
+import io
+import qrcode
 import pandas as pd
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, Response, render_template
@@ -441,6 +443,18 @@ def register_device_page():
     """Mobile-friendly page: self-register this phone/tablet into the registry
     and, on Android, download the Lokey app for live heartbeats."""
     return render_template("register_device.html")
+
+
+@app.route("/register-device-qr.png", methods=["GET"])
+def register_device_qr():
+    """QR code pointing at /register-device, for scanning off a desktop-viewed
+    Tactical Grid straight into the mobile self-register/install page."""
+    target_url = request.url_root.rstrip("/") + "/register-device"
+    img = qrcode.make(target_url, box_size=6, border=2)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return Response(buf.read(), mimetype="image/png")
 
 @app.route("/api/registry", methods=["GET"])
 def get_full_registry():
