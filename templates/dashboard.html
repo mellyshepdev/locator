@@ -554,56 +554,56 @@
                     <th style="color:#00ccff">Dashboard</th>
                     <th style="color:#00ccff">Notes</th>
                 </tr></thead>
-                <tbody>
-                  <tr>
+                <tbody id="tbody-cloud-platforms">
+                  <tr class="clickable-row">
                     <td style="color:#00ccff; font-weight:bold">Netlify</td>
                     <td>cloud / CDN</td>
                     <td>Static site hosting, JAMstack, serverless functions</td>
                     <td>—</td>
-                    <td><a href="https://app.netlify.com" target="_blank" style="color:#00ccff">app.netlify.com</a></td>
+                    <td><a href="https://app.netlify.com" target="_blank" style="color:#00ccff" onclick="event.stopPropagation()">app.netlify.com</a></td>
                     <td>Static frontends, deploy previews</td>
                   </tr>
-                  <tr>
+                  <tr class="clickable-row">
                     <td style="color:#00ccff; font-weight:bold">Vercel</td>
                     <td>cloud / CDN</td>
                     <td>Next.js hosting, edge functions, static deployments</td>
                     <td>—</td>
-                    <td><a href="https://vercel.com/dashboard" target="_blank" style="color:#00ccff">vercel.com/dashboard</a></td>
+                    <td><a href="https://vercel.com/dashboard" target="_blank" style="color:#00ccff" onclick="event.stopPropagation()">vercel.com/dashboard</a></td>
                     <td>Next.js apps, serverless</td>
                   </tr>
-                  <tr>
+                  <tr class="clickable-row">
                     <td style="color:#00ccff; font-weight:bold">Render</td>
                     <td>cloud / PaaS</td>
                     <td>Container hosting, web services, cron jobs, databases</td>
                     <td>—</td>
-                    <td><a href="https://dashboard.render.com" target="_blank" style="color:#00ccff">dashboard.render.com</a></td>
+                    <td><a href="https://dashboard.render.com" target="_blank" style="color:#00ccff" onclick="event.stopPropagation()">dashboard.render.com</a></td>
                     <td>Containerized backend services</td>
                   </tr>
-                  <tr>
+                  <tr class="clickable-row">
                     <td style="color:#00ccff; font-weight:bold">Fly.io</td>
                     <td>cloud / PaaS</td>
                     <td>Container deployments, global edge, Postgres</td>
                     <td>—</td>
-                    <td><a href="https://fly.io/dashboard" target="_blank" style="color:#00ccff">fly.io/dashboard</a></td>
+                    <td><a href="https://fly.io/dashboard" target="_blank" style="color:#00ccff" onclick="event.stopPropagation()">fly.io/dashboard</a></td>
                     <td>Edge container hosting</td>
                   </tr>
-                  <tr style="border-top: 1px solid rgba(0,204,255,0.3);">
+                  <tr class="clickable-row" style="border-top: 1px solid rgba(0,204,255,0.3);">
                     <td style="color:#00ccff; font-weight:bold">Unit 3 — Mac mini</td>
                     <td>unit3 / LAN 10.0.0.196</td>
                     <td>Keycloak 24.0.5, PostgreSQL 16, MCP Tools (7 servers)</td>
-                    <td><a href="https://auth.theofficialblacksheepco.com" target="_blank" style="color:#00ccff">auth.*</a></td>
+                    <td><a href="https://auth.theofficialblacksheepco.com" target="_blank" style="color:#00ccff" onclick="event.stopPropagation()">auth.*</a></td>
                     <td>SSH: unit3 | ssh unit3</td>
                     <td>macOS Monterey 8GB RAM — native (no Docker)</td>
                   </tr>
-                  <tr>
+                  <tr class="clickable-row">
                     <td style="color:#00ccff; font-weight:bold">Unit 3 — Keycloak</td>
                     <td>unit3 :8180</td>
                     <td>Keycloak 24.0.5 (Quarkus) + PostgreSQL 16 backend</td>
-                    <td><a href="https://auth.theofficialblacksheepco.com" target="_blank" style="color:#00ccff">auth.theofficialblacksheepco.com</a></td>
-                    <td><a href="https://auth.theofficialblacksheepco.com/admin" target="_blank" style="color:#00ccff">Keycloak Admin</a></td>
+                    <td><a href="https://auth.theofficialblacksheepco.com" target="_blank" style="color:#00ccff" onclick="event.stopPropagation()">auth.theofficialblacksheepco.com</a></td>
+                    <td><a href="https://auth.theofficialblacksheepco.com/admin" target="_blank" style="color:#00ccff" onclick="event.stopPropagation()">Keycloak Admin</a></td>
                     <td>Migrated from unit1 Docker 2026-06-25</td>
                   </tr>
-                  <tr>
+                  <tr class="clickable-row">
                     <td style="color:#00ccff; font-weight:bold">Unit 3 — MCP Tools</td>
                     <td>unit3 :8001–8009</td>
                     <td>filesystem, github, brave-search, puppeteer, memory, sequential-thinking, slack</td>
