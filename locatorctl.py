@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""CLI for starting/stopping containers registered in the Locator, via the
-same /api/container/toggle endpoint the web dashboard's Deploy/Shutdown
-button uses.
+"""CLI for starting/stopping containers registered in the Locator.
+
+The Locator never touches Docker itself — start/stop goes through the same
+/api/container/toggle endpoint the web dashboard's Deploy/Shutdown button
+uses, which queues a command for the Lokey agent running on the container's
+actual host. Lokey picks it up, runs it locally, and reports back — so
+`start`/`stop` here only confirm the command was *queued*, not that it's
+done yet. Use `status`/`list` (or watch the dashboard) to see it land.
 
 Usage:
     export LOCATOR_URL="https://tobsco-locator.fly.dev"   # default shown
@@ -23,13 +28,14 @@ def toggle(name, action):
     resp = requests.post(
         f"{LOCATOR_URL}/api/container/toggle",
         json={"name": name, "action": action},
-        timeout=120,
+        timeout=30,
     )
     data = resp.json()
     if resp.status_code != 200 or data.get("error"):
         print(f"error: {data.get('error', resp.text)}", file=sys.stderr)
         sys.exit(1)
-    print(f"{name} -> {data.get('status', action)}")
+    unit = data.get("unit", "?")
+    print(f"queued: {action} '{name}' on {unit} (lokey will execute it shortly)")
 
 
 def status(name):

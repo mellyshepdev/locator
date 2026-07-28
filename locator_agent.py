@@ -350,6 +350,7 @@ if __name__ == "__main__":
     print(f"   Sync interval:     {SYNC_INTERVAL}s")
     print(f"   Metrics interval:  {METRICS_INTERVAL}s")
     print(f"   Migration poll:    {MIGRATION_POLL}s")
+    print(f"   Command poll:      {COMMAND_POLL}s")
 
     # Initial sync + metrics push
     sync_to_locator()
@@ -360,6 +361,9 @@ if __name__ == "__main__":
 
     # Background: migration poller
     threading.Thread(target=migration_loop, daemon=True).start()
+
+    # Background: start/stop command poller (Locator → lokey delegation)
+    threading.Thread(target=command_loop, daemon=True).start()
 
     # Watch registry.json for changes
     observer = Observer()
