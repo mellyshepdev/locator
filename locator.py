@@ -197,38 +197,6 @@ def enforce_instance_limits_global(new_name: str, new_host: str):
             f"evicting {evict_host} (oldest), keeping {keeper_host} (newest)"
         )
 
-def get_container_project_dir(container_name: str):
-    """Return the docker-compose project.working_dir label for a container (running or stopped)."""
-    if not docker_client:
-        return None
-    try:
-        c = docker_client.containers.get(container_name)
-        return c.labels.get("com.docker.compose.project.working_dir")
-    except Exception:
-        try:
-            results = docker_client.containers.list(all=True, filters={"name": container_name})
-            if results:
-                return results[0].labels.get("com.docker.compose.project.working_dir")
-        except Exception:
-            pass
-    return None
-
-def git_pull_in_dir(project_dir: str):
-    """Run git pull in a host-mounted project directory (best-effort)."""
-    if not project_dir or not os.path.isdir(project_dir):
-        return
-    try:
-        result = subprocess.run(
-            ["git", "-C", project_dir, "pull"],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode == 0:
-            print(f"\U0001f4e5 git pull OK: {project_dir}")
-        else:
-            print(f"\u26a0\ufe0f git pull warning ({project_dir}): {result.stderr.strip()}")
-    except Exception as e:
-        print(f"\u26a0\ufe0f git pull skipped ({project_dir}): {e}")
-
 # ── REGISTRY STATE ──────────────────────────────────────────────────────────
 
 registry = {
