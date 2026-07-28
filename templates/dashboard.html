@@ -1289,6 +1289,23 @@
         loadRegistryData();
         setInterval(loadRegistryData, 10000);
 
+        // ── STATIC "CLOUD & NATIVE PLATFORMS" TABLE — also clickable, same data-sheet modal ──
+        // These rows are hand-authored reference entries, not live registry data, so their
+        // full detail is wired here rather than coming from /api/registry.
+        const CLOUD_PLATFORM_ENTRIES = [
+            { name: 'Netlify', host: 'cloud / CDN', software: 'Static site hosting, JAMstack, serverless functions', dashboard: 'https://app.netlify.com', notes: 'Static frontends, deploy previews' },
+            { name: 'Vercel', host: 'cloud / CDN', software: 'Next.js hosting, edge functions, static deployments', dashboard: 'https://vercel.com/dashboard', notes: 'Next.js apps, serverless' },
+            { name: 'Render', host: 'cloud / PaaS', software: 'Container hosting, web services, cron jobs, databases', dashboard: 'https://dashboard.render.com', notes: 'Containerized backend services' },
+            { name: 'Fly.io', host: 'cloud / PaaS', software: 'Container deployments, global edge, Postgres', dashboard: 'https://fly.io/dashboard', notes: 'Edge container hosting' },
+            { name: 'Unit 3 — Mac mini', host: 'unit3 / LAN 10.0.0.196', software: 'Keycloak 24.0.5, PostgreSQL 16, MCP Tools (7 servers)', url: 'https://auth.theofficialblacksheepco.com', ssh: 'ssh unit3', notes: 'macOS Monterey 8GB RAM — native (no Docker)' },
+            { name: 'Unit 3 — Keycloak', host: 'unit3 :8180', software: 'Keycloak 24.0.5 (Quarkus) + PostgreSQL 16 backend', url: 'https://auth.theofficialblacksheepco.com', dashboard: 'https://auth.theofficialblacksheepco.com/admin', notes: 'Migrated from unit1 Docker 2026-06-25' },
+            { name: 'Unit 3 — MCP Tools', host: 'unit3 :8001–8009', software: 'filesystem, github, brave-search, puppeteer, memory, sequential-thinking, slack', internal: 'SSE via mcp-gateway → 10.0.0.196:800X', notes: 'Used by Claude Code, The Beast, Gemini' },
+        ];
+        document.querySelectorAll('#tbody-cloud-platforms tr').forEach((tr, i) => {
+            const entry = CLOUD_PLATFORM_ENTRIES[i];
+            if (entry) tr.addEventListener('click', () => openDeviceModal(entry));
+        });
+
         // ── CONTAINER TOGGLE LOGIC ──
         let _togglePending = { name: null, action: null };
 
