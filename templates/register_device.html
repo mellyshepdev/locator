@@ -173,9 +173,11 @@ code {
         <p>There's no native Lokey app for this platform yet — this device is registered, but won't send live heartbeats. If you're on Android instead, reopen this page there for the installable app.</p>
     </div>
     <div id="install-windows" style="display:none;">
-        <p>No packaged Windows installer exists yet (only macOS/Linux have one so far) — run the native agent manually with Python:</p>
+        <p>Installs the native Lokey agent as a logon Scheduled Task (heartbeats CPU/MEM/DISK to the mesh, same as Linux/Mac).</p>
+        <a class="btn" href="/static/install-windows.ps1" download>⬇ Download Installer (.ps1)</a>
+        <div class="detail" style="margin-top:10px;">Then open PowerShell in your Downloads folder and run:</div>
         <code id="cmd-windows"></code>
-        <div class="detail">Requires Python 3 + <span>pip install -r requirements.txt</span> (from the same repo) first. Some checks in <span>hard-stats.py</span> assume Linux/macOS (e.g. Docker socket, load average) and may no-op harmlessly on Windows — heartbeats/metrics should still work. Not yet verified end-to-end on Windows; report back if it breaks.</div>
+        <div class="detail">Requires Python 3 already installed (get it from python.org if <span>python --version</span> fails, checking "Add to PATH" during setup) — the installer handles everything else. Not yet verified end-to-end on real Windows hardware; some checks in <span>hard-stats.py</span> assume Linux/macOS (Docker socket, load average) and should no-op harmlessly, but report back if the heartbeat doesn't show up.</div>
     </div>
     <div id="install-mac" style="display:none;">
         <p>Install the native Lokey agent as a LaunchAgent:</p>
@@ -224,16 +226,22 @@ function setPlatform(p) {
 
 var LOCATOR_ORIGIN = window.location.origin;
 document.getElementById('locator-url-android').textContent = LOCATOR_ORIGIN;
-document.getElementById('cmd-windows').textContent =
-    'git clone https://gitlab.com/gbonds1/lokey.git\r\ncd lokey\r\npip install -r requirements.txt\r\nset LOCATOR_URL=' + LOCATOR_ORIGIN + '\r\nset UNIT_NAME=unit5\r\npython hard-stats.py';
-document.getElementById('cmd-mac').textContent =
-    'git clone https://gitlab.com/gbonds1/lokey.git\ncd lokey\nLOCATOR_URL=' + LOCATOR_ORIGIN + ' ./install-unit3-mac.sh';
-document.getElementById('cmd-linux').textContent =
-    'git clone https://gitlab.com/gbonds1/lokey.git\ncd lokey\nLOCATOR_URL=' + LOCATOR_ORIGIN + ' ./install-unit6-linux.sh';
+
+function updateInstallCommands() {
+    var name = document.getElementById('device-name').value.trim() || 'unit5';
+    document.getElementById('cmd-windows').textContent =
+        'powershell -ExecutionPolicy Bypass -File .\\install-windows.ps1 -LocatorUrl "' + LOCATOR_ORIGIN + '" -UnitName "' + name + '"';
+    document.getElementById('cmd-mac').textContent =
+        'git clone https://gitlab.com/gbonds1/lokey.git\ncd lokey\nLOCATOR_URL=' + LOCATOR_ORIGIN + ' ./install-unit3-mac.sh';
+    document.getElementById('cmd-linux').textContent =
+        'git clone https://gitlab.com/gbonds1/lokey.git\ncd lokey\nLOCATOR_URL=' + LOCATOR_ORIGIN + ' ./install-unit6-linux.sh';
+}
 
 var platform = detectPlatform();
 document.getElementById('device-name').value = guessDeviceName();
 setPlatform(platform);
+updateInstallCommands();
+document.getElementById('device-name').addEventListener('input', updateInstallCommands);
 
 document.querySelectorAll('.platform-btn').forEach(function(b) {
     b.addEventListener('click', function() { setPlatform(b.dataset.platform); });
