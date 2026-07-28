@@ -610,6 +610,7 @@
 
         <!-- PURPLE RECTANGLE: WEBSITES -->
         <div class="grid-container grid-purple">
+            <button class="grid-maximize-btn" onclick="toggleGridMaximize(this)" title="Maximize section">⛶</button>
             <h1 class="grid-title" style="color: #a200ff; border-color: #a200ff; text-shadow: 0 0 10px #a200ff;">Websites</h1>
             <div class="status-header">
                 <div>ACTIVE WEBSITES: <span id="count-websites" style="color: #a200ff;">0</span></div>
@@ -623,6 +624,7 @@
 
         <!-- AMBER RECTANGLE: VIRTUAL MACHINES -->
         <div class="grid-container grid-amber">
+            <button class="grid-maximize-btn" onclick="toggleGridMaximize(this)" title="Maximize section">⛶</button>
             <h1 class="grid-title" style="color: #ff8800; border-color: #ff8800; text-shadow: 0 0 10px #ff8800;">Virtual Machines</h1>
             <div class="status-header">
                 <div>ACTIVE VMs: <span id="count-vms" style="color: #ff8800;">0</span></div>
@@ -635,7 +637,8 @@
         </div>
 
         <!-- PINK RECTANGLE: SERVERLESS / PaaS -->
-        <div class="grid-container" style="border: 1px solid #ff2d95; box-shadow: 0 0 20px rgba(255, 45, 149, 0.2);">
+        <div class="grid-container" style="border: 1px solid #ff2d95; box-shadow: 0 0 20px rgba(255, 45, 149, 0.2); color: #ff2d95;">
+            <button class="grid-maximize-btn" onclick="toggleGridMaximize(this)" title="Maximize section">⛶</button>
             <h1 class="grid-title" style="color: #ff2d95; border-color: #ff2d95; text-shadow: 0 0 10px #ff2d95;">Serverless / PaaS</h1>
             <div class="status-header">
                 <div>ACTIVE SERVERLESS: <span id="count-serverless" style="color: #ff2d95;">0</span></div>
@@ -1130,13 +1133,16 @@
                 const tr = document.createElement('tr');
                 tr.className = 'clickable-row';
                 tr.title = 'Click for full device data sheet';
+                const isStale = item.status === 'ONLINE' && (!item.last_seen || (Date.now() - new Date(item.last_seen)) > 300000);
+                const displayStatus = isStale ? 'STALE' : item.status;
+                const dotClass = item.status !== 'ONLINE' ? 'offline' : (isStale ? 'stale' : 'online');
                 tr.innerHTML = `
                     <td style="font-weight:bold">${item.name || item.id}</td>
                     <td>${item.ip || item.tailscale_ip || 'unknown'}</td>
                     <td>${item.type || '-'}</td>
                     <td>
-                        <span class="status-dot ${item.status === 'ONLINE' ? 'online' : 'offline'}"></span>
-                        ${item.status}
+                        <span class="status-dot ${dotClass}"></span>
+                        ${displayStatus}
                     </td>
                 `;
                 tr.appendChild(createMetaBadges(item.metadata));
