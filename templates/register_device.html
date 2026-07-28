@@ -110,6 +110,7 @@ button:disabled { opacity: 0.5; cursor: default; }
     cursor: pointer;
 }
 .platform-btn.active { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 8px rgba(0,240,255,0.3); }
+@media (min-width: 700px) { #qr-card { display: block !important; } }
 #status { font-size: 13px; margin-top: 14px; text-align: center; min-height: 18px; }
 #status.ok { color: var(--neon-green); }
 #status.err { color: var(--danger); }
@@ -135,6 +136,11 @@ code {
 
 <h1>📱 Register This Device</h1>
 <div class="subtitle">S.H.E.E.P. — add this device to the mesh</div>
+
+<div class="card" id="qr-card" style="text-align:center; display:none;">
+    <div style="color:#888; font-size:12px; text-transform:uppercase; letter-spacing:1px; margin-bottom:10px;">On a shared screen? Others can scan to open this page on their own device</div>
+    <img src="/register-device-qr.png" alt="Scan to open this page" width="140" height="140" style="display:block; margin:0 auto; background:#fff; border-radius:4px;">
+</div>
 
 <div class="card">
     <label for="device-name">Device name</label>

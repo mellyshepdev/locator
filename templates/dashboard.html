@@ -509,15 +509,6 @@
         📱 Register a Device
     </a>
 
-    <!-- Scan-to-register QR — desktop-only, points a phone camera at /register-device -->
-    <style>
-        @media (max-width: 700px) { #register-device-qr { display: none !important; } }
-    </style>
-    <div id="register-device-qr" style="position:absolute; top:118px; right:30px; z-index:100; display:flex; flex-direction:column; align-items:center; gap:4px; background:rgba(0,0,0,0.8); border:1px solid var(--accent); border-radius:4px; padding:8px; box-shadow:0 0 10px rgba(0,240,255,0.3);">
-        <img src="/register-device-qr.png" alt="Scan to register a device" width="110" height="110" style="display:block; background:#fff; border-radius:2px;">
-        <span style="color:var(--accent); font-size:10px; text-transform:uppercase; letter-spacing:1px;">Scan to Register</span>
-    </div>
-
     <!-- Button  -->
     <div id="upload-container" style="margin-top: 20px; display: flex; justify-content: center; gap: 10px; position: fixed; bottom: 20px; right: 20px; z-index: 9999;">
       <input type="text" id="manual-path" placeholder="/home/swoopg111/projects/my-app" style="padding: 10px; width: 300px; background: #000; border: 1px solid var(--accent); color: #fff;">
