@@ -488,13 +488,26 @@
             box-shadow: 0 0 16px rgba(255, 0, 60, 0.4);
             animation: pulse 1.5s infinite;
         }
-        .metric-card .mc-name { font-weight: bold; font-size: 15px; margin-bottom: 4px; letter-spacing: 1px; }
+        .metric-card .mc-name { font-weight: bold; font-size: 15px; margin-top: 22px; margin-bottom: 4px; letter-spacing: 1px; }
         .metric-card .mc-ip { font-size: 10px; color: #6699aa; margin-bottom: 10px; }
         .metric-card .mc-badge {
             position: absolute; top: 12px; right: 12px;
             font-size: 9px; padding: 2px 7px; border-radius: 3px;
             font-weight: bold; letter-spacing: 1px; border: 1px solid;
         }
+        .metric-card .mc-maximize {
+            position: absolute; top: 10px; left: 10px;
+            width: 20px; height: 20px;
+            display: flex; align-items: center; justify-content: center;
+            background: rgba(0, 240, 255, 0.08);
+            border: 1px solid rgba(0, 240, 255, 0.4);
+            border-radius: 3px;
+            color: var(--accent);
+            font-size: 11px; line-height: 1; cursor: pointer;
+            padding: 0;
+            transition: background 0.2s, transform 0.15s;
+        }
+        .metric-card .mc-maximize:hover { background: rgba(0, 240, 255, 0.25); transform: scale(1.1); }
         .mc-badge.online  { color: var(--neon-green); border-color: var(--neon-green); background: rgba(0,255,0,0.1); }
         .mc-badge.stale   { color: #ffe600; border-color: #ffe600; background: rgba(255,230,0,0.1); }
         .mc-badge.offline { color: var(--danger); border-color: var(--danger); background: rgba(255,0,60,0.1); }
@@ -1009,6 +1022,7 @@
                 const bar = (v) => `<div class="mc-bar"><div class="mc-fill" style="width:${Math.min(v || 0, 100)}%;background:${pctColor(v)}"></div></div>`;
                 const row = (label, v) => `<div class="mc-row"><span class="mc-label">${label}</span><span style="color:${pctColor(v)}">${v != null ? v.toFixed(1) + '%' : '—'}</span></div>`;
                 return `<div class="metric-card${oom ? ' oom' : ''}">
+                    <button type="button" class="mc-maximize" title="Maximize" onclick="maximizeNodeCard('${id}')">⛶</button>
                     <div class="mc-name">${id}</div>
                     <div class="mc-ip">${ip}${disk}</div>
                     <span class="mc-badge ${badge}">${oom ? 'OOM' : badge.toUpperCase()}</span>
@@ -1017,6 +1031,12 @@
                     ${row('DISK', n.disk_percent)}${bar(n.disk_percent)}
                 </div>`;
             }).join('');
+        }
+
+        function maximizeNodeCard(id) {
+            if (!lastRegistryData) return;
+            const n = lastRegistryData.nodes && lastRegistryData.nodes[id];
+            if (n) openDeviceModal({ ...n, id, name: id });
         }
 
         // ── DEVICES & NODES FILTERING ──
