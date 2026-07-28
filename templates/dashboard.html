@@ -427,6 +427,67 @@
             50% { opacity: 0.3; }
             100% { opacity: 1; }
         }
+
+        /* ── LIVE NODE METRIC CARDS ── */
+        .node-cards-row {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-bottom: 30px;
+        }
+        .metric-card {
+            flex: 1;
+            min-width: 210px;
+            background: rgba(0, 10, 20, 0.85);
+            border: 1px solid #00f0ff;
+            border-radius: 6px;
+            padding: 14px;
+            position: relative;
+            box-shadow: 0 0 12px rgba(0, 240, 255, 0.15);
+        }
+        .metric-card.oom {
+            border-color: var(--danger);
+            box-shadow: 0 0 16px rgba(255, 0, 60, 0.4);
+            animation: pulse 1.5s infinite;
+        }
+        .metric-card .mc-name { font-weight: bold; font-size: 15px; margin-bottom: 4px; letter-spacing: 1px; }
+        .metric-card .mc-ip { font-size: 10px; color: #6699aa; margin-bottom: 10px; }
+        .metric-card .mc-badge {
+            position: absolute; top: 12px; right: 12px;
+            font-size: 9px; padding: 2px 7px; border-radius: 3px;
+            font-weight: bold; letter-spacing: 1px; border: 1px solid;
+        }
+        .mc-badge.online  { color: var(--neon-green); border-color: var(--neon-green); background: rgba(0,255,0,0.1); }
+        .mc-badge.stale   { color: #ffe600; border-color: #ffe600; background: rgba(255,230,0,0.1); }
+        .mc-badge.offline { color: var(--danger); border-color: var(--danger); background: rgba(255,0,60,0.1); }
+        .metric-card .mc-row { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 3px; }
+        .metric-card .mc-label { color: #6699aa; letter-spacing: 1px; }
+        .metric-card .mc-bar {
+            height: 4px; background: rgba(0, 240, 255, 0.15);
+            border-radius: 2px; margin-bottom: 9px; overflow: hidden;
+        }
+        .metric-card .mc-fill { height: 100%; border-radius: 2px; transition: width .4s ease; }
+
+        /* ── GRID FILTER BAR ── */
+        .filter-bar {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 25px;
+        }
+        .filter-bar input, .filter-bar select {
+            background: #000;
+            border: 1px solid var(--accent);
+            color: #fff;
+            padding: 8px 12px;
+            font-family: inherit;
+            font-size: 13px;
+            outline: none;
+        }
+        .filter-bar input { width: 280px; }
+        .filter-bar input:focus { box-shadow: 0 0 10px rgba(0, 240, 255, 0.4); }
+        .filter-count { color: #6699aa; font-size: 12px; margin-left: auto; letter-spacing: 1px; }
     </style>
 </head>
 <body>
@@ -488,6 +549,19 @@
                 <div>MESH NODES ACTIVE: <span id="count-devices" style="color: #00f0ff;">0</span></div>
                 <div>SYSTEM STATUS: <span class="status-dot online" style="background-color: #00f0ff; box-shadow: 0 0 8px #00f0ff;"></span> NOMINAL</div>
             </div>
+
+            <!-- FILTER BAR -->
+            <div class="filter-bar">
+                <input id="grid-search" placeholder="filter by name, host, url, network..." oninput="if (lastRegistryData) renderGrid(lastRegistryData)">
+                <select id="grid-unit-filter" onchange="if (lastRegistryData) renderGrid(lastRegistryData)">
+                    <option value="">ALL UNITS</option>
+                </select>
+                <span class="filter-count" id="filter-count"></span>
+            </div>
+
+            <!-- LIVE NODE METRICS -->
+            <div class="node-cards-row" id="node-cards"></div>
+
             <table>
                 <thead><tr><th style="color: #00f0ff;">Device</th><th style="color: #00f0ff;">IP Address</th><th style="color: #00f0ff;">Type / OS</th><th style="color: #00f0ff;">Status</th><th style="color: #00f0ff;">Metadata</th><th style="color: #00f0ff;">Last Seen</th></tr></thead>
                 <tbody id="tbody-devices"></tbody>
@@ -866,12 +940,76 @@
             return Math.floor(seconds / 86400) + "d ago";
         }
 
+        let lastRegistryData = null;
+
+        // ── LIVE NODE METRIC CARDS ──
+        function pctColor(v) {
+            if (v == null) return '#6699aa';
+            if (v > 90) return '#ff003c';
+            if (v > 70) return '#ffe600';
+            if (v > 40) return '#00f0ff';
+            return '#00ff00';
+        }
+
+        function renderNodeCards(registryData) {
+            const el = document.getElementById('node-cards');
+            if (!el) return;
+            const nodes = Object.entries(registryData.nodes || {});
+            el.innerHTML = nodes.map(([id, n]) => {
+                const stale = !n.last_seen || (Date.now() - new Date(n.last_seen)) > 300000;
+                const oom = (n.mem_percent || 0) >= 90;
+                const badge = n.status !== 'ONLINE' ? 'offline' : (stale ? 'stale' : 'online');
+                const ip = n.tailscale_ip || n.ip || 'unknown';
+                const disk = (n.disk_used_gb != null && n.disk_total_gb != null)
+                    ? ` · ${n.disk_used_gb}/${n.disk_total_gb} GB` : '';
+                const bar = (v) => `<div class="mc-bar"><div class="mc-fill" style="width:${Math.min(v || 0, 100)}%;background:${pctColor(v)}"></div></div>`;
+                const row = (label, v) => `<div class="mc-row"><span class="mc-label">${label}</span><span style="color:${pctColor(v)}">${v != null ? v.toFixed(1) + '%' : '—'}</span></div>`;
+                return `<div class="metric-card${oom ? ' oom' : ''}">
+                    <div class="mc-name">${id}</div>
+                    <div class="mc-ip">${ip}${disk}</div>
+                    <span class="mc-badge ${badge}">${oom ? 'OOM' : badge.toUpperCase()}</span>
+                    ${row('CPU', n.cpu_percent)}${bar(n.cpu_percent)}
+                    ${row('MEM', n.mem_percent)}${bar(n.mem_percent)}
+                    ${row('DISK', n.disk_percent)}${bar(n.disk_percent)}
+                </div>`;
+            }).join('');
+        }
+
+        // ── DEVICES & NODES FILTERING ──
+        function nodeMatchesFilter(id, item) {
+            const searchEl = document.getElementById('grid-search');
+            const unitEl = document.getElementById('grid-unit-filter');
+            const search = (searchEl && searchEl.value || '').toLowerCase();
+            const unit = unitEl ? unitEl.value : '';
+            if (unit && id !== unit) return false;
+            if (search) {
+                const meta = item.metadata || {};
+                const haystack = [
+                    item.name || id, item.ip || item.tailscale_ip || '', item.type || '',
+                    Object.values(meta).join(' ')
+                ].join(' ').toLowerCase();
+                if (!haystack.includes(search)) return false;
+            }
+            return true;
+        }
+
+        function updateUnitFilterOptions(registryData) {
+            const sel = document.getElementById('grid-unit-filter');
+            if (!sel) return;
+            const current = sel.value;
+            const units = Object.keys(registryData.nodes || {}).sort();
+            sel.innerHTML = '<option value="">ALL UNITS</option>' +
+                units.map(u => `<option value="${u}"${u === current ? ' selected' : ''}>${u.toUpperCase()}</option>`).join('');
+        }
+
         function loadRegistryData() {
             fetch('/api/registry')
                 .then(response => response.json())
                 .then(data => {
+                    lastRegistryData = data;
                     renderGrid(data);
                     renderMap(data);
+                    renderNodeCards(data);
                 })
                 .catch(error => {
                     console.error("Failed to load registry data:", error);
