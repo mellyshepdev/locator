@@ -1,0 +1,11 @@
+.git
+__pycache__/
+*.pyc
+*.pyo
+data/
+registry_data/
+.env
+*.log
+correct look/
+currently incorrect look/
+dashboard.html.old
