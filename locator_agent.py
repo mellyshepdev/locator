@@ -24,7 +24,6 @@ REGISTRY_FILE      = "registry.json"
 SYNC_INTERVAL      = int(os.environ.get("SYNC_INTERVAL", "300"))      # seconds between full syncs
 METRICS_INTERVAL   = int(os.environ.get("METRICS_INTERVAL", "60"))    # seconds between metric pushes
 MIGRATION_POLL     = int(os.environ.get("MIGRATION_POLL_INTERVAL", "30"))  # seconds between migration polls
-COMMAND_POLL       = int(os.environ.get("COMMAND_POLL_INTERVAL", "10"))    # seconds between start/stop command polls
 
 client = docker.from_env()
 
@@ -208,7 +207,6 @@ if __name__ == "__main__":
     print(f"   Sync interval:     {SYNC_INTERVAL}s")
     print(f"   Metrics interval:  {METRICS_INTERVAL}s")
     print(f"   Migration poll:    {MIGRATION_POLL}s")
-    print(f"   Command poll:      {COMMAND_POLL}s")
 
     # Initial sync + metrics push
     sync_to_locator()
@@ -219,9 +217,6 @@ if __name__ == "__main__":
 
     # Background: migration poller
     threading.Thread(target=migration_loop, daemon=True).start()
-
-    # Background: start/stop command poller (Locator → lokey delegation)
-    threading.Thread(target=command_loop, daemon=True).start()
 
     # Watch registry.json for changes
     observer = Observer()
