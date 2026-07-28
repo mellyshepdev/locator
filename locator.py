@@ -588,10 +588,10 @@ def register_service():
         existing = registry["services"].get(service_id, {})
 
         _svc_type = data.get("type", existing.get("type", "container"))
-        _default_cat = _infer_category(_svc_type, data.get("url", existing.get("url", "")))
+        _category = data.get("category", existing.get("category", _infer_category(_svc_type, data.get("url", existing.get("url", "")))))
         registry["services"][service_id] = {
             "name": name,
-            "category": data.get("category", existing.get("category", _default_cat)),
+            "category": _category,
             "url": data.get("url", existing.get("url", "")),
             "internal": data.get("internal", existing.get("internal", "")),
             "host": host,
@@ -603,6 +603,22 @@ def register_service():
             "registered_at": existing.get("registered_at", now),
             "metadata": data.get("metadata", existing.get("metadata", {}))
         }
+
+        # Self-registered devices (phones/tablets/laptops via /register-device) are also
+        # first-class nodes, so they show up on the Tactical Grid's Devices & Nodes panel
+        # (node cards + table), not just in the plain services list.
+        if _category == "devices" and host != "unknown":
+            existing_node = registry["nodes"].get(host, {})
+            meta = data.get("metadata", existing.get("metadata", {})) or {}
+            registry["nodes"][host] = {
+                **existing_node,
+                "type": meta.get("platform", existing_node.get("type", "device")),
+                "status": "ONLINE",
+                "last_seen": now,
+                "ip": existing_node.get("ip", meta.get("ip", "")),
+                "metadata": meta,
+            }
+
         # Update the node as ONLINE whenever any service heartbeats from it
         if host != "unknown" and host in registry["nodes"]:
             registry["nodes"][host]["status"] = "ONLINE"

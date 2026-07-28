@@ -216,6 +216,7 @@
             color: var(--neon-green);
         }
         .grid-container {
+            position: relative;
             width: 95%;
             max-width: none;
             margin: 80px auto 40px auto; /* Push down to avoid toggle switch */
@@ -225,6 +226,39 @@
             padding: 20px;
             backdrop-filter: blur(5px);
         }
+        .grid-container.maximized {
+            position: fixed !important;
+            top: 0 !important;
+            left: 0 !important;
+            width: 100vw !important;
+            height: 100vh !important;
+            max-width: 100vw;
+            margin: 0 !important;
+            z-index: 15000;
+            overflow-y: auto;
+            border-radius: 0;
+        }
+        .grid-maximize-btn {
+            position: absolute;
+            top: 16px;
+            right: 20px;
+            width: 34px;
+            height: 34px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: transparent;
+            border: 1px solid currentColor;
+            border-radius: 4px;
+            color: inherit;
+            font-family: inherit;
+            font-size: 16px;
+            line-height: 1;
+            cursor: pointer;
+            transition: background 0.2s;
+            z-index: 5;
+        }
+        .grid-maximize-btn:hover { background: rgba(255, 255, 255, 0.12); }
         .grid-green { border: 1px solid #00ff00; box-shadow: 0 0 20px rgba(0, 255, 0, 0.2); color: #00ff00; }
         .grid-purple { border: 1px solid #a200ff; box-shadow: 0 0 20px rgba(162, 0, 255, 0.2); color: #a200ff; margin-top: 40px;}
         .grid-blue { border: 1px solid #00f0ff; box-shadow: 0 0 20px rgba(0, 240, 255, 0.2); color: #00f0ff; margin-top: 40px;}
@@ -437,7 +471,7 @@
         }
         .metric-card {
             flex: 1;
-            min-width: 210px;
+            min-width: 300px;
             background: rgba(0, 10, 20, 0.85);
             border: 1px solid #00f0ff;
             border-radius: 6px;
@@ -535,6 +569,7 @@
 
         <!-- BLUE RECTANGLE: DEVICES -->
         <div class="grid-container grid-blue">
+            <button class="grid-maximize-btn" onclick="toggleGridMaximize(this)" title="Maximize section">⛶</button>
             <h1 class="grid-title" style="color: #00f0ff; border-color: #00f0ff; text-shadow: 0 0 10px #00f0ff;">Devices & Nodes</h1>
             <div class="status-header">
                 <div>MESH NODES ACTIVE: <span id="count-devices" style="color: #00f0ff;">0</span></div>
