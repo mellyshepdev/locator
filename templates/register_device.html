@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Register a Device — S.H.E.E.P.</title>
+<script>
+(function() {
+    function report(message, sourceUrl, line, col, stack) {
+        try {
+            fetch('/api/client-error', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    message: String(message || ''), stack: stack || '',
+                    sourceUrl: sourceUrl || '', pageUrl: window.location.href,
+                    line: line || null, col: col || null, userAgent: navigator.userAgent
+                }),
+                keepalive: true
+            }).catch(function() {});
+        } catch (e) {}
+    }
+    window.addEventListener('error', function(e) { report(e.message, e.filename, e.lineno, e.colno, e.error && e.error.stack); });
+    window.addEventListener('unhandledrejection', function(e) {
+        var r = e.reason;
+        report((r && r.message) || String(r), window.location.href, null, null, r && r.stack);
+    });
+})();
+</script>
+<style>
+:root {
+    --bg: #000510;
+    --accent: #00f0ff;
+    --neon-green: #00ff00;
+    --danger: #ff003c;
+}
+* { box-sizing: border-box; }
+body {
+    background-color: var(--bg);
+    background-image: radial-gradient(circle at center, #001030 0%, #000510 100%);
+    color: #fff;
+    font-family: 'Courier New', Courier, monospace;
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 30px 16px 60px;
+}
+h1 {
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 3px;
+    text-shadow: 0 0 15px var(--accent);
+    font-size: 22px;
+    text-align: center;
+    margin: 10px 0 4px;
+}
+.subtitle { color: #888; font-size: 13px; margin-bottom: 30px; text-align: center; }
+.card {
+    width: 100%;
+    max-width: 420px;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    box-shadow: 0 0 20px rgba(0,240,255,0.15);
+    padding: 24px;
+    margin-bottom: 20px;
+    background: rgba(0,0,0,0.4);
+}
+label { display: block; font-size: 12px; color: var(--accent); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+input[type=text] {
+    width: 100%;
+    padding: 10px;
+    background: #000;
+    border: 1px solid var(--accent);
+    color: #fff;
+    font-family: inherit;
+    font-size: 14px;
+    margin-bottom: 18px;
+}
+button, .btn {
+    display: block;
+    width: 100%;
+    padding: 14px;
+    background: var(--accent);
+    color: #000;
+    border: none;
+    border-radius: 4px;
+    font-family: inherit;
+    font-weight: bold;
+    font-size: 15px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    cursor: pointer;
+    text-align: center;
+    text-decoration: none;
+}
+button:disabled { opacity: 0.5; cursor: default; }
+.btn.secondary { background: transparent; border: 1px solid var(--neon-green); color: var(--neon-green); margin-top: 12px; }
+#status { font-size: 13px; margin-top: 14px; text-align: center; min-height: 18px; }
+#status.ok { color: var(--neon-green); }
+#status.err { color: var(--danger); }
+.detail { font-size: 12px; color: #888; margin-top: 4px; }
+.detail span { color: #ccc; }
+#install-section { display: none; }
+#install-section h2 { color: var(--neon-green); font-size: 16px; text-transform: uppercase; letter-spacing: 2px; margin-top: 0; }
+code {
+    display: block;
+    background: #000;
+    border: 1px solid var(--neon-green);
+    color: var(--neon-green);
+    padding: 10px;
+    font-size: 12px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin: 10px 0;
+}
+</style>
+</head>
+<body>
+
+<h1>📱 Register This Device</h1>
+<div class="subtitle">S.H.E.E.P. — add this phone or tablet to the mesh</div>
+
+<div class="card">
+    <label for="device-name">Device name</label>
+    <input type="text" id="device-name" maxlength="60">
+    <div class="detail" id="device-detail"></div>
+    <br>
+    <button id="register-btn" onclick="registerDevice()">Register This Device</button>
+    <div id="status"></div>
+</div>
+
+<div class="card" id="install-section">
+    <h2>Install Lokey</h2>
+    <div id="install-android" style="display:none;">
+        <p>Lokey keeps this device's status live in the registry (battery, network, storage) instead of a one-time snapshot.</p>
+        <a class="btn" href="/static/lokey-android.apk" download>⬇ Download Lokey for Android (.apk)</a>
+        <div class="detail">Debug build — Android will warn about "unknown sources." Allow it, then open the app, set the Locator URL shown below, and press "Start reporting."</div>
+        <div class="detail" style="margin-top:10px;">Locator URL to paste into the app:</div>
+        <code id="locator-url-android"></code>
+    </div>
+    <div id="install-ios" style="display:none;">
+        <p>There's no native Lokey app for this platform yet — this device is registered, but won't send live heartbeats. If you're on Android instead, reopen this page there for the installable app.</p>
+    </div>
+</div>
+
+<script>
+function detectPlatform() {
+    var ua = navigator.userAgent || '';
+    if (/android/i.test(ua)) return 'android';
+    if (/iphone|ipad|ipod/i.test(ua)) return 'ios';
+    return 'other';
+}
+
+function guessDeviceName() {
+    var ua = navigator.userAgent || '';
+    var m = ua.match(/\(([^)]+)\)/);
+    var platform = detectPlatform();
+    if (platform === 'android') {
+        var am = ua.match(/Android[^;]*;\s*([^)]+?)(?:\sBuild|\))/);
+        if (am && am[1]) return am[1].trim();
+    }
+    if (platform === 'ios') return /ipad/i.test(ua) ? 'iPad' : 'iPhone';
+    return (navigator.platform || 'Mobile Device');
+}
+
+var platform = detectPlatform();
+document.getElementById('device-name').value = guessDeviceName();
+document.getElementById('device-detail').textContent =
+    'Detected: ' + platform + ' · ' + (screen.width + 'x' + screen.height);
+document.getElementById('locator-url-android').textContent = window.location.origin;
+
+function registerDevice() {
+    var btn = document.getElementById('register-btn');
+    var statusEl = document.getElementById('status');
+    var name = document.getElementById('device-name').value.trim();
+    if (!name) {
+        statusEl.textContent = 'Enter a device name first.';
+        statusEl.className = 'err';
+        return;
+    }
+    btn.disabled = true;
+    statusEl.textContent = 'Registering…';
+    statusEl.className = '';
+
+    fetch('/register', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            name: name,
+            host: name,
+            type: 'native',
+            category: 'devices',
+            metadata: {
+                device: 'mobile',
+                platform: platform,
+                user_agent: navigator.userAgent,
+                screen: screen.width + 'x' + screen.height,
+                registered_via: 'web-self-register'
+            }
+        })
+    })
+    .then(function(r) { return r.json().then(function(d) { return {ok: r.ok, data: d}; }); })
+    .then(function(res) {
+        btn.disabled = false;
+        if (!res.ok || res.data.error) {
+            statusEl.textContent = 'Error: ' + (res.data.error || 'registration failed');
+            statusEl.className = 'err';
+            return;
+        }
+        statusEl.textContent = '✓ Registered as "' + name + '" — visible on the Tactical Grid now.';
+        statusEl.className = 'ok';
+        var installSection = document.getElementById('install-section');
+        installSection.style.display = 'block';
+        document.getElementById(platform === 'android' ? 'install-android' : 'install-ios').style.display = 'block';
+    })
+    .catch(function(err) {
+        btn.disabled = false;
+        statusEl.textContent = 'Request failed: ' + err;
+        statusEl.className = 'err';
+    });
+}
+</script>
+</body>
+</html>
