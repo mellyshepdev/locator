@@ -97,6 +97,19 @@ button, .btn {
 }
 button:disabled { opacity: 0.5; cursor: default; }
 .btn.secondary { background: transparent; border: 1px solid var(--neon-green); color: var(--neon-green); margin-top: 12px; }
+.platform-btn {
+    flex: 1;
+    min-width: 90px;
+    padding: 8px 10px;
+    background: transparent;
+    border: 1px solid #335;
+    color: #aab;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+.platform-btn.active { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 8px rgba(0,240,255,0.3); }
 #status { font-size: 13px; margin-top: 14px; text-align: center; min-height: 18px; }
 #status.ok { color: var(--neon-green); }
 #status.err { color: var(--danger); }
@@ -121,7 +134,7 @@ code {
 <body>
 
 <h1>📱 Register This Device</h1>
-<div class="subtitle">S.H.E.E.P. — add this phone or tablet to the mesh</div>
+<div class="subtitle">S.H.E.E.P. — add this device to the mesh</div>
 
 <div class="card">
     <label for="device-name">Device name</label>
@@ -173,26 +186,52 @@ function detectPlatform() {
     var ua = navigator.userAgent || '';
     if (/android/i.test(ua)) return 'android';
     if (/iphone|ipad|ipod/i.test(ua)) return 'ios';
+    if (/windows/i.test(ua)) return 'windows';
+    if (/mac ?os|macintosh/i.test(ua)) return 'mac';
+    if (/linux/i.test(ua)) return 'linux';
     return 'other';
 }
 
 function guessDeviceName() {
     var ua = navigator.userAgent || '';
-    var m = ua.match(/\(([^)]+)\)/);
-    var platform = detectPlatform();
-    if (platform === 'android') {
+    var plat = detectPlatform();
+    if (plat === 'android') {
         var am = ua.match(/Android[^;]*;\s*([^)]+?)(?:\sBuild|\))/);
         if (am && am[1]) return am[1].trim();
     }
-    if (platform === 'ios') return /ipad/i.test(ua) ? 'iPad' : 'iPhone';
-    return (navigator.platform || 'Mobile Device');
+    if (plat === 'ios') return /ipad/i.test(ua) ? 'iPad' : 'iPhone';
+    return (navigator.platform || 'Device');
 }
+
+function setPlatform(p) {
+    platform = p;
+    document.querySelectorAll('.platform-btn').forEach(function(b) {
+        b.classList.toggle('active', b.dataset.platform === p);
+    });
+    document.getElementById('device-detail').textContent =
+        (p === detectPlatform() ? 'Detected: ' : 'Selected: ') + p + ' · ' + (screen.width + 'x' + screen.height);
+    ['android', 'ios', 'windows', 'mac', 'linux'].forEach(function(id) {
+        var el = document.getElementById('install-' + id);
+        if (el) el.style.display = 'none';
+    });
+}
+
+var LOCATOR_ORIGIN = window.location.origin;
+document.getElementById('locator-url-android').textContent = LOCATOR_ORIGIN;
+document.getElementById('cmd-windows').textContent =
+    'git clone https://gitlab.com/gbonds1/lokey.git\r\ncd lokey\r\npip install -r requirements.txt\r\nset LOCATOR_URL=' + LOCATOR_ORIGIN + '\r\nset UNIT_NAME=unit5\r\npython hard-stats.py';
+document.getElementById('cmd-mac').textContent =
+    'git clone https://gitlab.com/gbonds1/lokey.git\ncd lokey\nLOCATOR_URL=' + LOCATOR_ORIGIN + ' ./install-unit3-mac.sh';
+document.getElementById('cmd-linux').textContent =
+    'git clone https://gitlab.com/gbonds1/lokey.git\ncd lokey\nLOCATOR_URL=' + LOCATOR_ORIGIN + ' ./install-unit6-linux.sh';
 
 var platform = detectPlatform();
 document.getElementById('device-name').value = guessDeviceName();
-document.getElementById('device-detail').textContent =
-    'Detected: ' + platform + ' · ' + (screen.width + 'x' + screen.height);
-document.getElementById('locator-url-android').textContent = window.location.origin;
+setPlatform(platform);
+
+document.querySelectorAll('.platform-btn').forEach(function(b) {
+    b.addEventListener('click', function() { setPlatform(b.dataset.platform); });
+});
 
 function registerDevice() {
     var btn = document.getElementById('register-btn');
@@ -216,7 +255,7 @@ function registerDevice() {
             type: 'native',
             category: 'devices',
             metadata: {
-                device: 'mobile',
+                device: (platform === 'android' || platform === 'ios') ? 'mobile' : 'desktop',
                 platform: platform,
                 user_agent: navigator.userAgent,
                 screen: screen.width + 'x' + screen.height,
@@ -236,7 +275,8 @@ function registerDevice() {
         statusEl.className = 'ok';
         var installSection = document.getElementById('install-section');
         installSection.style.display = 'block';
-        document.getElementById(platform === 'android' ? 'install-android' : 'install-ios').style.display = 'block';
+        var targetId = 'install-' + (['android', 'ios', 'windows', 'mac', 'linux'].includes(platform) ? platform : 'ios');
+        document.getElementById(targetId).style.display = 'block';
     })
     .catch(function(err) {
         btn.disabled = false;
