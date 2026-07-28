@@ -664,7 +664,11 @@ def deregister_service(name):
 
 @app.route("/api/container/toggle", methods=["POST"])
 def toggle_container():
-    """Start or stop a Docker container via the Locator UI."""
+    """Queue a start/stop command for the Lokey agent on the container's host.
+    The Locator never touches Docker itself \u2014 it only tells the owning unit's
+    lokey to perform the action (same command_queue used by /api/idle/wake
+    and /api/shutdown), which then executes locally and reports back via
+    /api/commands/complete."""
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "No JSON body"}), 400
@@ -672,54 +676,12 @@ def toggle_container():
     action = data.get("action", "").strip()
     if not name or action not in ("start", "stop"):
         return jsonify({"error": "Provide 'name' and 'action' (start|stop)"}), 400
-    if not docker_client:
-        return jsonify({"error": "Docker socket unavailable"}), 503
-    project_dir = get_container_project_dir(name)
-    try:
-        if action == "start":
-            git_pull_in_dir(project_dir)
-            enforce_instance_limits(name)
-            try:
-                container = docker_client.containers.get(name)
-                container.start()
-                msg = "started"
-            except docker.errors.NotFound:
-                if project_dir:
-                    result = subprocess.run(
-                        ["docker", "compose", "up", "-d"],
-                        cwd=project_dir, capture_output=True, text=True, timeout=120
-                    )
-                    if result.returncode != 0:
-                        return jsonify({"error": result.stderr.strip()}), 500
-                    msg = "created_and_started"
-                else:
-                    return jsonify({"error": f"Container '{name}' not found and no compose dir known"}), 404
-            now = datetime.now(timezone.utc).isoformat()
-            with lock:
-                for svc in registry["services"].values():
-                    if svc.get("name", "").lower() == name.lower():
-                        svc["status"] = "ONLINE"
-                        svc["last_heartbeat"] = now
-            persist_registry()
-            print(f"\u25b6\ufe0f  TOGGLE: {name} \u2192 ONLINE")
-            return jsonify({"result": msg, "container": name, "status": "ONLINE"})
-        else:
-            container = docker_client.containers.get(name)
-            container.stop(timeout=15)
-            git_pull_in_dir(project_dir)
-            now = datetime.now(timezone.utc).isoformat()
-            with lock:
-                for svc in registry["services"].values():
-                    if svc.get("name", "").lower() == name.lower():
-                        svc["status"] = "OFFLINE"
-                        svc["last_heartbeat"] = now
-            persist_registry()
-            print(f"\u23f9\ufe0f  TOGGLE: {name} \u2192 OFFLINE")
-            return jsonify({"result": "stopped", "container": name, "status": "OFFLINE"})
-    except docker.errors.NotFound:
-        return jsonify({"error": f"Container '{name}' not found"}), 404
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    unit = _find_container_unit(name)
+    if not unit:
+        return jsonify({"error": f"Container '{name}' not found in registry"}), 404
+    cmd = _queue_command(unit, name, action, source="manual")
+    print(f"\ud83d\udce8 TOGGLE: queued {action} for '{name}' on {unit}")
+    return jsonify({"result": "queued", "container": name, "unit": unit, "command": cmd})
 
 @app.route("/api/compose", methods=["GET"])
 def list_compose_files():
