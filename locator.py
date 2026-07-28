@@ -148,23 +148,6 @@ def _max_instances(container_name: str) -> int:
             return 3
     return 1
 
-def enforce_instance_limits(container_name: str):
-    """Stop the oldest running containers that exceed the limit for this service type."""
-    if not docker_client:
-        return
-    base  = _base_name(container_name)
-    limit = _max_instances(container_name)
-    try:
-        running = docker_client.containers.list()
-        peers = [c for c in running if _base_name(c.name) == base and c.name != container_name]
-        peers.sort(key=lambda c: c.attrs.get('State', {}).get('StartedAt', ''))
-        while len(peers) >= limit:
-            oldest = peers.pop(0)
-            print(f"\u26a1 LIMIT ({limit}) exceeded for '{base}': stopping oldest \u2192 {oldest.name}")
-            oldest.stop(timeout=10)
-    except Exception as e:
-        print(f"\u26a0\ufe0f Instance limit enforcement error: {e}")
-
 def enforce_instance_limits_global(new_name: str, new_host: str):
     """Cross-node singleton/triple enforcement via the migration queue."""
     import uuid as _uuid_module
