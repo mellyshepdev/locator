@@ -631,7 +631,7 @@ def toggle_container():
     if not unit:
         return jsonify({"error": f"Container '{name}' not found in registry"}), 404
     cmd = _queue_command(unit, name, action, source="manual")
-    print(f"\ud83d\udce8 TOGGLE: queued {action} for '{name}' on {unit}")
+    print(f"\U0001f4e8 TOGGLE: queued {action} for '{name}' on {unit}")
     return jsonify({"result": "queued", "container": name, "unit": unit, "command": cmd})
 
 @app.route("/api/compose", methods=["GET"])
