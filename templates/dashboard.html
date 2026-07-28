@@ -770,6 +770,15 @@
             if (viewName === 'yamls') loadYamlList();
         }
 
+        // ── PER-SECTION MAXIMIZE/RESTORE ──
+        function toggleGridMaximize(btn) {
+            const container = btn.closest('.grid-container');
+            if (!container) return;
+            const isMaximized = container.classList.toggle('maximized');
+            btn.textContent = isMaximized ? '✕' : '⛶';
+            btn.title = isMaximized ? 'Restore section' : 'Maximize section';
+        }
+
         function notify(msg, type='info') {
             const n = document.getElementById('notification');
             n.innerText = msg;
