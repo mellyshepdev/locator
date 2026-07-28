@@ -153,6 +153,9 @@
         .view-container.active {
             display: block;
         }
+        #view-yamls.active {
+            display: flex;
+        }
 
         /* ── MESH MAP STYLES ── */
         h1.map-title {
@@ -564,7 +567,7 @@
     </div>
 
     <!-- YAMLS VIEW -->
-    <div id="view-yamls" class="view-container" style="background:var(--grid-bg); background-image:linear-gradient(var(--neon-green-dim) 1px,transparent 1px),linear-gradient(90deg,var(--neon-green-dim) 1px,transparent 1px); background-size:30px 30px; overflow:hidden; display:flex; flex-direction:column;">
+    <div id="view-yamls" class="view-container" style="background:var(--grid-bg); background-image:linear-gradient(var(--neon-green-dim) 1px,transparent 1px),linear-gradient(90deg,var(--neon-green-dim) 1px,transparent 1px); background-size:30px 30px; overflow:hidden; flex-direction:column;">
         <div style="padding:16px 30px 8px; border-bottom:1px solid var(--neon-green); flex-shrink:0; display:flex; align-items:center; gap:20px;">
             <h2 style="margin:0; color:var(--neon-green); text-transform:uppercase; letter-spacing:4px; font-size:16px; text-shadow:0 0 10px var(--neon-green);">Docker Compose YAMLs</h2>
             <span id="yaml-save-status" style="font-size:12px; color:#555;"></span>
