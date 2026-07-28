@@ -127,7 +127,16 @@ code {
     <label for="device-name">Device name</label>
     <input type="text" id="device-name" maxlength="60">
     <div class="detail" id="device-detail"></div>
-    <br>
+
+    <label style="margin-top:18px;">Platform (auto-detected — change if wrong)</label>
+    <div id="platform-picker" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:18px;">
+        <button type="button" class="platform-btn" data-platform="android">📱 Android</button>
+        <button type="button" class="platform-btn" data-platform="ios">🍎 iOS</button>
+        <button type="button" class="platform-btn" data-platform="windows">🪟 Windows</button>
+        <button type="button" class="platform-btn" data-platform="mac">🍏 Mac</button>
+        <button type="button" class="platform-btn" data-platform="linux">🐧 Linux</button>
+    </div>
+
     <button id="register-btn" onclick="registerDevice()">Register This Device</button>
     <div id="status"></div>
 </div>
@@ -143,6 +152,19 @@ code {
     </div>
     <div id="install-ios" style="display:none;">
         <p>There's no native Lokey app for this platform yet — this device is registered, but won't send live heartbeats. If you're on Android instead, reopen this page there for the installable app.</p>
+    </div>
+    <div id="install-windows" style="display:none;">
+        <p>No packaged Windows installer exists yet (only macOS/Linux have one so far) — run the native agent manually with Python:</p>
+        <code id="cmd-windows"></code>
+        <div class="detail">Requires Python 3 + <span>pip install -r requirements.txt</span> (from the same repo) first. Some checks in <span>hard-stats.py</span> assume Linux/macOS (e.g. Docker socket, load average) and may no-op harmlessly on Windows — heartbeats/metrics should still work. Not yet verified end-to-end on Windows; report back if it breaks.</div>
+    </div>
+    <div id="install-mac" style="display:none;">
+        <p>Install the native Lokey agent as a LaunchAgent:</p>
+        <code id="cmd-mac"></code>
+    </div>
+    <div id="install-linux" style="display:none;">
+        <p>Install the native Lokey agent as a systemd user service:</p>
+        <code id="cmd-linux"></code>
     </div>
 </div>
 
