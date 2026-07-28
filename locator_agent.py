@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import json
 import docker
@@ -24,8 +25,75 @@ REGISTRY_FILE      = "registry.json"
 SYNC_INTERVAL      = int(os.environ.get("SYNC_INTERVAL", "300"))      # seconds between full syncs
 METRICS_INTERVAL   = int(os.environ.get("METRICS_INTERVAL", "60"))    # seconds between metric pushes
 MIGRATION_POLL     = int(os.environ.get("MIGRATION_POLL_INTERVAL", "30"))  # seconds between migration polls
+COMMAND_POLL       = int(os.environ.get("COMMAND_POLL_INTERVAL", "10"))    # seconds between start/stop command polls
 
 client = docker.from_env()
+
+# ── INSTANCE LIMITS (mirrors locator.py's node-local enforcement) ───────────
+
+TRIPLE_ALLOWED = {"traefik", "apache", "lokey", "openvpn", "wireguard", "headscale", "tailscale", "bind"}
+
+def _base_name(container_name: str) -> str:
+    """Derive a canonical base name by stripping project prefixes and numeric suffixes."""
+    name = container_name.lower()
+    name = re.sub(r'[-_]v?\d+$', '', name)
+    for segment in re.split(r'[-_]', name):
+        for known in TRIPLE_ALLOWED:
+            if known in segment:
+                return known
+    return name
+
+def _max_instances(container_name: str) -> int:
+    base = _base_name(container_name)
+    for known in TRIPLE_ALLOWED:
+        if known in base:
+            return 3
+    return 1
+
+def enforce_instance_limits(container_name):
+    """Stop the oldest running containers on this unit that exceed the limit for this service type."""
+    base  = _base_name(container_name)
+    limit = _max_instances(container_name)
+    try:
+        running = client.containers.list()
+        peers = [c for c in running if _base_name(c.name) == base and c.name != container_name]
+        peers.sort(key=lambda c: c.attrs.get('State', {}).get('StartedAt', ''))
+        while len(peers) >= limit:
+            oldest = peers.pop(0)
+            print(f"⚡ LIMIT ({limit}) exceeded for '{base}': stopping oldest → {oldest.name}")
+            oldest.stop(timeout=10)
+    except Exception as e:
+        print(f"⚠️ Instance limit enforcement error: {e}")
+
+def get_container_project_dir(container_name):
+    """Return the docker-compose project.working_dir label for a container (running or stopped)."""
+    try:
+        c = client.containers.get(container_name)
+        return c.labels.get("com.docker.compose.project.working_dir")
+    except Exception:
+        try:
+            results = client.containers.list(all=True, filters={"name": container_name})
+            if results:
+                return results[0].labels.get("com.docker.compose.project.working_dir")
+        except Exception:
+            pass
+    return None
+
+def git_pull_in_dir(project_dir):
+    """Run git pull in a host-mounted project directory (best-effort)."""
+    if not project_dir or not os.path.isdir(project_dir):
+        return
+    try:
+        result = subprocess.run(
+            ["git", "-C", project_dir, "pull"],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            print(f"📥 git pull OK: {project_dir}")
+        else:
+            print(f"⚠️ git pull warning ({project_dir}): {result.stderr.strip()}")
+    except Exception as e:
+        print(f"⚠️ git pull skipped ({project_dir}): {e}")
 
 # ── SYNC LOGIC ──────────────────────────────────────────────────────────────
 
@@ -176,6 +244,81 @@ def check_and_run_migrations():
 
     except Exception as e:
         print(f"⚠️ Migration check failed: {e}")
+
+# ── START/STOP COMMANDS ──────────────────────────────────────────────────────
+# Locator never touches Docker itself: it queues start/stop commands for this
+# unit and this agent (lokey) picks them up, runs them locally, and reports
+# back — see /api/container/toggle, /api/idle/wake, /api/shutdown in locator.py.
+
+def execute_command(cmd):
+    """Run a single queued start/stop command locally. Returns True on success."""
+    name   = cmd["container"]
+    action = cmd["action"]
+    project_dir = get_container_project_dir(name)
+    try:
+        if action == "start":
+            git_pull_in_dir(project_dir)
+            enforce_instance_limits(name)
+            try:
+                container = client.containers.get(name)
+                container.start()
+            except docker.errors.NotFound:
+                if not project_dir:
+                    print(f"⚠️ COMMAND start '{name}': not found and no compose dir known")
+                    return False
+                result = subprocess.run(
+                    ["docker", "compose", "up", "-d"],
+                    cwd=project_dir, capture_output=True, text=True, timeout=120
+                )
+                if result.returncode != 0:
+                    print(f"⚠️ COMMAND start '{name}': compose up failed: {result.stderr.strip()}")
+                    return False
+            print(f"▶️  COMMAND: {name} → started")
+            return True
+        else:
+            container = client.containers.get(name)
+            container.stop(timeout=15)
+            git_pull_in_dir(project_dir)
+            print(f"⏹️  COMMAND: {name} → stopped")
+            return True
+    except docker.errors.NotFound:
+        print(f"⚠️ COMMAND {action} '{name}': container not found")
+        return False
+    except Exception as e:
+        print(f"⚠️ COMMAND {action} '{name}' failed: {e}")
+        return False
+
+
+def check_and_run_commands():
+    """Polls the Locator for PENDING start/stop commands assigned to this unit,
+    runs them, and reports completion back."""
+    try:
+        resp = requests.get(
+            f"{LOCATOR_URL}/api/commands/pending",
+            params={"unit": UNIT_ID},
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            return
+
+        commands = resp.json()
+        for cmd in commands:
+            print(f"📨 Command {cmd['id']}: {cmd['action']} '{cmd['container']}'")
+            success = execute_command(cmd)
+            requests.post(
+                f"{LOCATOR_URL}/api/commands/complete",
+                json={"id": cmd["id"], "success": success},
+                timeout=5,
+            )
+    except Exception as e:
+        print(f"⚠️ Command check failed: {e}")
+
+
+def command_loop():
+    """Polls for pending start/stop commands every COMMAND_POLL seconds."""
+    while True:
+        time.sleep(COMMAND_POLL)
+        check_and_run_commands()
 
 # ── WATCHER ─────────────────────────────────────────────────────────────────
 
