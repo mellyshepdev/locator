@@ -179,7 +179,7 @@ def enforce_instance_limits_global(new_name: str, new_host: str):
         ]
     if len(instances) <= limit:
         return
-    with migrations_lock:
+    with migration_lock:
         already = any(
             m.get("dedup") and m["status"] in ("pending", "in_progress")
             and _base_name(m.get("container", "")) == base
@@ -197,7 +197,7 @@ def enforce_instance_limits_global(new_name: str, new_host: str):
         if evict_host == keeper_host:
             continue
         push_id = f"{_uuid_module.uuid4().hex[:8]}-dedup-push"
-        with migrations_lock:
+        with migration_lock:
             migration_queue[push_id] = {
                 "id":        push_id,
                 "type":      "git_push_and_stop",
@@ -1293,7 +1293,7 @@ def complete_migration():
 @app.route("/api/migrations", methods=["GET"])
 def list_migrations():
     """Return all migrations (pending, in_progress, and completed) for dashboard visibility."""
-    with migrations_lock:
+    with migration_lock:
         return jsonify(list(migration_queue.values()))
 
 @app.route("/api/balance/status", methods=["GET"])
