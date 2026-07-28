@@ -662,7 +662,7 @@ def deregister_service(name):
 
 
 
-@app.route("/api/toggle", methods=["POST"])
+@app.route("/api/container/toggle", methods=["POST"])
 def toggle_container():
     """Start or stop a Docker container via the Locator UI."""
     data = request.get_json(silent=True)
