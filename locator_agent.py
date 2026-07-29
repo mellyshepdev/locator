@@ -17,7 +17,7 @@ except ImportError:
 
 # ── CONFIGURATION ───────────────────────────────────────────────────────────
 
-LOCATOR_URL        = os.environ.get("LOCATOR_URL", "http://locator.network")
+LOCATOR_URL        = os.environ.get("LOCATOR_URL", "https://tobsco-locator.fly.dev")
 UNIT_ID            = os.environ.get("UNIT_ID", "unit1")
 BASE_DIR           = os.environ.get("BASE_DIR", "/home/swoopg111/projects")
 REGISTRY_FILE      = "registry.json"

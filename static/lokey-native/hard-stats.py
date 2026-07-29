@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-LOCATOR_URL = os.getenv("LOCATOR_URL", "https://locator.theofficialblacksheepco.online")
+LOCATOR_URL = os.getenv("LOCATOR_URL", "https://tobsco-locator.fly.dev")
 LOCATOR_HOST_HEADER = os.getenv("LOCATOR_HOST_HEADER", "locator.theofficialblacksheepco.online")
 UNIT_NAME   = os.getenv("UNIT_NAME", "unknown_unit")
 TICK_RATE   = int(os.getenv("TICK_RATE", "60"))
