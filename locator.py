@@ -7,6 +7,37 @@
 ═══════════════════════════════════════════════
 """
 
+import sys
+
+TERMINAL_HELP = """\
+🔦 THE LOCATOR — Universal Service Registry
+
+Usage:
+  python locator.py              Run the registry server (this file)
+  locator <command> [args]       Terminal client (locatorctl.py)
+
+Terminal commands:
+  list             List every registered service with its current status
+  status <name>    Show the current status of one service
+  start <name>     Queue a container start on its host (runs via Lokey)
+  stop <name>      Queue a container stop on its host (runs via Lokey)
+
+  start/stop only confirm the command was queued — Lokey executes it on the
+  container's actual host. Use `list`/`status` or the dashboard to see it land.
+
+Server environment:
+  PORT, HEARTBEAT_TIMEOUT, REAPER_INTERVAL, DATA_DIR,
+  BALANCE_ENABLED, IDLE_ENABLED, GIT_AUTO_PUSH
+
+Client environment:
+  LOCATOR_URL      Registry URL (default: https://tobsco-locator.fly.dev)
+"""
+
+# Handle -h/--help before the heavy imports so help works without deps installed
+if __name__ == "__main__" and any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+    print(TERMINAL_HELP)
+    raise SystemExit(0)
+
 import os
 import json
 import socket

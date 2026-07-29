@@ -54,15 +54,36 @@ def list_services():
         print(f"{svc.get('status', '?'):8s} {name}")
 
 
+COMMANDS = {
+    "list":   "List every registered service with its current status",
+    "status": "Show the current status of one service",
+    "start":  "Queue a container start on its host (runs via Lokey)",
+    "stop":   "Queue a container stop on its host (runs via Lokey)",
+}
+
+EPILOG = """\
+Environment:
+  LOCATOR_URL  Registry URL (default: https://tobsco-locator.fly.dev)
+
+start/stop only confirm the command was queued — Lokey executes it on the
+container's actual host. Use `status`/`list` or the dashboard to see it land.
+"""
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Start/stop containers via the Locator registry.")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        prog="locator",
+        description="Terminal client for the Locator registry — start/stop containers and check service status.",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="command", required=True, metavar="<command>")
 
     for cmd in ("start", "stop", "status"):
-        p = sub.add_parser(cmd)
-        p.add_argument("name")
+        p = sub.add_parser(cmd, help=COMMANDS[cmd], description=COMMANDS[cmd])
+        p.add_argument("name", help="service/container name as registered in the Locator")
 
-    sub.add_parser("list")
+    sub.add_parser("list", help=COMMANDS["list"], description=COMMANDS["list"])
 
     args = parser.parse_args()
 
