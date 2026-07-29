@@ -38,28 +38,48 @@
     });
 })();
 </script>
-<script src="https://auth.theofficialblacksheepco.online/js/keycloak.js"></script>
+<style>
+  /* Auth gate: nothing renders until Keycloak confirms a session */
+  html:not(.auth-ok) body > * { visibility: hidden; }
+  #auth-fail {
+    display: none; position: fixed; inset: 0; z-index: 9999; visibility: visible !important;
+    background: #000; color: #ff003c; font-family: 'Courier New', monospace;
+    align-items: center; justify-content: center; text-align: center; padding: 20px;
+  }
+  html.auth-failed #auth-fail { display: flex; }
+</style>
+<script src="https://bsco-keycloak.fly.dev/js/keycloak.js"></script>
 <script>
   (function() {
+    function authFailed(msg, err) {
+      if (window.__reportClientError) {
+        window.__reportClientError(msg, window.location.href, null, null, err && err.stack);
+      }
+      document.documentElement.classList.add('auth-failed');
+    }
+    if (typeof Keycloak === 'undefined') {
+      authFailed('Keycloak adapter failed to load from bsco-keycloak.fly.dev');
+      return;
+    }
     var kc = new Keycloak({
-      url: 'https://auth.theofficialblacksheepco.online',
-      realm: 'TOBSCo',
-      clientId: 'portal-client'
+      url: 'https://bsco-keycloak.fly.dev',
+      realm: 'blacksheep',
+      clientId: 'locator'
     });
-    kc.init({ onLoad: 'check-sso', silentCheckSsoRedirectUri: window.location.origin + '/silent-check-sso.html' })
+    kc.init({
+      onLoad: 'check-sso',
+      pkceMethod: 'S256',
+      silentCheckSsoRedirectUri: window.location.origin + '/silent-check-sso.html'
+    })
       .then(function(auth) {
-        if (!auth) {
-          window.location.href = 'https://theofficialblacksheepco.com/login.html?redirect=' + encodeURIComponent(window.location.href);
+        if (auth) {
+          document.documentElement.classList.add('auth-ok');
+        } else {
+          kc.login({ redirectUri: window.location.href });
         }
       })
       .catch(function(err) {
-        if (window.__reportClientError) {
-          window.__reportClientError(
-            'Keycloak init/check-sso failed: ' + (err && err.message ? err.message : JSON.stringify(err)),
-            window.location.href, null, null, err && err.stack
-          );
-        }
-        window.location.href = 'https://theofficialblacksheepco.com/login.html?redirect=' + encodeURIComponent(window.location.href);
+        authFailed('Keycloak init/check-sso failed: ' + (err && err.message ? err.message : JSON.stringify(err)), err);
       });
   })();
 </script>
@@ -121,6 +141,8 @@ canvas { display: block; }
 </style>
 </head>
 <body>
+
+<div id="auth-fail">SSO UNAVAILABLE — sign-in could not be verified, registry data hidden.<br>Check bsco-keycloak.fly.dev, then reload.</div>
 
 <div id="ui">
   <h1>⬡ DYNAMIC NETWORK MESH</h1>
