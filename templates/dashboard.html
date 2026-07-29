@@ -599,8 +599,8 @@
 
     <!-- UI TOGGLE -->
     <div id="ui-toggle">
-        <button class="toggle-btn active" onclick="switchView('map')">Mesh Map</button>
-        <button class="toggle-btn" onclick="switchView('grid')">Tactical Grid</button>
+        <button class="toggle-btn" onclick="switchView('map')">Mesh Map</button>
+        <button class="toggle-btn active" onclick="switchView('grid')">Tactical Grid</button>
         <button class="toggle-btn" onclick="switchView('3js')">3D Mesh</button>
         <button class="toggle-btn" onclick="switchView('yamls')">YAMLs</button>
     </div>
@@ -619,7 +619,7 @@
     </div>
 
     <!-- MESH MAP VIEW -->
-    <div id="view-map" class="view-container active">
+    <div id="view-map" class="view-container">
         <h1 class="map-title">S.H.E.E.P. Mesh Map</h1>
         <div id="mynetwork"></div>
         <div id="info-panel">
@@ -632,7 +632,7 @@
     </div>
 
     <!-- TACTICAL GRID VIEW -->
-    <div id="view-grid" class="view-container">
+    <div id="view-grid" class="view-container active">
 
         <!-- BLUE RECTANGLE: DEVICES -->
         <div class="grid-container grid-blue">
