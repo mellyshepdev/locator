@@ -994,6 +994,24 @@
     </div>
 
     <script>
+        // Declared first thing in this script block, far from openDeviceModal
+        // (which uses them), so that no unrelated error anywhere later in this
+        // ~1000-line script can ever leave them stuck in the temporal dead zone —
+        // a TDZ ReferenceError here previously made every device-click silently
+        // do nothing, with no visible error on the page.
+        const DEVICE_FIELD_LABELS = {
+            id: 'Registry ID', name: 'Name', ip: 'IP', tailscale_ip: 'Tailscale IP',
+            internal: 'Internal Addr', host: 'Host', hosts: 'Hosts', type: 'Type',
+            os: 'OS', status: 'Status', category: 'Category', port: 'Port',
+            url: 'URL', last_seen: 'Last Seen', last_heartbeat: 'Last Heartbeat',
+            registered_at: 'Registered At', offline_since: 'Offline Since',
+        };
+        const DEVICE_FIELD_ORDER = [
+            'name', 'id', 'status', 'ip', 'tailscale_ip', 'internal', 'host', 'hosts',
+            'type', 'os', 'category', 'port', 'url', 'last_seen', 'last_heartbeat',
+            'registered_at', 'offline_since',
+        ];
+
         let selectedFolderPath = "";
 
         function openDeployModal(path) {
@@ -1071,23 +1089,6 @@
         }
 
         let lastRegistryData = null;
-
-        // Declared early (not near openDeviceModal, which uses them) so that any
-        // unrelated error earlier in this script can never leave them stuck in the
-        // temporal dead zone — a TDZ ReferenceError here previously made every
-        // device-click silently do nothing, with no visible error on the page.
-        const DEVICE_FIELD_LABELS = {
-            id: 'Registry ID', name: 'Name', ip: 'IP', tailscale_ip: 'Tailscale IP',
-            internal: 'Internal Addr', host: 'Host', hosts: 'Hosts', type: 'Type',
-            os: 'OS', status: 'Status', category: 'Category', port: 'Port',
-            url: 'URL', last_seen: 'Last Seen', last_heartbeat: 'Last Heartbeat',
-            registered_at: 'Registered At', offline_since: 'Offline Since',
-        };
-        const DEVICE_FIELD_ORDER = [
-            'name', 'id', 'status', 'ip', 'tailscale_ip', 'internal', 'host', 'hosts',
-            'type', 'os', 'category', 'port', 'url', 'last_seen', 'last_heartbeat',
-            'registered_at', 'offline_since',
-        ];
 
         // ── LIVE NODE METRIC CARDS ──
         function pctColor(v) {
