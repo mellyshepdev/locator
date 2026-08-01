@@ -67,19 +67,18 @@
       clientId: 'locator'
     });
     kc.init({
-      onLoad: 'check-sso',
-      pkceMethod: 'S256',
-      silentCheckSsoRedirectUri: window.location.origin + '/silent-check-sso.html'
+      onLoad: 'login-required',
+      pkceMethod: 'S256'
     })
       .then(function(auth) {
         if (auth) {
           document.documentElement.classList.add('auth-ok');
         } else {
-          kc.login({ redirectUri: window.location.href });
+          authFailed('Keycloak login-required resolved without a session');
         }
       })
       .catch(function(err) {
-        authFailed('Keycloak init/check-sso failed: ' + (err && err.message ? err.message : JSON.stringify(err)), err);
+        authFailed('Keycloak init failed: ' + (err && err.message ? err.message : JSON.stringify(err)), err);
       });
   })();
 </script>
