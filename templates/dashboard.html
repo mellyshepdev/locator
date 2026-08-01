@@ -587,6 +587,22 @@
         .filter-bar input:focus { box-shadow: 0 0 10px rgba(0, 240, 255, 0.4); }
         .filter-count { color: #6699aa; font-size: 12px; margin-left: auto; letter-spacing: 1px; }
     </style>
+<!-- Matomo -->
+<script>
+  var _paq = window._paq = window._paq || [];
+  /* tracker methods like "setCustomDimension" should be called before "trackPageView" */
+  _paq.push(['trackPageView']);
+  _paq.push(['enableLinkTracking']);
+  (function() {
+    var u="//bsco-matomo.fly.dev/";
+    _paq.push(['setTrackerUrl', u+'matomo.php']);
+    _paq.push(['setSiteId', '4']);
+    var d=document, g=d.createElement('script'), s=d.getElementsByTagName('script')[0];
+    g.async=true; g.src=u+'matomo.js'; s.parentNode.insertBefore(g,s);
+  })();
+</script>
+<!-- End Matomo Code -->
+
 </head>
 <body>
 
@@ -977,6 +993,24 @@
     </div>
 
     <script>
+        // Declared first thing in this script block, far from openDeviceModal
+        // (which uses them), so that no unrelated error anywhere later in this
+        // ~1000-line script can ever leave them stuck in the temporal dead zone —
+        // a TDZ ReferenceError here previously made every device-click silently
+        // do nothing, with no visible error on the page.
+        const DEVICE_FIELD_LABELS = {
+            id: 'Registry ID', name: 'Name', ip: 'IP', tailscale_ip: 'Tailscale IP',
+            internal: 'Internal Addr', host: 'Host', hosts: 'Hosts', type: 'Type',
+            os: 'OS', status: 'Status', category: 'Category', port: 'Port',
+            url: 'URL', last_seen: 'Last Seen', last_heartbeat: 'Last Heartbeat',
+            registered_at: 'Registered At', offline_since: 'Offline Since',
+        };
+        const DEVICE_FIELD_ORDER = [
+            'name', 'id', 'status', 'ip', 'tailscale_ip', 'internal', 'host', 'hosts',
+            'type', 'os', 'category', 'port', 'url', 'last_seen', 'last_heartbeat',
+            'registered_at', 'offline_since',
+        ];
+
         let selectedFolderPath = "";
 
         function openDeployModal(path) {
@@ -1635,19 +1669,6 @@
         });
 
         // ── DEVICE DATA-SHEET MODAL ──
-        const DEVICE_FIELD_LABELS = {
-            id: 'Registry ID', name: 'Name', ip: 'IP', tailscale_ip: 'Tailscale IP',
-            internal: 'Internal Addr', host: 'Host', hosts: 'Hosts', type: 'Type',
-            os: 'OS', status: 'Status', category: 'Category', port: 'Port',
-            url: 'URL', last_seen: 'Last Seen', last_heartbeat: 'Last Heartbeat',
-            registered_at: 'Registered At', offline_since: 'Offline Since',
-        };
-        const DEVICE_FIELD_ORDER = [
-            'name', 'id', 'status', 'ip', 'tailscale_ip', 'internal', 'host', 'hosts',
-            'type', 'os', 'category', 'port', 'url', 'last_seen', 'last_heartbeat',
-            'registered_at', 'offline_since',
-        ];
-
         function openDeviceModal(item) {
             document.getElementById('device-modal-title').innerText =
                 (item.name || item.id || 'DEVICE').toUpperCase();
