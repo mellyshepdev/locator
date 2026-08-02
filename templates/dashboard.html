@@ -443,7 +443,19 @@
             font-size: 11px;
             border: 1px solid var(--neon-green);
             color: var(--neon-green);
+            white-space: nowrap;
+            display: inline-block;
+            margin: 2px;
         }
+
+        /* Node/Host column shouldn't get squeezed onto multiple lines */
+        .col-host { white-space: nowrap; min-width: 150px; }
+
+        /* Tables can have more columns than the container is wide — scroll
+           horizontally instead of silently clipping/wrapping data */
+        .table-scroll { overflow-x: auto; }
+        .table-scroll table { min-width: 1000px; }
+        .grid-green .table-scroll table { min-width: 1500px; }
 
         .meta-badge {
             display: inline-block;
@@ -670,10 +682,10 @@
             <!-- LIVE NODE METRICS -->
             <div class="node-cards-row" id="node-cards"></div>
 
-            <table>
+            <div class="table-scroll"><table>
                 <thead><tr><th style="color: #00f0ff;">Device</th><th style="color: #00f0ff;">IP Address</th><th style="color: #00f0ff;">Type / OS</th><th style="color: #00f0ff;">Status</th><th style="color: #00f0ff;">Metadata</th><th style="color: #00f0ff;">Last Seen</th></tr></thead>
                 <tbody id="tbody-devices"></tbody>
-            </table>
+            </table></div>
         </div>
 
         <!-- GREEN RECTANGLE: DOCKER CONTAINERS -->
@@ -684,10 +696,10 @@
                 <div>ACTIVE CONTAINERS: <span id="count-docker" style="color: #00ff00;">0</span></div>
                 <div>SYSTEM STATUS: <span class="status-dot online"></span> NOMINAL</div>
             </div>
-            <table>
-                <thead><tr><th>Service</th><th>Node / Host</th><th>Port</th><th>Internal IP</th><th>Public / Traefik</th><th>Stats (CPU/RAM/Temp/Disk)</th><th>Status</th><th>Metadata</th><th>Last Seen</th></tr></thead>
+            <div class="table-scroll"><table>
+                <thead><tr><th>Service</th><th class="col-host">Node / Host</th><th>Port</th><th>Internal IP</th><th>Public / Traefik</th><th>Stats (CPU/RAM/Temp/Disk)</th><th>Status</th><th>Metadata</th><th>Last Seen</th></tr></thead>
                 <tbody id="tbody-docker"></tbody>
-            </table>
+            </table></div>
         </div>
 
         <!-- PURPLE RECTANGLE: WEBSITES -->
@@ -698,10 +710,10 @@
                 <div>ACTIVE WEBSITES: <span id="count-websites" style="color: #a200ff;">0</span></div>
                 <div>SYSTEM STATUS: <span class="status-dot online" style="background-color: #a200ff; box-shadow: 0 0 8px #a200ff;"></span> NOMINAL</div>
             </div>
-            <table>
-                <thead><tr><th style="color: #a200ff;">Service</th><th style="color: #a200ff;">Node / Host</th><th style="color: #a200ff;">URL</th><th style="color: #a200ff;">Status</th><th style="color: #a200ff;">Metadata</th><th style="color: #a200ff;">Last Seen</th></tr></thead>
+            <div class="table-scroll"><table>
+                <thead><tr><th style="color: #a200ff;">Service</th><th class="col-host" style="color: #a200ff;">Node / Host</th><th style="color: #a200ff;">URL</th><th style="color: #a200ff;">Status</th><th style="color: #a200ff;">Metadata</th><th style="color: #a200ff;">Last Seen</th></tr></thead>
                 <tbody id="tbody-websites"></tbody>
-            </table>
+            </table></div>
         </div>
 
         <!-- AMBER RECTANGLE: VIRTUAL MACHINES -->
@@ -712,10 +724,10 @@
                 <div>ACTIVE VMs: <span id="count-vms" style="color: #ff8800;">0</span></div>
                 <div>HYPERVISOR: <span class="status-dot online" style="background-color: #ff8800; box-shadow: 0 0 8px #ff8800;"></span> VirtualBox 7.0</div>
             </div>
-            <table>
-                <thead><tr><th style="color: #ff8800;">VM Name</th><th style="color: #ff8800;">Node / Host</th><th style="color: #ff8800;">Internal URL</th><th style="color: #ff8800;">Public URL</th><th style="color: #ff8800;">Status</th><th style="color: #ff8800;">Metadata</th><th style="color: #ff8800;">Last Seen</th></tr></thead>
+            <div class="table-scroll"><table>
+                <thead><tr><th style="color: #ff8800;">VM Name</th><th class="col-host" style="color: #ff8800;">Node / Host</th><th style="color: #ff8800;">Internal URL</th><th style="color: #ff8800;">Public URL</th><th style="color: #ff8800;">Status</th><th style="color: #ff8800;">Metadata</th><th style="color: #ff8800;">Last Seen</th></tr></thead>
                 <tbody id="tbody-vms"></tbody>
-            </table>
+            </table></div>
         </div>
 
         <!-- PINK RECTANGLE: SERVERLESS / PaaS -->
@@ -726,10 +738,10 @@
                 <div>ACTIVE SERVERLESS: <span id="count-serverless" style="color: #ff2d95;">0</span></div>
                 <div>PLATFORMS: <span class="status-dot online" style="background-color: #ff2d95; box-shadow: 0 0 8px #ff2d95;"></span> Vercel · Netlify · Fly.io · Supabase · Render · GitLab Pages</div>
             </div>
-            <table>
-                <thead><tr><th style="color: #ff2d95;">Service</th><th style="color: #ff2d95;">Platform</th><th style="color: #ff2d95;">URL</th><th style="color: #ff2d95;">Status</th><th style="color: #ff2d95;">Metadata</th><th style="color: #ff2d95;">Last Seen</th></tr></thead>
+            <div class="table-scroll"><table>
+                <thead><tr><th style="color: #ff2d95;">Service</th><th class="col-host" style="color: #ff2d95;">Platform</th><th style="color: #ff2d95;">URL</th><th style="color: #ff2d95;">Status</th><th style="color: #ff2d95;">Metadata</th><th style="color: #ff2d95;">Last Seen</th></tr></thead>
                 <tbody id="tbody-serverless"></tbody>
-            </table>
+            </table></div>
         </div>
 
         <!-- CLOUD PLATFORMS SECTION -->
@@ -1089,6 +1101,22 @@
 
         let lastRegistryData = null;
 
+        // ── PER-NODE COLOR ──
+        // Deterministic color per node/host name, so the same node reads as
+        // the same color everywhere it's referenced (device card, docker
+        // host badge, website host badge, etc.) — makes it possible to spot
+        // which node a container/service belongs to at a glance.
+        function nodeColor(id) {
+            if (!id) return '#00f0ff';
+            let hash = 0;
+            for (let i = 0; i < id.length; i++) {
+                hash = id.charCodeAt(i) + ((hash << 5) - hash);
+                hash |= 0;
+            }
+            const hue = Math.abs(hash) % 360;
+            return `hsl(${hue}, 85%, 60%)`;
+        }
+
         // ── LIVE NODE METRIC CARDS ──
         function pctColor(v) {
             if (v == null) return '#6699aa';
@@ -1111,9 +1139,10 @@
                     ? ` · ${n.disk_used_gb}/${n.disk_total_gb} GB` : '';
                 const bar = (v) => `<div class="mc-bar"><div class="mc-fill" style="width:${Math.min(v || 0, 100)}%;background:${pctColor(v)}"></div></div>`;
                 const row = (label, v) => `<div class="mc-row"><span class="mc-label">${label}</span><span style="color:${pctColor(v)}">${v != null ? v.toFixed(1) + '%' : '—'}</span></div>`;
-                return `<div class="metric-card${oom ? ' oom' : ''}">
+                const nc = nodeColor(id);
+                return `<div class="metric-card${oom ? ' oom' : ''}" style="${oom ? '' : `border-color:${nc};box-shadow:0 0 12px ${nc}40`}">
                     <button type="button" class="mc-maximize" title="Maximize" onclick="maximizeNodeCard('${id}')">⛶</button>
-                    <div class="mc-name">${id}</div>
+                    <div class="mc-name" style="color:${nc}">${id}</div>
                     <div class="mc-ip">${ip}${disk}</div>
                     <span class="mc-badge ${badge}">${oom ? 'OOM' : badge.toUpperCase()}</span>
                     ${row('CPU', n.cpu_percent)}${bar(n.cpu_percent)}
@@ -1281,13 +1310,13 @@
                 tr.className = 'clickable-row';
                 tr.title = 'Click for full data sheet';
                 const hostList = item.hosts || [item.host || 'unknown'];
-                const hostBadges = hostList.map(h => `<span class="node-badge">${h}</span>`).join('');
+                const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:${nodeColor(h)};color:${nodeColor(h)}">${h}</span>`).join('');
                 const isOnline = item.status === 'ONLINE';
                 const safeName = (item.name || '').replace(/'/g, "\\'");
 
                 tr.innerHTML = `
                     <td style="font-weight:bold">${item.name}</td>
-                    <td>${hostBadges}</td>
+                    <td class="col-host">${hostBadges}</td>
                     <td>${item.port || '-'}</td>
                     <td>${item.internal || '-'}</td>
                     <td>${item.url ? `<a href="${item.url}" target="_blank" onclick="event.stopPropagation()">${item.url}</a>` : '-'}</td>
@@ -1318,11 +1347,11 @@
                 tr.className = 'clickable-row';
                 tr.title = 'Click for full data sheet';
                 const hostList = item.hosts || [item.host || 'unknown'];
-                const hostBadges = hostList.map(h => `<span class="node-badge">${h}</span>`).join('');
+                const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:${nodeColor(h)};color:${nodeColor(h)}">${h}</span>`).join('');
 
                 tr.innerHTML = `
                     <td style="font-weight:bold">${item.name}</td>
-                    <td>${hostBadges}</td>
+                    <td class="col-host">${hostBadges}</td>
                     <td><a href="${item.url}" target="_blank" onclick="event.stopPropagation()">${item.url}</a></td>
                     <td>
                         <span class="status-dot ${item.status === 'ONLINE' ? 'online' : 'offline'}"></span>
@@ -1341,12 +1370,12 @@
                 tr.className = 'clickable-row';
                 tr.title = 'Click for full data sheet';
                 const hostList = item.hosts || [item.host || 'unknown'];
-                const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:#ff8800;color:#ff8800">${h}</span>`).join('');
+                const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:${nodeColor(h)};color:${nodeColor(h)}">${h}</span>`).join('');
                 const isOnline = item.status === 'ONLINE';
 
                 tr.innerHTML = `
                     <td style="font-weight:bold;color:#ff8800">${item.name}</td>
-                    <td>${hostBadges}</td>
+                    <td class="col-host">${hostBadges}</td>
                     <td>${item.internal ? `<a href="${item.internal}" target="_blank" style="color:#ff8800" onclick="event.stopPropagation()">${item.internal}</a>` : '-'}</td>
                     <td>${item.url ? `<a href="${item.url}" target="_blank" style="color:#ff8800" onclick="event.stopPropagation()">${item.url}</a>` : '-'}</td>
                     <td>
