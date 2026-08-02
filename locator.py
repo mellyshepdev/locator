@@ -2277,25 +2277,35 @@ def active_discovery_scanner():
         changed = False
         
         with lock:
-            # We want to scan all known node IPs (Internal and OpenVPN)
+            # We want to scan all known node IPs (Internal and OpenVPN), plus any
+            # node that only has a stored traefik_api URL and no ip on file — e.g.
+            # seeded infra nodes (mac_mini, secondary_vps_unit2) that never call
+            # /register themselves, so nothing else ever refreshes their liveness
+            # and they were previously stuck ONLINE forever.
             nodes_to_scan = []
             for node_name, node_info in registry["nodes"].items():
-                ips = [node_info.get("ip")]
-                if node_info.get("openvpn_ip"):
-                    ips.append(node_info.get("openvpn_ip"))
-                
-                for ip in ips:
+                endpoints = []
+                for ip in (node_info.get("ip"), node_info.get("openvpn_ip")):
                     if ip and ip != 'unknown' and 'pending' not in ip:
-                        nodes_to_scan.append((node_name, ip))
-            
-        for node_name, ip in nodes_to_scan:
-            # Try to hit Traefik API on default ports
-            for port in [80, 8080, 443]:
-                traefik_url = f"http://{ip}:{port}" if port != 443 else f"https://{ip}"
+                        for port in [80, 8080, 443]:
+                            endpoints.append(f"http://{ip}:{port}" if port != 443 else f"https://{ip}")
+                if node_info.get("traefik_api"):
+                    endpoints.append(node_info["traefik_api"])
+
+                if endpoints:
+                    nodes_to_scan.append((node_name, endpoints))
+
+        for node_name, endpoints in nodes_to_scan:
+            reached = False
+            for traefik_url in endpoints:
+                # A stored traefik_api already ends in .../api; ip-based guesses don't.
+                routers_url = f"{traefik_url}/http/routers" if traefik_url.rstrip('/').endswith('/api') \
+                    else f"{traefik_url}/api/http/routers"
                 try:
-                    resp = requests.get(f"{traefik_url}/api/http/routers", timeout=3)
+                    resp = requests.get(routers_url, timeout=3)
                     if resp.status_code != 200: continue
-                    
+                    reached = True
+
                     routers = resp.json()
                     for router in routers:
                         if router.get("provider") == "internal" or router.get("name", "").endswith("@internal"):
@@ -2333,10 +2343,27 @@ def active_discovery_scanner():
                     break # Success on this node/IP
                 except Exception:
                     continue
-                        
+
+            # The Traefik check IS this node's heartbeat for nodes that have no
+            # other way to report in (nothing else ever touches their last_seen).
+            # A failed scan this cycle means no heartbeat — mark it OFFLINE now
+            # rather than leaving it ONLINE forever, same as service heartbeats.
+            with lock:
+                node = registry["nodes"].get(node_name)
+                if node:
+                    if reached:
+                        node["status"] = "ONLINE"
+                        node["last_seen"] = now
+                        changed = True
+                    elif node.get("status") == "ONLINE":
+                        node["status"] = "OFFLINE"
+                        node["last_seen"] = node.get("last_seen") or now
+                        changed = True
+                        print(f"💀 NODE OFFLINE (traefik unreachable): {node_name}")
+
         if changed:
             persist_registry()
-            
+
         time.sleep(SCANNER_INTERVAL)
 
 
