@@ -2285,17 +2285,29 @@ def active_discovery_scanner():
             nodes_to_scan = []
             for node_name, node_info in registry["nodes"].items():
                 endpoints = []
+                has_ip = False
                 for ip in (node_info.get("ip"), node_info.get("openvpn_ip")):
                     if ip and ip != 'unknown' and 'pending' not in ip:
+                        has_ip = True
                         for port in [80, 8080, 443]:
                             endpoints.append(f"http://{ip}:{port}" if port != 443 else f"https://{ip}")
                 if node_info.get("traefik_api"):
                     endpoints.append(node_info["traefik_api"])
 
+                # Only nodes with NO ip/openvpn_ip (i.e. no /register heartbeat
+                # path of their own — the mac_mini/secondary_vps_unit2 case) get
+                # their node-level status driven by this scan. Nodes that do have
+                # an ip self-register via POST /register already (see the "Update
+                # the node as ONLINE whenever any service heartbeats" block above)
+                # — letting a failed Traefik probe override THAT status caused
+                # lokey-registered nodes with no Traefik running (e.g. unit9,
+                # which uses Caddy) to flap ONLINE/OFFLINE against their own
+                # legitimate heartbeats. Traefik discovery still runs for them
+                # (to find containers), it just can't flip their own status.
                 if endpoints:
-                    nodes_to_scan.append((node_name, endpoints))
+                    nodes_to_scan.append((node_name, endpoints, not has_ip))
 
-        for node_name, endpoints in nodes_to_scan:
+        for node_name, endpoints, owns_node_status in nodes_to_scan:
             reached = False
             for traefik_url in endpoints:
                 # A stored traefik_api already ends in .../api; ip-based guesses don't.
@@ -2348,18 +2360,19 @@ def active_discovery_scanner():
             # other way to report in (nothing else ever touches their last_seen).
             # A failed scan this cycle means no heartbeat — mark it OFFLINE now
             # rather than leaving it ONLINE forever, same as service heartbeats.
-            with lock:
-                node = registry["nodes"].get(node_name)
-                if node:
-                    if reached:
-                        node["status"] = "ONLINE"
-                        node["last_seen"] = now
-                        changed = True
-                    elif node.get("status") == "ONLINE":
-                        node["status"] = "OFFLINE"
-                        node["last_seen"] = node.get("last_seen") or now
-                        changed = True
-                        print(f"💀 NODE OFFLINE (traefik unreachable): {node_name}")
+            if owns_node_status:
+                with lock:
+                    node = registry["nodes"].get(node_name)
+                    if node:
+                        if reached:
+                            node["status"] = "ONLINE"
+                            node["last_seen"] = now
+                            changed = True
+                        elif node.get("status") == "ONLINE":
+                            node["status"] = "OFFLINE"
+                            node["last_seen"] = node.get("last_seen") or now
+                            changed = True
+                            print(f"💀 NODE OFFLINE (traefik unreachable): {node_name}")
 
         if changed:
             persist_registry()
