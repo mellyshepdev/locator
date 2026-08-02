@@ -1054,6 +1054,83 @@ def list_client_errors():
         return jsonify(list(reversed(client_errors)))
 
 
+@app.route("/api/activity/dates", methods=["GET"])
+def list_activity_dates():
+    """List available daily activity-log dates (YYYY-MM-DD), newest first."""
+    dates = []
+    if os.path.isdir(ACTIVITY_LOG_DIR):
+        for fname in os.listdir(ACTIVITY_LOG_DIR):
+            m = re.match(r"^activity_(\d{4}-\d{2}-\d{2})\.csv$", fname)
+            if m:
+                dates.append(m.group(1))
+    dates.sort(reverse=True)
+    return jsonify({"dates": dates, "retention_days": ACTIVITY_RETENTION_DAYS})
+
+
+@app.route("/api/activity/export/<date>", methods=["GET"])
+def export_activity_day(date):
+    """Download one day's raw activity CSV (YYYY-MM-DD)."""
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        return jsonify({"error": "date must be YYYY-MM-DD"}), 400
+    filepath = os.path.join(ACTIVITY_LOG_DIR, f"activity_{date}.csv")
+    if not os.path.exists(filepath):
+        return jsonify({"error": "no activity log for that date"}), 404
+    with open(filepath, "r") as f:
+        data = f.read()
+    return Response(data, mimetype="text/csv",
+                     headers={"Content-Disposition": f"attachment; filename=locator_activity_{date}.csv"})
+
+
+@app.route("/api/activity/export", methods=["GET"])
+def export_activity_range():
+    """
+    Download a combined CSV across a date range.
+    Query params (all optional): days (default/max ACTIVITY_RETENTION_DAYS),
+    entity_type ("node"|"service"), entity_id (exact match).
+    """
+    import csv as _csv
+    try:
+        days = min(int(request.args.get("days", ACTIVITY_RETENTION_DAYS)), ACTIVITY_RETENTION_DAYS)
+    except ValueError:
+        days = ACTIVITY_RETENTION_DAYS
+    entity_type = request.args.get("entity_type", "")
+    entity_id = request.args.get("entity_id", "")
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    out = io.StringIO()
+    writer = _csv.DictWriter(out, fieldnames=_ACTIVITY_FIELDS)
+    writer.writeheader()
+    rows_written = 0
+
+    if os.path.isdir(ACTIVITY_LOG_DIR):
+        for fname in sorted(os.listdir(ACTIVITY_LOG_DIR)):
+            m = re.match(r"^activity_(\d{4}-\d{2}-\d{2})\.csv$", fname)
+            if not m:
+                continue
+            try:
+                file_day = datetime.strptime(m.group(1), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if file_day < cutoff - timedelta(days=1):
+                continue
+            filepath = os.path.join(ACTIVITY_LOG_DIR, fname)
+            try:
+                with open(filepath, "r", newline="") as f:
+                    for row in _csv.DictReader(f):
+                        if entity_type and row.get("entity_type") != entity_type:
+                            continue
+                        if entity_id and row.get("entity_id") != entity_id:
+                            continue
+                        writer.writerow(row)
+                        rows_written += 1
+            except Exception as e:
+                print(f"⚠️  Failed to read {fname} for export: {e}")
+
+    fname_suffix = f"_{entity_id}" if entity_id else (f"_{entity_type}" if entity_type else "")
+    return Response(out.getvalue(), mimetype="text/csv",
+                     headers={"Content-Disposition": f"attachment; filename=locator_activity_{days}d{fname_suffix}.csv"})
+
+
 @app.route("/registry.json", methods=["GET"])
 def download_registry():
     """Serve the registry as a downloadable JSON file."""
@@ -1699,6 +1776,8 @@ def heartbeat_reaper():
                 del registry["services"][name]
                 changed = True
                 print(f"🗑️  PURGED: {name} (offline > {RETENTION_DAYS} days)")
+                log_activity("service", name, "purged", status="PURGED",
+                             detail=f"offline > {RETENTION_DAYS} days")
 
             # Nodes whose own last_seen has expired go OFFLINE directly, independent of
             # whether a matching "lokey"-named service exists — the check above only
@@ -1717,6 +1796,8 @@ def heartbeat_reaper():
                         node["status"] = "OFFLINE"
                         changed = True
                         print(f"💀 NODE OFFLINE (stale heartbeat): {node_id}")
+                        log_activity("node", node_id, "offline_timeout", status="OFFLINE",
+                                     detail="stale last_seen")
                 except (ValueError, TypeError):
                     pass
 
@@ -1817,6 +1898,11 @@ def load_balancer():
             is_oom = (src_info.get("mem_percent") or 0) >= OOM_THRESHOLD
             if is_oom:
                 print(f"🚨 BALANCE: OOM emergency on {src_id} mem={src_info.get('mem_percent'):.1f}% — bypassing anti-flap/cooldown")
+                log_activity("node", src_id, "oom_emergency", status="OOM",
+                             mem_percent=src_info.get("mem_percent"),
+                             cpu_percent=src_info.get("cpu_percent"),
+                             disk_percent=src_info.get("disk_percent"))
+                _send_alert(src_id, "OOM_EMERGENCY", f"mem={src_info.get('mem_percent'):.1f}% — migrating containers off")
 
             # Cooldown check (skipped in OOM emergency)
             last_mig = node_last_migrated.get(src_id)
@@ -2582,6 +2668,7 @@ def main():
     print(f"  Heartbeat timeout: {HEARTBEAT_TIMEOUT}s")
     print(f"  Reaper interval:   {REAPER_INTERVAL}s")
     print(f"  Data directory:    {DATA_DIR}")
+    print(f"  Activity log:      {ACTIVITY_LOG_DIR} (retain {ACTIVITY_RETENTION_DAYS}d)")
     print(f"  Load balancer:     {'ENABLED' if BALANCE_ENABLED else 'DISABLED'}")
     print(f"  Idle auto-stop:    {'ENABLED' if IDLE_ENABLED else 'DISABLED'}"
           + (f" ({IDLE_DEFAULT_TIMEOUT // 60}m default, label {IDLE_LABEL_ENABLE}=true)" if IDLE_ENABLED else ""))
@@ -2602,6 +2689,9 @@ def main():
     # Start the heartbeat reaper in the background
     reaper = threading.Thread(target=heartbeat_reaper, daemon=True)
     reaper.start()
+
+    # Start the activity-log retention reaper (90-day CSV cleanup)
+    threading.Thread(target=activity_log_reaper, daemon=True).start()
 
     # Start the local Docker scanner
     docker_scanner = threading.Thread(target=local_docker_scanner, daemon=True)
