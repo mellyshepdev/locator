@@ -451,6 +451,10 @@
         /* Node/Host column shouldn't get squeezed onto multiple lines */
         .col-host { white-space: nowrap; min-width: 150px; }
 
+        /* Clickable column headers */
+        th[data-sort-table] { user-select: none; white-space: nowrap; }
+        th[data-sort-table]:hover { background: rgba(255, 255, 255, 0.08); }
+
         /* Tables can have more columns than the container is wide — scroll
            horizontally instead of silently clipping/wrapping data */
         .table-scroll { overflow-x: auto; }
@@ -676,6 +680,13 @@
                 <select id="grid-unit-filter" onchange="if (lastRegistryData) renderGrid(lastRegistryData)">
                     <option value="">ALL UNITS</option>
                 </select>
+                <select id="grid-node-sort" onchange="dropdownSort(this.value)">
+                    <option value="">SORT: DEFAULT</option>
+                    <option value="status">SORT: STATUS</option>
+                    <option value="name">SORT: NAME</option>
+                    <option value="mem">SORT: AVAILABLE MEM</option>
+                    <option value="disk">SORT: AVAILABLE STORAGE</option>
+                </select>
                 <span class="filter-count" id="filter-count"></span>
             </div>
 
@@ -683,7 +694,14 @@
             <div class="node-cards-row" id="node-cards"></div>
 
             <div class="table-scroll"><table>
-                <thead><tr><th style="color: #00f0ff;">Device</th><th style="color: #00f0ff;">IP Address</th><th style="color: #00f0ff;">Type / OS</th><th style="color: #00f0ff;">Status</th><th style="color: #00f0ff;">Metadata</th><th style="color: #00f0ff;">Last Seen</th></tr></thead>
+                <thead><tr>
+                    <th data-sort-table="devices" data-sort-key="name" data-label="Device" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','name')">Device</th>
+                    <th data-sort-table="devices" data-sort-key="ip" data-label="IP Address" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','ip')">IP Address</th>
+                    <th data-sort-table="devices" data-sort-key="type" data-label="Type / OS" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','type')">Type / OS</th>
+                    <th data-sort-table="devices" data-sort-key="status" data-label="Status" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','status')">Status</th>
+                    <th style="color: #00f0ff;">Metadata</th>
+                    <th data-sort-table="devices" data-sort-key="lastseen" data-label="Last Seen" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','lastseen')">Last Seen</th>
+                </tr></thead>
                 <tbody id="tbody-devices"></tbody>
             </table></div>
         </div>
@@ -697,7 +715,17 @@
                 <div>SYSTEM STATUS: <span class="status-dot online"></span> NOMINAL</div>
             </div>
             <div class="table-scroll"><table>
-                <thead><tr><th>Service</th><th class="col-host">Node / Host</th><th>Port</th><th>Internal IP</th><th>Public / Traefik</th><th>Stats (CPU/RAM/Temp/Disk)</th><th>Status</th><th>Metadata</th><th>Last Seen</th></tr></thead>
+                <thead><tr>
+                    <th data-sort-table="docker" data-sort-key="name" data-label="Service" style="cursor:pointer" onclick="sortByColumn('docker','name')">Service</th>
+                    <th class="col-host" data-sort-table="docker" data-sort-key="host" data-label="Node / Host" style="cursor:pointer" onclick="sortByColumn('docker','host')">Node / Host</th>
+                    <th data-sort-table="docker" data-sort-key="port" data-label="Port" style="cursor:pointer" onclick="sortByColumn('docker','port')">Port</th>
+                    <th data-sort-table="docker" data-sort-key="internal" data-label="Internal IP" style="cursor:pointer" onclick="sortByColumn('docker','internal')">Internal IP</th>
+                    <th data-sort-table="docker" data-sort-key="url" data-label="Public / Traefik" style="cursor:pointer" onclick="sortByColumn('docker','url')">Public / Traefik</th>
+                    <th>Stats (CPU/RAM/Temp/Disk)</th>
+                    <th data-sort-table="docker" data-sort-key="status" data-label="Status" style="cursor:pointer" onclick="sortByColumn('docker','status')">Status</th>
+                    <th>Metadata</th>
+                    <th data-sort-table="docker" data-sort-key="lastseen" data-label="Last Seen" style="cursor:pointer" onclick="sortByColumn('docker','lastseen')">Last Seen</th>
+                </tr></thead>
                 <tbody id="tbody-docker"></tbody>
             </table></div>
         </div>
@@ -711,7 +739,14 @@
                 <div>SYSTEM STATUS: <span class="status-dot online" style="background-color: #a200ff; box-shadow: 0 0 8px #a200ff;"></span> NOMINAL</div>
             </div>
             <div class="table-scroll"><table>
-                <thead><tr><th style="color: #a200ff;">Service</th><th class="col-host" style="color: #a200ff;">Node / Host</th><th style="color: #a200ff;">URL</th><th style="color: #a200ff;">Status</th><th style="color: #a200ff;">Metadata</th><th style="color: #a200ff;">Last Seen</th></tr></thead>
+                <thead><tr>
+                    <th data-sort-table="websites" data-sort-key="name" data-label="Service" style="color: #a200ff;cursor:pointer" onclick="sortByColumn('websites','name')">Service</th>
+                    <th class="col-host" data-sort-table="websites" data-sort-key="host" data-label="Node / Host" style="color: #a200ff;cursor:pointer" onclick="sortByColumn('websites','host')">Node / Host</th>
+                    <th data-sort-table="websites" data-sort-key="url" data-label="URL" style="color: #a200ff;cursor:pointer" onclick="sortByColumn('websites','url')">URL</th>
+                    <th data-sort-table="websites" data-sort-key="status" data-label="Status" style="color: #a200ff;cursor:pointer" onclick="sortByColumn('websites','status')">Status</th>
+                    <th style="color: #a200ff;">Metadata</th>
+                    <th data-sort-table="websites" data-sort-key="lastseen" data-label="Last Seen" style="color: #a200ff;cursor:pointer" onclick="sortByColumn('websites','lastseen')">Last Seen</th>
+                </tr></thead>
                 <tbody id="tbody-websites"></tbody>
             </table></div>
         </div>
@@ -725,7 +760,15 @@
                 <div>HYPERVISOR: <span class="status-dot online" style="background-color: #ff8800; box-shadow: 0 0 8px #ff8800;"></span> VirtualBox 7.0</div>
             </div>
             <div class="table-scroll"><table>
-                <thead><tr><th style="color: #ff8800;">VM Name</th><th class="col-host" style="color: #ff8800;">Node / Host</th><th style="color: #ff8800;">Internal URL</th><th style="color: #ff8800;">Public URL</th><th style="color: #ff8800;">Status</th><th style="color: #ff8800;">Metadata</th><th style="color: #ff8800;">Last Seen</th></tr></thead>
+                <thead><tr>
+                    <th data-sort-table="vms" data-sort-key="name" data-label="VM Name" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','name')">VM Name</th>
+                    <th class="col-host" data-sort-table="vms" data-sort-key="host" data-label="Node / Host" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','host')">Node / Host</th>
+                    <th data-sort-table="vms" data-sort-key="internal" data-label="Internal URL" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','internal')">Internal URL</th>
+                    <th data-sort-table="vms" data-sort-key="url" data-label="Public URL" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','url')">Public URL</th>
+                    <th data-sort-table="vms" data-sort-key="status" data-label="Status" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','status')">Status</th>
+                    <th style="color: #ff8800;">Metadata</th>
+                    <th data-sort-table="vms" data-sort-key="lastseen" data-label="Last Seen" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','lastseen')">Last Seen</th>
+                </tr></thead>
                 <tbody id="tbody-vms"></tbody>
             </table></div>
         </div>
@@ -739,7 +782,14 @@
                 <div>PLATFORMS: <span class="status-dot online" style="background-color: #ff2d95; box-shadow: 0 0 8px #ff2d95;"></span> Vercel · Netlify · Fly.io · Supabase · Render · GitLab Pages</div>
             </div>
             <div class="table-scroll"><table>
-                <thead><tr><th style="color: #ff2d95;">Service</th><th class="col-host" style="color: #ff2d95;">Platform</th><th style="color: #ff2d95;">URL</th><th style="color: #ff2d95;">Status</th><th style="color: #ff2d95;">Metadata</th><th style="color: #ff2d95;">Last Seen</th></tr></thead>
+                <thead><tr>
+                    <th data-sort-table="serverless" data-sort-key="name" data-label="Service" style="color: #ff2d95;cursor:pointer" onclick="sortByColumn('serverless','name')">Service</th>
+                    <th class="col-host" data-sort-table="serverless" data-sort-key="platform" data-label="Platform" style="color: #ff2d95;cursor:pointer" onclick="sortByColumn('serverless','platform')">Platform</th>
+                    <th data-sort-table="serverless" data-sort-key="url" data-label="URL" style="color: #ff2d95;cursor:pointer" onclick="sortByColumn('serverless','url')">URL</th>
+                    <th data-sort-table="serverless" data-sort-key="status" data-label="Status" style="color: #ff2d95;cursor:pointer" onclick="sortByColumn('serverless','status')">Status</th>
+                    <th style="color: #ff2d95;">Metadata</th>
+                    <th data-sort-table="serverless" data-sort-key="lastseen" data-label="Last Seen" style="color: #ff2d95;cursor:pointer" onclick="sortByColumn('serverless','lastseen')">Last Seen</th>
+                </tr></thead>
                 <tbody id="tbody-serverless"></tbody>
             </table></div>
         </div>
@@ -1126,11 +1176,122 @@
             return '#00ff00';
         }
 
+        // ── COLUMN / DROPDOWN SORT (shared by node cards + every grid table) ──
+        // State persists across the 10s poll refresh (loadRegistryData rebuilds
+        // every table from scratch each cycle) because sorting happens on the
+        // underlying data array before render, not as a one-off DOM reorder.
+        let columnSort = {}; // { devices: {key, dir}, docker: {...}, websites: {...}, vms: {...}, serverless: {...} }
+
+        function availMem(n) {
+            if (n.mem_total_gb != null && n.mem_used_gb != null) return n.mem_total_gb - n.mem_used_gb;
+            if (n.mem_percent != null) return 100 - n.mem_percent;
+            return -Infinity;
+        }
+        function availDisk(n) {
+            if (n.disk_total_gb != null && n.disk_used_gb != null) return n.disk_total_gb - n.disk_used_gb;
+            if (n.disk_percent != null) return 100 - n.disk_percent;
+            return -Infinity;
+        }
+        function statusRank(item) {
+            if (item.status !== 'ONLINE') return 2;
+            const ts = item.last_seen || item.last_heartbeat;
+            const stale = !ts || (Date.now() - new Date(ts)) > 300000;
+            return stale ? 1 : 0;
+        }
+
+        const COLUMN_GETTERS = {
+            devices: {
+                name:     n => (n.name || n.id || '').toLowerCase(),
+                ip:       n => n.ip || n.tailscale_ip || '',
+                type:     n => (n.type || '').toLowerCase(),
+                status:   n => statusRank(n),
+                lastseen: n => n.last_seen ? new Date(n.last_seen).getTime() : -Infinity,
+                mem:      n => availMem(n),
+                disk:     n => availDisk(n),
+            },
+            docker: {
+                name:     s => (s.name || '').toLowerCase(),
+                host:     s => (s.hosts || [s.host || '']).join(',').toLowerCase(),
+                port:     s => Number(s.port) || -Infinity,
+                internal: s => s.internal || '',
+                url:      s => s.url || '',
+                status:   s => statusRank(s),
+                lastseen: s => s.last_heartbeat ? new Date(s.last_heartbeat).getTime() : -Infinity,
+            },
+            websites: {
+                name:     s => (s.name || '').toLowerCase(),
+                host:     s => (s.hosts || [s.host || '']).join(',').toLowerCase(),
+                url:      s => s.url || '',
+                status:   s => statusRank(s),
+                lastseen: s => s.last_heartbeat ? new Date(s.last_heartbeat).getTime() : -Infinity,
+            },
+            vms: {
+                name:     s => (s.name || '').toLowerCase(),
+                host:     s => (s.hosts || [s.host || '']).join(',').toLowerCase(),
+                internal: s => s.internal || '',
+                url:      s => s.url || '',
+                status:   s => statusRank(s),
+                lastseen: s => s.last_heartbeat ? new Date(s.last_heartbeat).getTime() : -Infinity,
+            },
+            serverless: {
+                name:     s => (s.name || '').toLowerCase(),
+                platform: s => ((s.metadata && s.metadata.platform) || s.host || '').toLowerCase(),
+                url:      s => s.url || '',
+                status:   s => statusRank(s),
+                lastseen: s => s.last_heartbeat ? new Date(s.last_heartbeat).getTime() : -Infinity,
+            },
+        };
+
+        function applyColumnSort(table, items) {
+            const st = columnSort[table];
+            const getter = st && COLUMN_GETTERS[table] && COLUMN_GETTERS[table][st.key];
+            if (!getter) return items;
+            const arr = items.slice();
+            arr.sort((a, b) => {
+                const av = getter(a), bv = getter(b);
+                const cmp = (typeof av === 'number' && typeof bv === 'number')
+                    ? av - bv : String(av).localeCompare(String(bv));
+                return st.dir === 'desc' ? -cmp : cmp;
+            });
+            return arr;
+        }
+
+        function updateSortIndicators() {
+            document.querySelectorAll('th[data-sort-table]').forEach(th => {
+                const st = columnSort[th.dataset.sortTable];
+                const active = st && st.key === th.dataset.sortKey;
+                th.textContent = th.dataset.label + (active ? (st.dir === 'asc' ? ' ▲' : ' ▼') : '');
+            });
+        }
+
+        function sortByColumn(table, key) {
+            const st = columnSort[table] || {};
+            if (st.key === key) st.dir = st.dir === 'asc' ? 'desc' : 'asc';
+            else { st.key = key; st.dir = 'asc'; }
+            columnSort[table] = st;
+            const sel = document.getElementById('grid-node-sort');
+            if (table === 'devices' && sel) sel.value = key;
+            updateSortIndicators();
+            if (!lastRegistryData) return;
+            renderGrid(lastRegistryData);
+            if (table === 'devices') renderNodeCards(lastRegistryData);
+        }
+
+        function dropdownSort(key) {
+            if (!key) delete columnSort.devices;
+            else columnSort.devices = { key, dir: 'asc' };
+            updateSortIndicators();
+            if (!lastRegistryData) return;
+            renderGrid(lastRegistryData);
+            renderNodeCards(lastRegistryData);
+        }
+
         function renderNodeCards(registryData) {
             const el = document.getElementById('node-cards');
             if (!el) return;
-            const nodes = Object.entries(registryData.nodes || {});
-            el.innerHTML = nodes.map(([id, n]) => {
+            const nodes = applyColumnSort('devices', Object.entries(registryData.nodes || {}).map(([id, n]) => ({ ...n, id })));
+            el.innerHTML = nodes.map(n => {
+                const id = n.id;
                 const stale = !n.last_seen || (Date.now() - new Date(n.last_seen)) > 300000;
                 const oom = (n.mem_percent || 0) >= 90;
                 const badge = n.status !== 'ONLINE' ? 'offline' : (stale ? 'stale' : 'online');
@@ -1222,12 +1383,12 @@
             const allNodes = Object.entries(registryData.nodes || {}).map(([id, data]) => ({...data, id, category: 'devices'}));
 
             updateUnitFilterOptions(registryData);
-            const nodes = allNodes.filter(n => nodeMatchesFilter(n.id, n));
+            const nodes = applyColumnSort('devices', allNodes.filter(n => nodeMatchesFilter(n.id, n)));
 
-            const dockerList = services.filter(s => s.category === 'docker containers');
-            const websiteList = services.filter(s => s.category === 'websites');
-            const vmList = services.filter(s => s.category === 'virtual machines');
-            const serverlessList = services.filter(s => s.category === 'serverless');
+            const dockerList = applyColumnSort('docker', services.filter(s => s.category === 'docker containers'));
+            const websiteList = applyColumnSort('websites', services.filter(s => s.category === 'websites'));
+            const vmList = applyColumnSort('vms', services.filter(s => s.category === 'virtual machines'));
+            const serverlessList = applyColumnSort('serverless', services.filter(s => s.category === 'serverless'));
 
             document.getElementById('count-devices').innerText = allNodes.length;
             document.getElementById('count-docker').innerText = dockerList.length;
