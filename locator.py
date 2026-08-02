@@ -51,7 +51,7 @@ import re
 import io
 import qrcode
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify, Response, render_template
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
@@ -657,6 +657,7 @@ def register_service():
         registry["updated"] = now
 
     persist_registry()
+    log_activity("service", service_id, "heartbeat", status="ONLINE", host=host)
     if host != "unknown":
         _enforce_dedup(name, host)
     print(f"📡 REGISTERED: {service_id} → {data.get('internal', data.get('url', 'unknown'))}")
@@ -1180,6 +1181,10 @@ def update_node_metrics(node_id):
         node["status"]        = "ONLINE"
         registry["updated"]   = now
 
+    log_activity("node", node_id, "metrics", status="ONLINE",
+                  cpu_percent=data.get("cpu_percent"), mem_percent=data.get("mem_percent"),
+                  disk_percent=data.get("disk_percent"))
+
     return jsonify({"result": "metrics_updated", "node": node_id})
 
 
@@ -1559,6 +1564,79 @@ def ensure_core_services():
     print(f"🛡️  Core services enforced for {len(nodes)} nodes")
 
 
+# ── ACTIVITY LOG (durable history, spreadsheet export, 90-day retention) ────
+# Node/service telemetry only ever lived as a single overwritten latest-state
+# snapshot (persist_registry() → registry.json), so there was no way to see
+# what a node's cpu/mem was doing in the run-up to an incident, or to prove
+# whether an OOM alert threshold was even crossed. This writes one row per
+# event to a daily CSV on the persistent Fly volume (DATA_DIR), so history
+# survives restarts/cold-starts and can be exported as a spreadsheet.
+
+ACTIVITY_LOG_DIR = os.environ.get("ACTIVITY_LOG_DIR", os.path.join(DATA_DIR, "activity"))
+ACTIVITY_RETENTION_DAYS = int(os.environ.get("ACTIVITY_RETENTION_DAYS", os.environ.get("RETENTION_DAYS", 90)))
+_ACTIVITY_FIELDS = ["timestamp", "entity_type", "entity_id", "event", "status",
+                     "cpu_percent", "mem_percent", "disk_percent", "host", "detail"]
+_activity_lock = threading.Lock()
+
+
+def _activity_file_for(day):
+    return os.path.join(ACTIVITY_LOG_DIR, f"activity_{day.strftime('%Y-%m-%d')}.csv")
+
+
+def log_activity(entity_type, entity_id, event, status="", cpu_percent=None,
+                  mem_percent=None, disk_percent=None, host="", detail=""):
+    """Append one row to today's activity CSV (creating the file/header if new)."""
+    import csv
+    now = datetime.now(timezone.utc)
+    row = {
+        "timestamp": now.isoformat(),
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "event": event,
+        "status": status,
+        "cpu_percent": cpu_percent if cpu_percent is not None else "",
+        "mem_percent": mem_percent if mem_percent is not None else "",
+        "disk_percent": disk_percent if disk_percent is not None else "",
+        "host": host,
+        "detail": detail,
+    }
+    try:
+        with _activity_lock:
+            os.makedirs(ACTIVITY_LOG_DIR, exist_ok=True)
+            filepath = _activity_file_for(now)
+            is_new = not os.path.exists(filepath)
+            with open(filepath, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=_ACTIVITY_FIELDS)
+                if is_new:
+                    writer.writeheader()
+                writer.writerow(row)
+    except Exception as e:
+        print(f"⚠️  Failed to write activity log: {e}")
+
+
+def activity_log_reaper():
+    """Deletes daily activity CSVs older than ACTIVITY_RETENTION_DAYS."""
+    while True:
+        time.sleep(3600)  # hourly is plenty; files are date-stamped, not size-bounded
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=ACTIVITY_RETENTION_DAYS)
+            if not os.path.isdir(ACTIVITY_LOG_DIR):
+                continue
+            for fname in os.listdir(ACTIVITY_LOG_DIR):
+                m = re.match(r"^activity_(\d{4}-\d{2}-\d{2})\.csv$", fname)
+                if not m:
+                    continue
+                try:
+                    file_day = datetime.strptime(m.group(1), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+                if file_day < cutoff:
+                    os.remove(os.path.join(ACTIVITY_LOG_DIR, fname))
+                    print(f"🗑️  ACTIVITY LOG PURGED: {fname} (> {ACTIVITY_RETENTION_DAYS} days)")
+        except Exception as e:
+            print(f"⚠️  activity_log_reaper error: {e}")
+
+
 # ── HEARTBEAT REAPER ────────────────────────────────────────────────────────
 
 RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", 90))
@@ -1594,11 +1672,14 @@ def heartbeat_reaper():
                                 svc["offline_since"] = now.isoformat()
                             changed = True
                             print(f"💀 OFFLINE: {name}")
+                            log_activity("service", name, "offline_timeout", status="OFFLINE",
+                                         host=svc.get("host", ""), detail=f"no heartbeat > {_timeout}s")
                             if "lokey" in name.lower():
                                 node_id = svc.get("host", "")
                                 if node_id and node_id in registry["nodes"]:
                                     registry["nodes"][node_id]["status"] = "OFFLINE"
                                     print(f"💀 NODE OFFLINE: {node_id}")
+                                    log_activity("node", node_id, "offline_timeout", status="OFFLINE")
                     except (ValueError, TypeError):
                         pass
 
