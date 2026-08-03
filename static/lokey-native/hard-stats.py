@@ -2,6 +2,8 @@ import psutil
 import time
 import os
 import re
+import shutil
+import signal
 import subprocess
 import requests
 import urllib3
@@ -433,6 +435,7 @@ def _get_compose_dir(container_name):
 def execute_migration(mig):
     """
     Dispatch a migration based on its type.
+      kind == "native"   — non-container migration, see _execute_native_migration.
       git_push_and_stop  — commit + push this container's project, then stop it here.
       git_pull_and_start — pull (or clone) the project on this node, docker compose up -d.
       git_pull_only      — pull (or clone) to sync state; container already running here.
@@ -440,6 +443,9 @@ def execute_migration(mig):
     Returns (success: bool, extra: dict) where extra carries data for the locator
     completion report (e.g. project_dir so locator can create the follow-on pull task).
     """
+    if mig.get("kind", "container") == "native":
+        return _execute_native_migration(mig), {}
+
     mig_type = mig.get("type", "rsync")
     if mig_type == "git_push_and_stop":
         return _execute_git_push_and_stop(mig)
@@ -677,6 +683,249 @@ def _execute_rsync_migration(mig):
 
     print(f"[{UNIT_NAME}] ✅ Migration {mig_id}: complete — {name} moved to {to_node}")
     return True
+
+
+# ── NATIVE (non-container) MIGRATION ────────────────────────────────────────
+# Moves a systemd-managed service or a bare background process — as opposed
+# to a Docker container — to another unit. Which of the two it is gets
+# detected live against the actual host state, not assumed from the registry.
+
+def _detect_native_kind(name, metadata):
+    """
+    Check this host's real state for the named service to decide how to
+    migrate it:
+      "systemd" — a real, loaded systemd unit with a unit file on disk
+                  ("standard app" — properly installed, config-driven).
+      "process" — no systemd unit, but a process is actually running
+                  ("native background process" — ad hoc, no config file).
+      None      — nothing found here to migrate.
+    Returns (kind, detail): detail is (unit_name, unit_path) for "systemd",
+    or a pid (int) for "process".
+    """
+    unit_name = metadata.get("systemd_unit") or f"{name}.service"
+
+    if shutil.which("systemctl"):
+        show = subprocess.run(
+            ["systemctl", "show", unit_name,
+             "--property=LoadState,ActiveState,FragmentPath", "--no-pager"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if show.returncode == 0:
+            props = dict(
+                line.split("=", 1) for line in show.stdout.strip().splitlines() if "=" in line
+            )
+            if props.get("LoadState") == "loaded" and props.get("FragmentPath"):
+                return "systemd", (unit_name, props["FragmentPath"])
+
+    pid_file = metadata.get("pid_file")
+    if pid_file and os.path.isfile(pid_file):
+        try:
+            pid = int(open(pid_file).read().strip())
+            os.kill(pid, 0)  # existence check only, no signal sent
+            return "process", pid
+        except (ValueError, ProcessLookupError, PermissionError, OSError):
+            pass
+
+    pgrep = subprocess.run(["pgrep", "-f", name], capture_output=True, text=True, timeout=10)
+    if pgrep.returncode == 0 and pgrep.stdout.strip():
+        return "process", int(pgrep.stdout.strip().splitlines()[0])
+
+    return None, None
+
+
+def _parse_unit_file(path):
+    """Extract WorkingDirectory= and ExecStart= from a systemd unit file."""
+    working_dir, exec_start = None, None
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("WorkingDirectory="):
+                    working_dir = line.split("=", 1)[1].strip()
+                elif line.startswith("ExecStart="):
+                    exec_start = line.split("=", 1)[1].strip()
+    except Exception:
+        pass
+    return working_dir, exec_start
+
+
+def _guess_venv_from_exec(exec_start):
+    """If ExecStart runs a <venv>/bin/python[3], return the venv dir."""
+    if not exec_start:
+        return None
+    interpreter = exec_start.split()[0]
+    if interpreter.endswith("/bin/python") or interpreter.endswith("/bin/python3"):
+        return os.path.dirname(os.path.dirname(interpreter))
+    return None
+
+
+def _rebuild_remote_venv(to_ip, working_dir, venv_path):
+    """
+    Ship code without the venv (already excluded from rsync by the caller)
+    and rebuild it from requirements.txt on the target — safer than copying
+    a venv directory across possibly different OS/arch/Python versions.
+    """
+    if not venv_path:
+        return True  # no venv involved
+    req_file = os.path.join(working_dir, "requirements.txt")
+    if not os.path.isfile(req_file):
+        print(f"  ⚠️  no requirements.txt in {working_dir} — target must already have a usable venv")
+        return True
+    ok, _, err = _ssh(
+        to_ip,
+        f"python3 -m venv {venv_path} && "
+        f"{venv_path}/bin/pip install --quiet -r {working_dir}/requirements.txt",
+        timeout=180,
+    )
+    if not ok:
+        print(f"  ❌ remote venv rebuild failed: {err[:200]}")
+    return ok
+
+
+def _rsync_native_project(working_dir, to_ip, venv_path):
+    ok, _, err = _ssh(to_ip, f"mkdir -p {working_dir}")
+    if not ok:
+        print(f"  ❌ mkdir failed on target: {err}")
+        return False
+    exclude = []
+    if venv_path and os.path.dirname(venv_path) == working_dir:
+        exclude = ["--exclude", os.path.basename(venv_path)]
+    rsync = subprocess.run(
+        ["rsync", "-avz", "--delete", *exclude,
+         f"{working_dir}/", f"{REMOTE_USER}@{to_ip}:{working_dir}/"],
+        capture_output=True, text=True, timeout=300,
+    )
+    if rsync.returncode != 0:
+        print(f"  ❌ rsync failed: {rsync.stderr[:200]}")
+        return False
+    return True
+
+
+def _migrate_systemd_service(mig, unit_name, unit_path, metadata):
+    """A "standard app": stop it, ship its working dir + rebuilt venv + unit
+    file, install and start it on the target via systemctl."""
+    mig_id, to_ip, to_node = mig["id"], mig["to_ip"], mig["to_node"]
+    print(f"[{UNIT_NAME}] 🧩 native(systemd) migration {mig_id}: {unit_name} → {to_node} ({to_ip})")
+
+    working_dir, exec_start = _parse_unit_file(unit_path)
+    working_dir = metadata.get("working_dir") or working_dir
+    venv_path   = metadata.get("venv_path") or _guess_venv_from_exec(exec_start)
+
+    if not working_dir:
+        print(f"[{UNIT_NAME}] ❌ {mig_id}: no WorkingDirectory in unit and no metadata.working_dir override")
+        return False
+
+    stop = subprocess.run(
+        ["sudo", "-n", "systemctl", "stop", unit_name],
+        capture_output=True, text=True, timeout=30,
+    )
+    if stop.returncode != 0:
+        print(f"[{UNIT_NAME}] ❌ {mig_id}: systemctl stop failed (passwordless sudo set up?): {stop.stderr.strip()[:200]}")
+        return False
+
+    if not _rsync_native_project(working_dir, to_ip, venv_path):
+        return False
+
+    if not _rebuild_remote_venv(to_ip, working_dir, venv_path):
+        return False
+
+    scp = subprocess.run(
+        ["scp", unit_path, f"{REMOTE_USER}@{to_ip}:/tmp/{unit_name}"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if scp.returncode != 0:
+        print(f"[{UNIT_NAME}] ❌ {mig_id}: unit file scp failed: {scp.stderr.strip()[:200]}")
+        return False
+
+    ok, _, err = _ssh(
+        to_ip,
+        f"sudo -n cp /tmp/{unit_name} /etc/systemd/system/{unit_name} && "
+        f"sudo -n systemctl daemon-reload && sudo -n systemctl enable --now {unit_name}",
+        timeout=60,
+    )
+    if not ok:
+        print(f"[{UNIT_NAME}] ❌ {mig_id}: remote systemctl enable failed (passwordless sudo set up on {to_node}?): {err}")
+        return False
+
+    ok, out, _ = _ssh(to_ip, f"systemctl is-active {unit_name}", timeout=10)
+    if not ok or out.strip() != "active":
+        print(f"[{UNIT_NAME}] ⚠️  {mig_id}: started but not reporting active on {to_node} ({out!r})")
+        return False
+
+    print(f"[{UNIT_NAME}] ✅ {mig_id}: {unit_name} now active on {to_node}")
+    return True
+
+
+def _migrate_native_process(mig, pid, metadata):
+    """A "native background process": no unit file, so working_dir and
+    start_cmd must come from registry metadata. Stop, ship, restart via
+    nohup on the target."""
+    mig_id, to_ip, to_node = mig["id"], mig["to_ip"], mig["to_node"]
+    name = mig["container"]
+    print(f"[{UNIT_NAME}] 🧩 native(process) migration {mig_id}: {name} (pid {pid}) → {to_node} ({to_ip})")
+
+    working_dir = metadata.get("working_dir")
+    start_cmd   = metadata.get("start_cmd")
+    venv_path   = metadata.get("venv_path")
+    if not working_dir or not start_cmd:
+        print(f"[{UNIT_NAME}] ❌ {mig_id}: bare process migration needs metadata.working_dir and metadata.start_cmd")
+        return False
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(10):
+            time.sleep(1)
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except Exception as e:
+        print(f"[{UNIT_NAME}] ⚠️  {mig_id}: stop warning: {e}")
+
+    if not _rsync_native_project(working_dir, to_ip, venv_path):
+        return False
+
+    if not _rebuild_remote_venv(to_ip, working_dir, venv_path):
+        return False
+
+    pid_file = metadata.get("pid_file") or f"{working_dir}/.lokey_native.pid"
+    ok, _, err = _ssh(
+        to_ip,
+        f"cd {working_dir} && nohup {start_cmd} > native.log 2>&1 & echo $! > {pid_file}",
+        timeout=30,
+    )
+    if not ok:
+        print(f"[{UNIT_NAME}] ❌ {mig_id}: remote start failed on {to_node}: {err}")
+        return False
+
+    print(f"[{UNIT_NAME}] ✅ {mig_id}: {name} started on {to_node}")
+    return True
+
+
+def _execute_native_migration(mig):
+    """
+    Entry point for kind="native" migrations. Checks whether the named
+    service is a real systemd unit ("standard app") or a bare running
+    process ("native background process") and migrates it accordingly.
+    """
+    mig_id   = mig["id"]
+    name     = mig["container"]
+    metadata = mig.get("metadata") or {}
+
+    kind, detail = _detect_native_kind(name, metadata)
+    if kind == "systemd":
+        unit_name, unit_path = detail
+        return _migrate_systemd_service(mig, unit_name, unit_path, metadata)
+    if kind == "process":
+        return _migrate_native_process(mig, detail, metadata)
+
+    print(f"[{UNIT_NAME}] ❌ {mig_id}: '{name}' is neither a loaded systemd unit nor a running process here")
+    return False
+
 
 def check_pending_migrations():
     """Poll the locator for migrations queued from this node and execute them."""
