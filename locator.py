@@ -1819,6 +1819,23 @@ _PINNED_NAMES = {
     "wg-easy", "crowdsec", "fail2ban",
 }
 
+def _clean_ip(raw):
+    """Strip description suffixes like '10.0.0.1- hostname'."""
+    if not raw:
+        return None
+    clean = raw.split("-")[0].strip().split()[0]
+    return clean if clean and clean not in ("unknown", "") else None
+
+
+def _best_ip(info):
+    """Return the best reachable IP for a node (Tailscale preferred)."""
+    return (
+        info.get("tailscale_ip")
+        or _clean_ip(info.get("ip"))
+        or _clean_ip(info.get("openvpn_ip"))
+    )
+
+
 def load_balancer():
     """
     Periodically checks node CPU/memory and queues container migrations
@@ -1932,21 +1949,6 @@ def load_balancer():
             if not movable:
                 print(f"⚠️  BALANCE: {src_id} overloaded but no movable containers found")
                 continue
-
-            def _clean_ip(raw):
-                """Strip description suffixes like '10.0.0.1- hostname'."""
-                if not raw:
-                    return None
-                clean = raw.split("-")[0].strip().split()[0]
-                return clean if clean and clean not in ("unknown", "") else None
-
-            def _best_ip(info):
-                """Return the best reachable IP for a node (Tailscale preferred)."""
-                return (
-                    info.get("tailscale_ip")
-                    or _clean_ip(info.get("ip"))
-                    or _clean_ip(info.get("openvpn_ip"))
-                )
 
             # Pick target — first underloaded node that has a usable IP
             tgt_id = tgt_ip = tgt_info = tgt_load = None
