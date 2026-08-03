@@ -203,6 +203,9 @@
         #view-yamls.active {
             display: flex;
         }
+        #view-traccar.active {
+            display: flex;
+        }
 
         /* ── MESH MAP STYLES ── */
         h1.map-title {
@@ -385,6 +388,13 @@
             background-color: var(--danger);
             box-shadow: 0 0 8px var(--danger);
             animation: pulse 1s infinite;
+        }
+        .battery-critical {
+            animation: battery-blink 1s infinite;
+        }
+        @keyframes battery-blink {
+            0%, 100% { background-color: #ff2d2d; box-shadow: 0 0 8px #ff2d2d; }
+            50%      { background-color: #ffe600; box-shadow: 0 0 8px #ffe600; }
         }
         .status-toggle-btn {
             background: transparent;
@@ -619,6 +629,10 @@
 </script>
 <!-- End Matomo Code -->
 
+<!-- Leaflet (Traccar Map tab) -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
 </head>
 <body>
 
@@ -633,6 +647,7 @@
         <button class="toggle-btn" onclick="switchView('map')">Mesh Map</button>
         <button class="toggle-btn active" onclick="switchView('grid')">Tactical Grid</button>
         <button class="toggle-btn" onclick="switchView('3js')">3D Mesh</button>
+        <button class="toggle-btn" onclick="switchView('traccar')">Traccar Map</button>
         <button class="toggle-btn" onclick="switchView('yamls')">YAMLs</button>
     </div>
 
@@ -880,6 +895,15 @@
         <iframe src="/3d-mesh" style="width: 100%; height: 100%; border: none;"></iframe>
     </div>
 
+    <!-- TRACCAR MAP VIEW -->
+    <div id="view-traccar" class="view-container" style="flex-direction:column;">
+        <div style="padding:16px 30px 8px; border-bottom:1px solid var(--accent); flex-shrink:0; display:flex; align-items:center; gap:20px;">
+            <h2 style="margin:0; color:var(--accent); text-transform:uppercase; letter-spacing:4px; font-size:16px;">Traccar — Tracked Devices</h2>
+            <span id="traccar-count" style="font-size:12px; color:#888;"></span>
+        </div>
+        <div id="traccar-map" style="flex:1; background:#111;"></div>
+    </div>
+
     <!-- YAMLS VIEW -->
     <div id="view-yamls" class="view-container" style="background:var(--grid-bg); background-image:linear-gradient(var(--neon-green-dim) 1px,transparent 1px),linear-gradient(90deg,var(--neon-green-dim) 1px,transparent 1px); background-size:30px 30px; overflow:hidden; flex-direction:column;">
         <div style="padding:16px 30px 8px; border-bottom:1px solid var(--neon-green); flex-shrink:0; display:flex; align-items:center; gap:20px;">
@@ -906,12 +930,13 @@
             document.querySelectorAll('.toggle-btn').forEach(btn => btn.classList.remove('active'));
             document.querySelectorAll('.view-container').forEach(vc => vc.classList.remove('active'));
 
-            const viewMap = { map: [1, 'view-map'], grid: [2, 'view-grid'], '3js': [3, 'view-3js'], yamls: [4, 'view-yamls'] };
+            const viewMap = { map: [1, 'view-map'], grid: [2, 'view-grid'], '3js': [3, 'view-3js'], traccar: [4, 'view-traccar'], yamls: [5, 'view-yamls'] };
             const [btnIdx, viewId] = viewMap[viewName] || [1, 'view-map'];
             document.querySelector(`#ui-toggle button:nth-child(${btnIdx})`).classList.add('active');
             document.getElementById(viewId).classList.add('active');
 
             if (viewName === 'yamls') loadYamlList();
+            if (viewName === 'traccar') initTraccarMap();
         }
 
         // Deep link: /?view=grid opens straight into the Tactical Grid
@@ -920,6 +945,67 @@
             const requested = new URLSearchParams(window.location.search).get('view');
             if (requested) document.addEventListener('DOMContentLoaded', () => switchView(requested));
         })();
+
+        // ── TRACCAR MAP ──
+        // Devices come from /api/traccar-devices (Locator's own proxy — see
+        // locator.py), which is itself fed by Lokey's existing GPS heartbeats
+        // via the traccar_feeder background thread. Lazy-inits on first visit
+        // to this tab, then just refreshes markers every 30s.
+        let traccarMap = null;
+        let traccarMarkers = {};
+        let traccarRefreshTimer = null;
+
+        function initTraccarMap() {
+            if (!traccarMap) {
+                traccarMap = L.map('traccar-map', { worldCopyJump: true }).setView([20, 0], 2);
+                L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                    attribution: '&copy; OpenStreetMap &copy; CARTO',
+                    maxZoom: 19,
+                }).addTo(traccarMap);
+            }
+            refreshTraccarDevices();
+            if (!traccarRefreshTimer) traccarRefreshTimer = setInterval(refreshTraccarDevices, 30000);
+            setTimeout(() => traccarMap.invalidateSize(), 100); // container was hidden on first load
+        }
+
+        async function refreshTraccarDevices() {
+            try {
+                const res = await fetch('/api/traccar-devices');
+                const data = await res.json();
+                const devices = data.devices || [];
+                document.getElementById('traccar-count').textContent =
+                    `${devices.filter(d => d.status === 'online').length} online / ${devices.length} total`;
+
+                const seen = new Set();
+                devices.forEach((d) => {
+                    if (!d.position) return;
+                    seen.add(d.id);
+                    const { lat, lon } = d.position;
+                    const color = d.status === 'online' ? '#ff2d95' : '#ff4444';
+                    if (traccarMarkers[d.id]) {
+                        traccarMarkers[d.id].setLatLng([lat, lon]);
+                    } else {
+                        traccarMarkers[d.id] = L.circleMarker([lat, lon], {
+                            radius: 8, color, fillColor: color, fillOpacity: 0.8, weight: 2,
+                        }).addTo(traccarMap);
+                    }
+                    const speed = (d.position.speed || 0).toFixed(1);
+                    traccarMarkers[d.id].bindPopup(
+                        `<b>${d.name}</b><br>Status: ${d.status}<br>Speed: ${speed} kn<br>Fix: ${d.position.fixTime || '?'}`
+                    );
+                });
+
+                // Drop markers for devices no longer reporting a position
+                Object.keys(traccarMarkers).forEach((id) => {
+                    if (!seen.has(Number(id))) {
+                        traccarMap.removeLayer(traccarMarkers[id]);
+                        delete traccarMarkers[id];
+                    }
+                });
+            } catch (e) {
+                console.error('Failed to load Traccar devices:', e);
+            }
+        }
 
         // ── PER-SECTION MAXIMIZE/RESTORE ──
         function toggleGridMaximize(btn) {
@@ -1449,7 +1535,11 @@
                 tr.title = 'Click for full device data sheet';
                 const isStale = item.status === 'ONLINE' && (!item.last_seen || (Date.now() - new Date(item.last_seen)) > 300000);
                 const displayStatus = isStale ? 'STALE' : item.status;
-                const dotClass = item.status !== 'ONLINE' ? 'offline' : (isStale ? 'stale' : 'online');
+                const battery = item.metadata?.battery_percent;
+                const batteryCritical = item.status === 'ONLINE' && battery != null && battery <= 30;
+                const dotClass = item.status !== 'ONLINE' ? 'offline'
+                                : batteryCritical ? 'battery-critical'
+                                : (isStale ? 'stale' : 'online');
                 tr.innerHTML = `
                     <td style="font-weight:bold">${item.name || item.id}</td>
                     <td>${item.ip || item.tailscale_ip || 'unknown'}</td>

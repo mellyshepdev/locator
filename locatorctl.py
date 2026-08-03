@@ -8,12 +8,21 @@ actual host. Lokey picks it up, runs it locally, and reports back — so
 `start`/`stop` here only confirm the command was *queued*, not that it's
 done yet. Use `status`/`list` (or watch the dashboard) to see it land.
 
+migrate/dns follow the same "queue it, agent executes it" philosophy: migrate
+queues a job in Locator's migration_queue (container or native, picked
+automatically from the service's registered type) that the target/source
+unit's agent picks up and runs; dns sync only confirms ns1 sent a NOTIFY, not
+that a secondary applied it.
+
 Usage:
     export LOCATOR_URL="https://tobsco-locator.fly.dev"   # default shown
     locatorctl.py start <container-name>
     locatorctl.py stop  <container-name>
     locatorctl.py status <container-name>
     locatorctl.py list
+    locatorctl.py migrate <name@host> --to <unit> [--force]
+    locatorctl.py dns status
+    locatorctl.py dns sync <zone>
 """
 import argparse
 import os
@@ -54,11 +63,51 @@ def list_services():
         print(f"{svc.get('status', '?'):8s} {name}")
 
 
+def migrate(name, to_node, force):
+    resp = requests.post(
+        f"{LOCATOR_URL}/api/migrations",
+        json={"service": name, "to_node": to_node, "force": force},
+        timeout=30,
+    )
+    data = resp.json()
+    if resp.status_code != 200:
+        print(f"error: {data.get('error', resp.text)}", file=sys.stderr)
+        if data.get("missing"):
+            print(f"  missing dependencies: {', '.join(data['missing'])}", file=sys.stderr)
+            print("  pass --force to migrate anyway", file=sys.stderr)
+        sys.exit(1)
+    print(f"queued: migration {data['id']} ({data['type']}) — '{name}' → {to_node}")
+
+
+def dns_status():
+    resp = requests.get(f"{LOCATOR_URL}/api/dns/status", timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    print(f"ns1: {data.get('ns1_host')}")
+    for zone, info in sorted(data.get("zones", {}).items()):
+        if info.get("ok"):
+            print(f"\n== {zone} ==\n{info['content']}")
+        else:
+            print(f"\n== {zone} ==\nerror: {info.get('error')}")
+
+
+def dns_sync(zone):
+    resp = requests.post(f"{LOCATOR_URL}/api/dns/sync", json={"zone": zone}, timeout=30)
+    data = resp.json()
+    if resp.status_code != 200 or not data.get("ok"):
+        print(f"error: {data.get('error', data.get('output', resp.text))}", file=sys.stderr)
+        sys.exit(1)
+    print(f"notified: {zone} from {data.get('notified_from')}")
+    print(f"  {data.get('note')}")
+
+
 COMMANDS = {
-    "list":   "List every registered service with its current status",
-    "status": "Show the current status of one service",
-    "start":  "Queue a container start on its host (runs via Lokey)",
-    "stop":   "Queue a container stop on its host (runs via Lokey)",
+    "list":    "List every registered service with its current status",
+    "status":  "Show the current status of one service",
+    "start":   "Queue a container start on its host (runs via Lokey)",
+    "stop":    "Queue a container stop on its host (runs via Lokey)",
+    "migrate": "Migrate a service to another node (container or native, auto-detected)",
+    "dns":     "Check or trigger a sync of the PowerDNS zones ns1 serves",
 }
 
 EPILOG = """\
@@ -85,6 +134,17 @@ def main():
 
     sub.add_parser("list", help=COMMANDS["list"], description=COMMANDS["list"])
 
+    mig_p = sub.add_parser("migrate", help=COMMANDS["migrate"], description=COMMANDS["migrate"])
+    mig_p.add_argument("name", help="service_id as shown by `list` (name@host)")
+    mig_p.add_argument("--to", required=True, dest="to_node", help="destination unit/node id")
+    mig_p.add_argument("--force", action="store_true", help="ignore unmet dependencies")
+
+    dns_p = sub.add_parser("dns", help=COMMANDS["dns"], description=COMMANDS["dns"])
+    dns_sub = dns_p.add_subparsers(dest="dns_command", required=True, metavar="<dns-command>")
+    dns_sub.add_parser("status", help="Show each configured zone's content as served by ns1")
+    sync_p = dns_sub.add_parser("sync", help="Force ns1 to NOTIFY secondaries of a zone")
+    sync_p.add_argument("zone", help="zone name, e.g. theofficialblacksheepco.com")
+
     args = parser.parse_args()
 
     if args.command in ("start", "stop"):
@@ -93,6 +153,13 @@ def main():
         status(args.name)
     elif args.command == "list":
         list_services()
+    elif args.command == "migrate":
+        migrate(args.name, args.to_node, args.force)
+    elif args.command == "dns":
+        if args.dns_command == "status":
+            dns_status()
+        elif args.dns_command == "sync":
+            dns_sync(args.zone)
 
 
 if __name__ == "__main__":

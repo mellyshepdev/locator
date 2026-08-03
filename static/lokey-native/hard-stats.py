@@ -7,6 +7,11 @@ import requests
 import urllib3
 from datetime import datetime, timezone
 
+try:
+    from migrate_native import execute_native_migration
+except ImportError:
+    execute_native_migration = None
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 LOCATOR_URL = os.getenv("LOCATOR_URL", "https://tobsco-locator.fly.dev")
@@ -436,6 +441,9 @@ def execute_migration(mig):
       git_push_and_stop  — commit + push this container's project, then stop it here.
       git_pull_and_start — pull (or clone) the project on this node, docker compose up -d.
       git_pull_only      — pull (or clone) to sync state; container already running here.
+      native_stop_and_sync / native_prereq_and_start — non-Docker/systemd services,
+        see migrate_native.py (only relevant if this host also has native services
+        registered on it, not just containers).
       (default/legacy)   — rsync project to target, compose up there, compose down here.
     Returns (success: bool, extra: dict) where extra carries data for the locator
     completion report (e.g. project_dir so locator can create the follow-on pull task).
@@ -447,6 +455,11 @@ def execute_migration(mig):
         return _execute_git_pull_and_start(mig)
     if mig_type == "git_pull_only":
         return _execute_git_pull_only(mig)
+    if mig_type in ("native_stop_and_sync", "native_prereq_and_start"):
+        if execute_native_migration is None:
+            print(f"[{UNIT_NAME}] FAILED {mig.get('id')}: migrate_native.py not available on this host")
+            return False, {}
+        return execute_native_migration(mig)
     return _execute_rsync_migration(mig), {}
 
 
