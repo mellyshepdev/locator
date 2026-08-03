@@ -54,11 +54,26 @@ def list_services():
         print(f"{svc.get('status', '?'):8s} {name}")
 
 
+def migrate(name, to_node):
+    resp = requests.post(
+        f"{LOCATOR_URL}/api/migrations",
+        json={"name": name, "to_node": to_node},
+        timeout=30,
+    )
+    data = resp.json()
+    if resp.status_code != 200 or data.get("error"):
+        print(f"error: {data.get('error', resp.text)}", file=sys.stderr)
+        sys.exit(1)
+    print(f"queued: migrate '{name}' → {to_node} (id {data['id']}, executing on {data['unit']})")
+    print("Native migrations can take a while (venv rebuild) — use `status`/`list` or the dashboard's Migration Queue panel to watch it land.")
+
+
 COMMANDS = {
-    "list":   "List every registered service with its current status",
-    "status": "Show the current status of one service",
-    "start":  "Queue a container start on its host (runs via Lokey)",
-    "stop":   "Queue a container stop on its host (runs via Lokey)",
+    "list":    "List every registered service with its current status",
+    "status":  "Show the current status of one service",
+    "start":   "Queue a container start on its host (runs via Lokey)",
+    "stop":    "Queue a container stop on its host (runs via Lokey)",
+    "migrate": "Queue a move of a container or native service to another unit",
 }
 
 EPILOG = """\
@@ -67,6 +82,13 @@ Environment:
 
 start/stop only confirm the command was queued — Lokey executes it on the
 container's actual host. Use `status`/`list` or the dashboard to see it land.
+
+migrate works for both Docker containers and native (systemd/venv) services —
+the target service's registered type decides how it's moved. For native
+services, Lokey detects at run time whether it's a real systemd unit or a
+bare background process and migrates accordingly; native moves that need a
+venv are rebuilt from requirements.txt on the target, so they take longer
+than a container move.
 """
 
 
@@ -85,6 +107,10 @@ def main():
 
     sub.add_parser("list", help=COMMANDS["list"], description=COMMANDS["list"])
 
+    p = sub.add_parser("migrate", help=COMMANDS["migrate"], description=COMMANDS["migrate"])
+    p.add_argument("name", help="service/container name as registered in the Locator")
+    p.add_argument("to_node", help="unit to migrate it to, e.g. unit5")
+
     args = parser.parse_args()
 
     if args.command in ("start", "stop"):
@@ -93,6 +119,8 @@ def main():
         status(args.name)
     elif args.command == "list":
         list_services()
+    elif args.command == "migrate":
+        migrate(args.name, args.to_node)
 
 
 if __name__ == "__main__":

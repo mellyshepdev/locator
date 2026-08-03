@@ -1361,6 +1361,67 @@ def list_migrations():
     with migration_lock:
         return jsonify(list(migration_queue.values()))
 
+
+@app.route("/api/migrations", methods=["POST"])
+def create_migration():
+    """
+    Manually queue a migration for a container OR a native service — the CLI's
+    `locatorctl.py migrate <name> <target-unit>` entry point.
+
+    Expected JSON: { "name": "<service-name>", "to_node": "<unit>" }
+
+    The service's registered `type` ("container" or "native") decides how
+    it's executed: container moves reuse the proven single-shot legacy rsync
+    path (no "type" set, unlike the git push/pull flow the auto-balancer
+    uses); native moves are picked up by the agent's kind="native" dispatch,
+    which detects systemd-vs-bare-process on the source host at run time.
+    """
+    data = request.get_json(silent=True) or {}
+    name    = data.get("name")
+    to_node = data.get("to_node")
+    if not name or not to_node:
+        return jsonify({"error": "name and to_node are required"}), 400
+
+    with lock:
+        _, svc = _find_service_entry(name)
+        if not svc:
+            return jsonify({"error": f"service '{name}' not found"}), 404
+        from_node = svc.get("host") or (svc.get("hosts") or [None])[0]
+        svc_type  = svc.get("type", "container")
+        metadata  = svc.get("metadata", {})
+        from_info = registry["nodes"].get(from_node, {})
+        to_info   = registry["nodes"].get(to_node)
+
+    if not to_info:
+        return jsonify({"error": f"target unit '{to_node}' not found"}), 404
+    if from_node == to_node:
+        return jsonify({"error": f"'{name}' is already on {to_node}"}), 400
+
+    to_ip = _best_ip(to_info)
+    if not to_ip:
+        return jsonify({"error": f"no reachable IP for target unit '{to_node}'"}), 400
+
+    now = datetime.now(timezone.utc).isoformat()
+    mig_id = str(uuid.uuid4())[:8]
+    with migration_lock:
+        migration_queue[mig_id] = {
+            "id":        mig_id,
+            "kind":      "native" if svc_type == "native" else "container",
+            "container": name,
+            "from_node": from_node,
+            "from_ip":   _best_ip(from_info) or "",
+            "to_node":   to_node,
+            "to_ip":     to_ip,
+            "metadata":  metadata,
+            "unit":      from_node,
+            "status":    "PENDING",
+            "queued_at": now,
+            "reason":    "manual CLI-triggered migration",
+        }
+
+    print(f"📦 MANUAL MIGRATION: queued {mig_id} — move '{name}' {from_node} → {to_node}")
+    return jsonify({"id": mig_id, "queued": True, "unit": from_node})
+
 @app.route("/api/balance/status", methods=["GET"])
 def balance_status():
     """Current load-balancer state: node loads + recent migration history."""
