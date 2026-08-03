@@ -727,8 +727,13 @@ def _detect_native_kind(name, metadata):
             pass
 
     pgrep = subprocess.run(["pgrep", "-f", name], capture_output=True, text=True, timeout=10)
-    if pgrep.returncode == 0 and pgrep.stdout.strip():
-        return "process", int(pgrep.stdout.strip().splitlines()[0])
+    if pgrep.returncode == 0:
+        # Exclude our own pid — "-f" matches substrings anywhere in the full
+        # command line, so a service name that happens to appear in this
+        # process's own args (env vars, paths, etc.) would otherwise self-match.
+        candidates = [int(p) for p in pgrep.stdout.split() if int(p) != os.getpid()]
+        if candidates:
+            return "process", candidates[0]
 
     return None, None
 
