@@ -652,6 +652,12 @@
         <button class="toggle-btn" onclick="switchView('yamls')">YAMLs</button>
     </div>
 
+    <!-- LIVE STATUS — shows the page is actually polling, and flags it loudly if it stops -->
+    <div id="live-status" style="position:absolute; top:20px; left:30px; z-index:10500; font-family:inherit; font-size:12px; letter-spacing:1px; padding:8px 14px; background:rgba(0,0,0,0.8); border:1px solid var(--accent); border-radius:4px; color:var(--accent);">
+        <span id="live-status-dot" style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--neon-green); box-shadow:0 0 6px var(--neon-green); margin-right:6px;"></span>
+        <span id="live-status-text">Connecting…</span>
+    </div>
+
     <!-- REGISTER A DEVICE — for phones/tablets to self-register + install Lokey -->
     <a href="/register-device" id="register-device-btn" style="position:absolute; top:70px; right:30px; z-index:10500; display:flex; align-items:center; gap:8px; background:rgba(0,0,0,0.8); border:1px solid var(--accent); border-radius:4px; padding:8px 16px; color:var(--accent); text-decoration:none; font-family:inherit; font-size:13px; text-transform:uppercase; letter-spacing:1px; box-shadow:0 0 10px rgba(0,240,255,0.3);">
         📱 Register a Device
@@ -1456,16 +1462,50 @@
                 units.map(u => `<option value="${u}"${u === current ? ' selected' : ''}>${u.toUpperCase()}</option>`).join('');
         }
 
+        // ── LIVE STATUS INDICATOR ──
+        // The page polls every 10s (see the bottom of this script), but nothing
+        // told you if that polling silently stopped working — you'd just be
+        // staring at stale data. Track the last successful poll + consecutive
+        // failures, and surface it loudly (red banner) once it's actually stale.
+        let lastSuccessfulUpdate = null;
+        let liveUpdateFailures = 0;
+
+        function updateLiveStatusIndicator() {
+            const dot = document.getElementById('live-status-dot');
+            const text = document.getElementById('live-status-text');
+            if (!dot || !text) return;
+            if (!lastSuccessfulUpdate) {
+                dot.style.background = '#ffe600'; dot.style.boxShadow = '0 0 6px #ffe600';
+                text.textContent = 'Connecting…';
+                return;
+            }
+            const elapsedS = Math.floor((Date.now() - lastSuccessfulUpdate) / 1000);
+            // 3 missed 10s polls (or 2 outright fetch failures), whichever comes first.
+            const lost = liveUpdateFailures >= 2 || elapsedS > 30;
+            if (lost) {
+                dot.style.background = 'var(--danger)'; dot.style.boxShadow = '0 0 6px var(--danger)';
+                text.textContent = `⚠ Connection lost — last update ${elapsedS}s ago`;
+            } else {
+                dot.style.background = 'var(--neon-green)'; dot.style.boxShadow = '0 0 6px var(--neon-green)';
+                text.textContent = elapsedS < 2 ? 'Updated just now' : `Updated ${elapsedS}s ago`;
+            }
+        }
+
         function loadRegistryData() {
             fetch('/api/registry')
                 .then(response => response.json())
                 .then(data => {
                     lastRegistryData = data;
+                    lastSuccessfulUpdate = Date.now();
+                    liveUpdateFailures = 0;
                     renderGrid(data);
                     renderMap(data);
                     renderNodeCards(data);
+                    updateLiveStatusIndicator();
                 })
                 .catch(error => {
+                    liveUpdateFailures++;
+                    updateLiveStatusIndicator();
                     console.error("Failed to load registry data:", error);
                     if (window.__reportClientError) {
                         window.__reportClientError(
@@ -1905,6 +1945,8 @@
         // Auto-refresh data every 10 seconds
         loadRegistryData();
         setInterval(loadRegistryData, 10000);
+        // Ticks the "Updated Xs ago" text every second, independent of the poll itself.
+        setInterval(updateLiveStatusIndicator, 1000);
 
         // ── STATIC "CLOUD & NATIVE PLATFORMS" TABLE — also clickable, same data-sheet modal ──
         // These rows are hand-authored reference entries, not live registry data, so their
