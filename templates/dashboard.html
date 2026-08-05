@@ -701,6 +701,16 @@
             <div class="status-header">
                 <div>ACTIVE CONTAINERS: <span id="count-docker" style="color: #00ff00;">0</span></div>
                 <div>SYSTEM STATUS: <span class="status-dot online"></span> NOMINAL</div>
+                <div style="margin-left: auto;">
+                    <label style="color: #00ff00; font-size: 12px; margin-right: 10px;">Sort by:</label>
+                    <select id="docker-sort" onchange="if (lastRegistryData) renderGrid(lastRegistryData)" style="background: #001030; color: #00ff00; border: 1px solid #00ff00; padding: 4px 8px; border-radius: 3px; font-size: 12px;">
+                        <option value="name">Name</option>
+                        <option value="ram">RAM</option>
+                        <option value="storage">Storage</option>
+                        <option value="cpu">CPU</option>
+                        <option value="status">Status</option>
+                    </select>
+                </div>
             </div>
             <table>
                 <thead><tr><th>Service</th><th>Node / Host</th><th>Port</th><th>Internal IP</th><th>Public / Traefik</th><th>Stats (CPU/RAM/Temp/Disk)</th><th>Status</th><th>Metadata</th><th>Last Seen</th></tr></thead>
@@ -1279,10 +1289,33 @@
             updateUnitFilterOptions(registryData);
             const nodes = allNodes.filter(n => nodeMatchesFilter(n.id, n));
 
-            const dockerList = services.filter(s => s.category === 'docker containers');
+            let dockerList = services.filter(s => s.category === 'docker containers');
             const websiteList = services.filter(s => s.category === 'websites');
             const vmList = services.filter(s => s.category === 'virtual machines');
             const serverlessList = services.filter(s => s.category === 'serverless');
+
+            // Apply Docker sorting based on dropdown
+            const dockerSortValue = document.getElementById('docker-sort')?.value || 'name';
+            dockerList = dockerList.sort((a, b) => {
+                switch(dockerSortValue) {
+                    case 'ram':
+                        const ramA = a.metadata?.mem_usage_mb || 0;
+                        const ramB = b.metadata?.mem_usage_mb || 0;
+                        return ramB - ramA;
+                    case 'storage':
+                        const storageA = a.metadata?.disk_percent || 0;
+                        const storageB = b.metadata?.disk_percent || 0;
+                        return storageB - storageA;
+                    case 'cpu':
+                        const cpuA = a.metadata?.cpu_usage_percent || 0;
+                        const cpuB = b.metadata?.cpu_usage_percent || 0;
+                        return cpuB - cpuA;
+                    case 'status':
+                        return (a.status === 'ONLINE' ? 0 : 1) - (b.status === 'ONLINE' ? 0 : 1);
+                    default:
+                        return (a.name || '').localeCompare(b.name || '');
+                }
+            });
 
             document.getElementById('count-devices').innerText = allNodes.length;
             document.getElementById('count-docker').innerText = dockerList.length;
@@ -1796,6 +1829,32 @@
                     addRow(DEVICE_FIELD_LABELS[key] || key, item[key]);
                 }
             });
+
+            // Running Services/Containers section
+            if (lastRegistryData && lastRegistryData.services) {
+                const runningServices = Object.entries(lastRegistryData.services)
+                    .filter(([id, svc]) => {
+                        const hosts = svc.hosts || [svc.host];
+                        return hosts.includes(item.name || item.id);
+                    })
+                    .map(([id, svc]) => ({
+                        name: svc.name,
+                        type: svc.type || 'container',
+                        status: svc.status,
+                        category: svc.category
+                    }))
+                    .sort((a, b) => a.name.localeCompare(b.name));
+
+                if (runningServices.length > 0) {
+                    const sep = document.createElement('tr');
+                    sep.innerHTML = `<td colspan="2" style="padding-top:14px;color:#ff9500;text-transform:uppercase;letter-spacing:2px;font-size:11px;">🚀 Running Services (${runningServices.length})</td>`;
+                    rows.appendChild(sep);
+                    runningServices.forEach(svc => {
+                        const statusDot = svc.status === 'ONLINE' ? '🟢' : '🔴';
+                        addRow(`${statusDot} ${svc.name}`, `[${svc.type}] ${svc.category || '-'}`);
+                    });
+                }
+            }
 
             // Full metadata dump — every key, not the filtered badge subset
             if (item.metadata && Object.keys(item.metadata).length) {
