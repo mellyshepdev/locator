@@ -3125,5 +3125,31 @@ def main():
 
 if __name__ == "__main__":
     main()
+else:
+    # When imported by Gunicorn or other WSGI servers, initialize the app
+    try:
+        load_seed()
+        persist_registry()
+        # Start background threads
+        import threading
+        threading.Thread(target=heartbeat_reaper, daemon=True).start()
+        threading.Thread(target=local_docker_scanner, daemon=True).start()
+        threading.Thread(target=duplicate_killer, daemon=True).start()
+        threading.Thread(target=active_discovery_scanner, daemon=True).start()
+        threading.Thread(target=website_pinger, daemon=True).start()
+        if BALANCE_ENABLED:
+            threading.Thread(target=load_balancer, daemon=True).start()
+        if IDLE_ENABLED:
+            threading.Thread(target=idle_reaper, daemon=True).start()
+        if GIT_AUTO_PUSH:
+            threading.Thread(target=_git_push_worker, daemon=True).start()
+        threading.Thread(target=_self_election, daemon=True).start()
+        threading.Thread(target=critical_service_watchdog, daemon=True).start()
+        threading.Thread(target=traccar_feeder, daemon=True).start()
+        beast_log("🔦 LOCATOR online (Gunicorn) — registry loaded, telemetry forwarder active")
+    except Exception as e:
+        print(f"ERROR initializing LOCATOR in Gunicorn mode: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
 
 
