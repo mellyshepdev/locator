@@ -82,7 +82,8 @@
         });
         kc.init({
             onLoad: 'login-required',
-            pkceMethod: 'S256'
+            pkceMethod: 'S256',
+            checkLoginIframe: false
         })
             .then(function(auth) {
                 if (auth) {
