@@ -1014,25 +1014,39 @@
 
     <!-- DEPLOYMENT MODAL -->
     <div id="deploy-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:10000; justify-content:center; align-items:center;">
-        <div style="background:#001030; border:2px solid var(--accent); padding:30px; border-radius:10px; width:400px; box-shadow: 0 0 30px var(--accent);">
+        <div style="background:#001030; border:2px solid var(--accent); padding:30px; border-radius:10px; width:500px; box-shadow: 0 0 30px var(--accent);">
             <h2 style="color:var(--accent); margin-top:0;">🚀 Deploy Configuration</h2>
-            
+
+            <p style="font-size:14px; color:#aaa; margin-bottom:20px;"><strong>Where should this deployment go?</strong></p>
+
+            <!-- Deployment Destination Choice -->
+            <div style="border:1px solid #333; padding:15px; border-radius:6px; margin-bottom:20px; background:rgba(0,0,0,0.3);">
+                <label style="display:block; margin-bottom:12px; cursor:pointer;">
+                    <input type="radio" name="deploy-mode" value="auto" checked onchange="toggleDeployMode()">
+                    <span style="color:var(--accent); font-weight:bold;">🤖 Smart Detection</span>
+                    <br><span style="font-size:12px; color:#888; margin-left:24px;">Locator analyzes RAM, CPU, storage on units 3, 7, 8, 9 and picks the best fit</span>
+                </label>
+                <label style="display:block; margin-top:12px; cursor:pointer; padding-top:12px; border-top:1px solid #333;">
+                    <input type="radio" name="deploy-mode" value="manual" onchange="toggleDeployMode()">
+                    <span style="color:#ff9500; font-weight:bold;">📍 Specify Destination</span>
+                    <br><span style="font-size:12px; color:#888; margin-left:24px;">Choose a specific unit</span>
+                </label>
+            </div>
+
+            <!-- Manual destination selector (hidden by default) -->
+            <div id="manual-dest" style="display:none; margin-bottom:20px;">
+                <p style="font-size:14px; color:#aaa; margin-bottom:10px;">Select target unit:</p>
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
+                    <label><input type="radio" name="unit" value="unit3"> Unit 3</label>
+                    <label><input type="radio" name="unit" value="unit7"> Unit 7</label>
+                    <label><input type="radio" name="unit" value="unit8"> Unit 8</label>
+                    <label><input type="radio" name="unit" value="unit9"> Unit 9</label>
+                </div>
+            </div>
+
             <p style="font-size:14px; color:#aaa;">Select networks to join:</p>
             <div id="network-list" style="margin-bottom:20px; max-height:100px; overflow-y:auto; border:1px solid #333; padding:10px;">
                 <!-- Dynamically filled -->
-            </div>
-
-            <p style="font-size:14px; color:#aaa;">Target Server:</p>
-            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:20px;">
-                <label><input type="checkbox" name="srv" value="unit1"> Unit 1</label>
-                <label><input type="checkbox" name="srv" value="unit2"> Unit 2</label>
-                <label><input type="checkbox" name="srv" value="unit3"> Unit 3</label>
-                <label><input type="checkbox" name="srv" value="unit4"> Unit 4</label>
-                <label><input type="checkbox" name="srv" value="unit5"> Unit 5</label>
-                <label><input type="checkbox" name="srv" value="unit6"> Unit 6</label>
-                <label style="grid-column: span 2; color:var(--accent); font-weight:bold;">
-                    <input type="checkbox" name="srv" value="efficient" checked> Most Efficient Option
-                </label>
             </div>
 
             <div style="display:flex; justify-content:space-between;">
@@ -1085,18 +1099,38 @@
             document.getElementById('deploy-modal').style.display = 'none';
         }
 
+        function toggleDeployMode() {
+            const mode = document.querySelector('input[name="deploy-mode"]:checked').value;
+            const manualDest = document.getElementById('manual-dest');
+            manualDest.style.display = mode === 'manual' ? 'block' : 'none';
+        }
+
         function confirmDeployment() {
             const networks = Array.from(document.querySelectorAll('.net-check:checked')).map(cb => cb.value);
-            const servers = Array.from(document.querySelectorAll('input[name="srv"]:checked')).map(cb => cb.value);
-            
+            const deployMode = document.querySelector('input[name="deploy-mode"]:checked').value;
+            let servers = [];
+
+            if (deployMode === 'manual') {
+                const selectedUnit = document.querySelector('input[name="unit"]:checked');
+                if (!selectedUnit) {
+                    notify("❌ Please select a target unit");
+                    return;
+                }
+                servers = [selectedUnit.value];
+            } else {
+                // Auto mode: use smart detection (empty array signals auto-selection)
+                servers = ['auto'];
+            }
+
             notify("Deploying services... please wait.");
-            
+
             fetch('/trigger-deploy-final', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
                     folder_path: selectedFolderPath,
                     networks: networks,
+                    deployment_mode: deployMode,
                     servers: servers
                 })
             })
