@@ -980,31 +980,67 @@
                 const res = await fetch('/api/traccar-devices');
                 const data = await res.json();
                 const devices = data.devices || [];
-                document.getElementById('traccar-count').textContent =
-                    `${devices.filter(d => d.status === 'online').length} online / ${devices.length} total`;
-
                 const seen = new Set();
+
+                // Show GPS-based locations (phones with precise GPS)
                 devices.forEach((d) => {
                     if (!d.position) return;
-                    seen.add(d.id);
+                    seen.add('gps-' + d.id);
                     const { lat, lon } = d.position;
                     const color = d.status === 'online' ? '#ff2d95' : '#ff4444';
-                    if (traccarMarkers[d.id]) {
-                        traccarMarkers[d.id].setLatLng([lat, lon]);
+                    if (traccarMarkers['gps-' + d.id]) {
+                        traccarMarkers['gps-' + d.id].setLatLng([lat, lon]);
                     } else {
-                        traccarMarkers[d.id] = L.circleMarker([lat, lon], {
+                        traccarMarkers['gps-' + d.id] = L.circleMarker([lat, lon], {
                             radius: 8, color, fillColor: color, fillOpacity: 0.8, weight: 2,
                         }).addTo(traccarMap);
                     }
                     const speed = (d.position.speed || 0).toFixed(1);
-                    traccarMarkers[d.id].bindPopup(
+                    traccarMarkers['gps-' + d.id].bindPopup(
                         `<b>${d.name}</b><br>Status: ${d.status}<br>Speed: ${speed} kn<br>Fix: ${d.position.fixTime || '?'}`
                     );
                 });
 
-                // Drop markers for devices no longer reporting a position
+                // Show IP-geolocation based locations (laptops/desktops with soft circles)
+                try {
+                    const registryRes = await fetch('/nodes');
+                    const nodes = await registryRes.json();
+                    Object.entries(nodes).forEach(([hostKey, node]) => {
+                        const meta = node.metadata || {};
+                        if (!meta.lat || !meta.lon) return; // Skip if no geolocation
+                        if (node.status !== 'ONLINE') return; // Skip offline nodes
+
+                        seen.add('geo-' + hostKey);
+                        const nodeColor = '#00ccff'; // Cyan for geolocation
+                        const markerId = 'geo-' + hostKey;
+
+                        if (traccarMarkers[markerId]) {
+                            traccarMarkers[markerId].setLatLng([meta.lat, meta.lon]);
+                        } else {
+                            // Larger, softer circle for IP-geolocation (lower precision than GPS)
+                            traccarMarkers[markerId] = L.circleMarker([meta.lat, meta.lon], {
+                                radius: 24, color: nodeColor, fillColor: nodeColor, fillOpacity: 0.3, weight: 1,
+                            }).addTo(traccarMap);
+                        }
+
+                        const location = meta.city ? `${meta.city}, ${meta.country}` : 'Unknown location';
+                        traccarMarkers[markerId].bindPopup(
+                            `<b>${node.name || hostKey}</b><br>Type: ${node.type}<br>Location: ${location}<br>(IP-based, low precision)`
+                        );
+                    });
+                } catch (e) {
+                    console.warn('Could not fetch Locator nodes for geolocation:', e);
+                }
+
+                // Count online devices
+                const onlineCount = devices.filter(d => d.status === 'online').length +
+                    Object.values(nodes || {}).filter(n => n.status === 'ONLINE' && n.metadata?.lat && n.metadata?.lon).length;
+                document.getElementById('traccar-count').textContent =
+                    `${onlineCount} online / ${devices.length + Object.keys(nodes || {}).filter(n => n.metadata?.lat && n.metadata?.lon).length} total`;
+
+                // Drop markers for devices no longer reporting
                 Object.keys(traccarMarkers).forEach((id) => {
-                    if (!seen.has(Number(id))) {
+                    if (!seen.has(id)) {
                         traccarMap.removeLayer(traccarMarkers[id]);
                         delete traccarMarkers[id];
                     }
