@@ -2802,3 +2802,114 @@ if __name__ == "__main__":
     main()
 
 
+
+# ── DEPLOYMENT BUNDLE HANDLER ──────────────────────────────────────────────
+
+@app.route("/api/deploy-bundle", methods=["POST"])
+def deploy_bundle():
+    """
+    Accept deployment bundle (single file or directory).
+    - Extract and store .env in Vaultwarden
+    - Post docker-compose.yml to UI
+    - Return bundle metadata
+    """
+    import yaml as _yaml
+    import zipfile as _zipfile
+    from io import BytesIO as _BytesIO
+    import requests as _requests
+    
+    try:
+        # Get bundle file from request
+        if 'bundle' not in request.files:
+            return jsonify({"error": "No bundle file provided"}), 400
+        
+        file = request.files['bundle']
+        bundle_data = _BytesIO(file.read())
+        
+        # Extract bundle
+        try:
+            with _zipfile.ZipFile(bundle_data) as zf:
+                files = zf.namelist()
+        except:
+            return jsonify({"error": "Invalid bundle format (must be ZIP)"}), 400
+        
+        # Look for locator.yml and docker-compose.yml
+        locator_yml_path = None
+        compose_yml_path = None
+        env_path = None
+        
+        for f in files:
+            if 'locator.yml' in f:
+                locator_yml_path = f
+            if 'docker-compose.yml' in f:
+                compose_yml_path = f
+            if '.env' in f:
+                env_path = f
+        
+        if not locator_yml_path or not compose_yml_path:
+            return jsonify({"error": "Bundle must contain locator.yml and docker-compose.yml"}), 400
+        
+        # Extract content
+        with _zipfile.ZipFile(bundle_data) as zf:
+            locator_content = zf.read(locator_yml_path).decode()
+            compose_content = zf.read(compose_yml_path).decode()
+            env_content = zf.read(env_path).decode() if env_path else ""
+        
+        locator_yml = _yaml.safe_load(locator_content)
+        bundle_name = locator_yml.get("name", "deployment")
+        
+        # 1. Store .env in Vaultwarden
+        vaultwarden_id = None
+        if env_content:
+            try:
+                vault_payload = {
+                    "name": f"{bundle_name}-env",
+                    "type": "note",
+                    "content": env_content,
+                    "tags": ["deployment", bundle_name]
+                }
+                vault_resp = _requests.post(
+                    f"{os.environ.get('VAULTWARDEN_URL', 'http://unit6:6000')}/api/vault/secure-notes",
+                    json=vault_payload,
+                    timeout=10
+                )
+                if vault_resp.status_code in [200, 201]:
+                    vaultwarden_id = vault_resp.json().get("id")
+            except Exception as e:
+                print(f"⚠️ Vaultwarden store failed: {e}")
+        
+        # 2. Post docker-compose.yml to UI
+        ui_posted = False
+        try:
+            ui_payload = {
+                "name": bundle_name,
+                "deployment_type": locator_yml.get("deployment_type", "standard"),
+                "location_type": locator_yml.get("location_type", "stationary"),
+                "compose": compose_content,
+                "vaultwarden_id": vaultwarden_id,
+                "posted_at": datetime.now(timezone.utc).isoformat()
+            }
+            ui_resp = _requests.post(
+                f"{os.environ.get('LOCATOR_UI_URL', 'http://unit6:5000')}/api/deployments",
+                json=ui_payload,
+                timeout=10
+            )
+            ui_posted = ui_resp.status_code in [200, 201]
+        except Exception as e:
+            print(f"⚠️ UI post failed: {e}")
+        
+        return jsonify({
+            "status": "success",
+            "bundle_name": bundle_name,
+            "files_count": len(files),
+            "vaultwarden_id": vaultwarden_id,
+            "ui_posted": ui_posted,
+            "compose_content": compose_content,
+            "locator_yml": locator_yml
+        }), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=PORT, debug=False)
