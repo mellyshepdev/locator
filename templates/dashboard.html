@@ -1243,6 +1243,18 @@
         // the same color everywhere it's referenced (device card, docker
         // host badge, website host badge, etc.) — makes it possible to spot
         // which node a container/service belongs to at a glance.
+        // MurmurHash3 fmix32 finalizer — gives the hash below a proper avalanche
+        // effect, so ids differing by one char (unit5 vs unit6 vs unit7...) land
+        // on well-spread hues instead of clustering a few degrees apart.
+        function fmix32(h) {
+            h ^= h >>> 16;
+            h = Math.imul(h, 0x85ebca6b);
+            h ^= h >>> 13;
+            h = Math.imul(h, 0xc2b2ae35);
+            h ^= h >>> 16;
+            return h >>> 0;
+        }
+        const OFFLINE_COLOR = '#666';
         function nodeColor(id) {
             if (!id) return '#00f0ff';
             let hash = 0;
@@ -1250,7 +1262,7 @@
                 hash = id.charCodeAt(i) + ((hash << 5) - hash);
                 hash |= 0;
             }
-            const hue = Math.abs(hash) % 360;
+            const hue = fmix32(hash) % 360;
             return `hsl(${hue}, 85%, 60%)`;
         }
 
@@ -1387,7 +1399,7 @@
                     ? ` · ${n.disk_used_gb}/${n.disk_total_gb} GB` : '';
                 const bar = (v) => `<div class="mc-bar"><div class="mc-fill" style="width:${Math.min(v || 0, 100)}%;background:${pctColor(v)}"></div></div>`;
                 const row = (label, v) => `<div class="mc-row"><span class="mc-label">${label}</span><span style="color:${pctColor(v)}">${v != null ? v.toFixed(1) + '%' : '—'}</span></div>`;
-                const nc = nodeColor(id);
+                const nc = badge === 'offline' ? OFFLINE_COLOR : nodeColor(id);
                 return `<div class="metric-card${oom ? ' oom' : ''}" style="${oom ? '' : `border-color:${nc};box-shadow:0 0 12px ${nc}40`}">
                     <button type="button" class="mc-maximize" title="Maximize" onclick="maximizeNodeCard('${id}')">⛶</button>
                     <div class="mc-name" style="color:${nc}">${id}</div>
@@ -1467,6 +1479,10 @@
             tbodyServerless.innerHTML = '';
 
             const services = Object.values(registryData.services || {});
+            const hostColor = (h) => {
+                const st = registryData.nodes && registryData.nodes[h] && registryData.nodes[h].status;
+                return (st && st !== 'ONLINE') ? OFFLINE_COLOR : nodeColor(h);
+            };
             const allNodes = Object.entries(registryData.nodes || {}).map(([id, data]) => ({...data, id, category: 'devices'}));
 
             updateUnitFilterOptions(registryData);
@@ -1562,7 +1578,7 @@
                 tr.className = 'clickable-row';
                 tr.title = 'Click for full data sheet';
                 const hostList = item.hosts || [item.host || 'unknown'];
-                const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:${nodeColor(h)};color:${nodeColor(h)}">${h}</span>`).join('');
+                const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:${hostColor(h)};color:${hostColor(h)}">${h}</span>`).join('');
                 const isOnline = item.status === 'ONLINE';
                 const safeName = (item.name || '').replace(/'/g, "\\'");
 
@@ -1599,7 +1615,7 @@
                 tr.className = 'clickable-row';
                 tr.title = 'Click for full data sheet';
                 const hostList = item.hosts || [item.host || 'unknown'];
-                const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:${nodeColor(h)};color:${nodeColor(h)}">${h}</span>`).join('');
+                const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:${hostColor(h)};color:${hostColor(h)}">${h}</span>`).join('');
 
                 tr.innerHTML = `
                     <td style="font-weight:bold">${item.name}</td>
@@ -1622,7 +1638,7 @@
                 tr.className = 'clickable-row';
                 tr.title = 'Click for full data sheet';
                 const hostList = item.hosts || [item.host || 'unknown'];
-                const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:${nodeColor(h)};color:${nodeColor(h)}">${h}</span>`).join('');
+                const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:${hostColor(h)};color:${hostColor(h)}">${h}</span>`).join('');
                 const isOnline = item.status === 'ONLINE';
 
                 tr.innerHTML = `
