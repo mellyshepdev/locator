@@ -1,6 +1,6 @@
 # Known Issues
 
-## Login broken on / and /3d-mesh — Keycloak check-sso blocked by X-Frame-Options (found 2026-08-01)
+## [RESOLVED 2026-08-04] Login broken on / and /3d-mesh — Keycloak check-sso blocked by X-Frame-Options (found 2026-08-01)
 
 **Symptom:** Users cannot log in to the Locator dashboard (`/`) or the 3D mesh
 view (`/3d-mesh`). The page sits behind the black "AUTH UNAVAILABLE" overlay
@@ -56,6 +56,20 @@ broken the same way.
    login page — not framed, so `X-Frame-Options` doesn't apply). Simpler,
    locator-only change, no Keycloak realm config needed, but users get bounced
    to a real login page instead of silently staying signed in across visits.
+
+**Resolution (2026-08-04):** Option 2 was applied at some point (onLoad is
+now login-required in both templates — this doc just wasn't updated). That
+fixed the X-Frame-Options failure, but a *new* iframe-based failure appeared
+in its place: keycloak-js still runs its default session-status/3rd-party-
+cookie check iframe (controlled by checkLoginIframe, defaults to true) even
+under login-required. Since tobsco-locator.fly.dev and bsco-keycloak.fly.dev
+are different origins and browsers increasingly block 3rd-party cookies, that
+check iframe timed out for every visitor
+('Timeout when waiting for 3rd party check iframe message' in
+/api/client-errors). Fixed by adding checkLoginIframe: false to both kc.init()
+calls in dashboard.html and mesh.html (commit 109232d, deployed to
+tobsco-locator.fly.dev). Confirmed live via curl that both pages now serve
+checkLoginIframe: false.
 
 ## Stray duplicate `locator.py` inside `templates/`
 
