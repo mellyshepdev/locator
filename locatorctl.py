@@ -14,6 +14,7 @@ Usage:
     locatorctl.py stop  <container-name>
     locatorctl.py status <container-name>
     locatorctl.py list
+    locatorctl.py deploy <unit> <path/to/docker-compose.yml>
 """
 import argparse
 import os
@@ -68,20 +69,61 @@ def migrate(name, to_node):
     print("Native migrations can take a while (venv rebuild) — use `status`/`list` or the dashboard's Migration Queue panel to watch it land.")
 
 
+def deploy(file_path, unit=None):
+    if not os.path.exists(file_path):
+        print(f"error: file not found: {file_path}", file=sys.stderr)
+        sys.exit(1)
+
+    with open(file_path, 'r') as f:
+        compose_content = f.read()
+
+    payload = {"compose": compose_content}
+    if unit:
+        payload["node"] = unit
+
+    resp = requests.post(
+        f"{LOCATOR_URL}/api/deploy/inline",
+        json=payload,
+        timeout=60,
+    )
+    data = resp.json()
+    if resp.status_code not in (200, 201) or data.get("error"):
+        print(f"error: {data.get('error', resp.text)}", file=sys.stderr)
+        sys.exit(1)
+
+    target_unit = data.get("node", "?")
+    status = data.get("result", "unknown")
+    print(f"✓ {status}: deployed to {target_unit}")
+    if data.get("output"):
+        print(f"\nDocker output:\n{data['output']}")
+
+
 COMMANDS = {
     "list":    "List every registered service with its current status",
     "status":  "Show the current status of one service",
     "start":   "Queue a container start on its host (runs via Lokey)",
     "stop":    "Queue a container stop on its host (runs via Lokey)",
     "migrate": "Queue a move of a container or native service to another unit",
+    "deploy":  "Deploy a docker-compose.yml to a unit (or let Locator auto-select)",
 }
 
 EPILOG = """\
 Environment:
   LOCATOR_URL  Registry URL (default: https://tobsco-locator.fly.dev)
 
+Examples:
+  locator list
+  locator status caddy
+  locator start caddy
+  locator deploy /path/to/docker-compose.yml
+  locator deploy unit3 /path/to/docker-compose.yml
+  locator migrate caddy unit7
+
 start/stop only confirm the command was queued — Lokey executes it on the
 container's actual host. Use `status`/`list` or the dashboard to see it land.
+
+deploy without a unit uses smart detection (analyzes available RAM/CPU/storage).
+Specify a unit to pin deployment to a specific machine.
 
 migrate works for both Docker containers and native (systemd/venv) services —
 the target service's registered type decides how it's moved. For native
@@ -111,6 +153,10 @@ def main():
     p.add_argument("name", help="service/container name as registered in the Locator")
     p.add_argument("to_node", help="unit to migrate it to, e.g. unit5")
 
+    p = sub.add_parser("deploy", help=COMMANDS["deploy"], description=COMMANDS["deploy"])
+    p.add_argument("arg1", help="unit (e.g. unit3) or path to docker-compose.yml")
+    p.add_argument("arg2", nargs="?", help="path to docker-compose.yml (if arg1 is a unit)")
+
     args = parser.parse_args()
 
     if args.command in ("start", "stop"):
@@ -121,6 +167,12 @@ def main():
         list_services()
     elif args.command == "migrate":
         migrate(args.name, args.to_node)
+    elif args.command == "deploy":
+        # Handle both: deploy /path/file and deploy unit3 /path/file
+        if args.arg2:  # Unit + file specified
+            deploy(args.arg2, unit=args.arg1)
+        else:  # Only file specified, use smart detection
+            deploy(args.arg1, unit=None)
 
 
 if __name__ == "__main__":
