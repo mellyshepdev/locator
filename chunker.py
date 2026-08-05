@@ -389,17 +389,51 @@ def deploy_bundle(bundle_path):
     print(f"   Type: {deployment_type} / {location_type}")
     print(f"   Target: {best_unit}\n")
 
-    # 1️⃣ DEPLOY to target unit
+    # 1️⃣ DEPLOY to target unit via SSH
     print("🚀 Deploying to target unit...")
     update_deployment_status(deployment_id, "deploying")
 
     try:
-        # TODO: SSH to best_unit and run docker-compose up
-        # This would be via Locator agent on the target unit
+        # Copy bundle to target unit via SSH
         print(f"   Connecting to {best_unit}...")
-        print(f"   Deploying docker-compose.yml...")
-        # For now, simulate success
+        deploy_dir = f"/tmp/locator-deploy-{deployment_id}"
+
+        # Create remote directory and copy files
+        subprocess.run(
+            ["ssh", f"{best_unit}-mesh", f"mkdir -p {deploy_dir}"],
+            check=True,
+            capture_output=True,
+            timeout=10
+        )
+
+        # Copy all files from bundle to target unit
+        for file_path in Path(bundle_path).rglob("*"):
+            if file_path.is_file():
+                rel_path = file_path.relative_to(bundle_path)
+                subprocess.run(
+                    ["scp", str(file_path), f"{best_unit}-mesh:{deploy_dir}/{rel_path}"],
+                    check=True,
+                    capture_output=True,
+                    timeout=30
+                )
+
+        print(f"   Files copied to {best_unit}")
+
+        # Run docker-compose up on target unit
+        print(f"   Running docker-compose up...")
+        result = subprocess.run(
+            ["ssh", f"{best_unit}-mesh", f"cd {deploy_dir} && docker-compose up -d"],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+
+        if result.returncode != 0:
+            raise Exception(f"docker-compose failed: {result.stderr}")
+
+        print(f"   Containers deployed")
         deployment_success = True
+
     except Exception as e:
         print(f"❌ Deployment to {best_unit} failed: {e}")
         update_deployment_status(deployment_id, "failed")
