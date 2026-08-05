@@ -878,25 +878,42 @@
         }
 
         // ── YAMLS FEATURE ──────────────────────────────────────────────
-        let _yamlCurrentPath = null;
+        // Two sources feed this list:
+        //  - /api/yamls: live docker-label scan on whatever host Locator itself
+        //    runs on (path-addressed, almost always empty in production/Fly).
+        //  - /api/compose: the named store lokey agents push each unit's
+        //    docker-compose.yml to on every heartbeat (name-addressed).
+        let _yamlCurrent = null;  // { key, source: 'local'|'compose' }
 
         async function loadYamlList() {
             const list = document.getElementById('yaml-list');
             list.innerHTML = '<div style="color:var(--neon-green);padding:12px;opacity:0.6;">Loading...</div>';
             try {
-                const res = await fetch('/api/yamls');
-                const data = await res.json();
+                const [localRes, composeRes] = await Promise.all([
+                    fetch('/api/yamls'),
+                    fetch('/api/compose'),
+                ]);
+                const localData = await localRes.json();
+                const composeData = await composeRes.json();
+                const composeItems = Object.keys(composeData).sort().map(name => ({
+                    label: name, key: name, source: 'compose',
+                }));
+                const localItems = (localData || []).map(item => ({
+                    label: item.label, key: item.path, source: 'local',
+                }));
+                const items = [...composeItems, ...localItems];
+
                 list.innerHTML = '';
-                if (!data.length) {
+                if (!items.length) {
                     list.innerHTML = '<div style="color:var(--neon-green);padding:12px;opacity:0.5;">No compose files found.</div>';
                     return;
                 }
-                data.forEach(item => {
+                items.forEach(item => {
                     const div = document.createElement('div');
                     div.className = 'yaml-item';
                     div.textContent = item.label;
-                    div.title = item.path;
-                    div.onclick = () => selectYaml(item.path, item.label);
+                    div.title = item.key;
+                    div.onclick = () => selectYaml(item.key, item.label, item.source);
                     list.appendChild(div);
                 });
             } catch(e) {
@@ -904,20 +921,23 @@
             }
         }
 
-        async function selectYaml(path, label) {
+        async function selectYaml(key, label, source) {
             document.querySelectorAll('.yaml-item').forEach(el => el.classList.remove('active'));
-            const clicked = [...document.querySelectorAll('.yaml-item')].find(el => el.title === path);
+            const clicked = [...document.querySelectorAll('.yaml-item')].find(el => el.title === key);
             if (clicked) clicked.classList.add('active');
 
-            _yamlCurrentPath = path;
-            document.getElementById('yaml-path-display').textContent = path;
+            _yamlCurrent = { key, source };
+            document.getElementById('yaml-path-display').textContent = key;
             document.getElementById('yaml-editor').value = 'Loading...';
             document.getElementById('yaml-save-btn').style.display = 'none';
 
             try {
-                const res = await fetch('/api/yaml?path=' + encodeURIComponent(path));
-                const data = await res.json();
-                document.getElementById('yaml-editor').value = data.content;
+                const url = source === 'compose'
+                    ? '/api/compose/' + encodeURIComponent(key)
+                    : '/api/yaml?path=' + encodeURIComponent(key);
+                const res = await fetch(url);
+                const content = source === 'compose' ? await res.text() : (await res.json()).content;
+                document.getElementById('yaml-editor').value = content;
                 document.getElementById('yaml-save-btn').style.display = 'inline-block';
             } catch(e) {
                 document.getElementById('yaml-editor').value = 'Error loading file.';
@@ -925,17 +945,29 @@
         }
 
         async function saveYaml() {
-            if (!_yamlCurrentPath) return;
+            if (!_yamlCurrent) return;
+            const { key, source } = _yamlCurrent;
             const content = document.getElementById('yaml-editor').value;
             try {
-                const res = await fetch('/api/yaml?path=' + encodeURIComponent(_yamlCurrentPath), {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content })
-                });
-                const data = await res.json();
-                if (data.ok) notify('Saved: ' + _yamlCurrentPath, 'info');
-                else notify('Save failed: ' + (data.error || 'unknown'), 'error');
+                if (source === 'compose') {
+                    const res = await fetch('/api/compose/' + encodeURIComponent(key), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'text/yaml' },
+                        body: content,
+                    });
+                    const data = await res.json();
+                    if (data.result === 'saved') notify('Saved: ' + key, 'info');
+                    else notify('Save failed: ' + (data.error || 'unknown'), 'error');
+                } else {
+                    const res = await fetch('/api/yaml?path=' + encodeURIComponent(key), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ content })
+                    });
+                    const data = await res.json();
+                    if (data.ok) notify('Saved: ' + key, 'info');
+                    else notify('Save failed: ' + (data.error || 'unknown'), 'error');
+                }
             } catch(e) {
                 notify('Save error: ' + e.message, 'error');
             }
