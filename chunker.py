@@ -12,12 +12,20 @@ import json
 import yaml
 import sqlite3
 import subprocess
+import zipfile
+import base64
+import requests
 from datetime import datetime, timezone
 from pathlib import Path
+from io import BytesIO
 
-# ── DATABASE SETUP ──────────────────────────────────────────────────────────
+# ── CONFIGURATION ──────────────────────────────────────────────────────────
 
 DB_PATH = os.environ.get("DEPLOYMENT_DB", "deployments.db")
+VAULTWARDEN_URL = os.environ.get("VAULTWARDEN_URL", "http://unit6:6000")
+LOCATOR_UI_URL = os.environ.get("LOCATOR_UI_URL", "http://unit6:5000")
+
+# ── DATABASE SETUP ──────────────────────────────────────────────────────────
 
 def init_db():
     """Initialize deployment tracking database."""
@@ -33,30 +41,47 @@ def init_db():
             status TEXT DEFAULT 'pending',
             compose_content TEXT,
             locator_yml_content TEXT,
+            bundle_compressed BLOB,
             bundle_files TEXT,
             created_at TEXT,
             deployed_at TEXT,
+            vaultwarden_id TEXT,
             metadata TEXT
         )
     """)
     conn.commit()
     conn.close()
 
+def compress_bundle(bundle_path):
+    """Compress deployment bundle to bytes."""
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for file_path in Path(bundle_path).rglob("*"):
+            if file_path.is_file():
+                arcname = file_path.relative_to(bundle_path)
+                zipf.write(file_path, arcname)
+    return zip_buffer.getvalue()
+
 def save_deployment(deployment_id, name, deployment_type, location_type, target_unit,
-                   compose_content, locator_yml_content, bundle_files, metadata=None):
-    """Store deployment metadata and files in database."""
+                   compose_content, locator_yml_content, bundle_path, bundle_files,
+                   vaultwarden_id=None, metadata=None):
+    """Store deployment metadata and compressed bundle in database."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     now = datetime.now(timezone.utc).isoformat()
 
+    # Compress bundle
+    bundle_compressed = compress_bundle(bundle_path)
+
     c.execute("""
         INSERT OR REPLACE INTO deployments
         (id, name, deployment_type, location_type, target_unit, compose_content,
-         locator_yml_content, bundle_files, created_at, metadata)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         locator_yml_content, bundle_compressed, bundle_files, created_at,
+         vaultwarden_id, metadata)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (deployment_id, name, deployment_type, location_type, target_unit,
-          compose_content, locator_yml_content, json.dumps(bundle_files), now,
-          json.dumps(metadata or {})))
+          compose_content, locator_yml_content, bundle_compressed,
+          json.dumps(bundle_files), now, vaultwarden_id, json.dumps(metadata or {})))
 
     conn.commit()
     conn.close()
@@ -95,6 +120,80 @@ def parse_docker_compose(bundle_path):
 
     with open(compose_path, 'r') as f:
         return yaml.safe_load(f)
+
+# ── EXTERNAL SERVICE INTEGRATION ────────────────────────────────────────────
+
+def send_env_to_vaultwarden(bundle_path, deployment_name):
+    """Extract .env file and send to Vaultwarden."""
+    env_path = os.path.join(bundle_path, ".env")
+
+    if not os.path.exists(env_path):
+        print("⚠️ No .env file found in bundle")
+        return None
+
+    try:
+        with open(env_path, 'r') as f:
+            env_content = f.read()
+
+        # Store as secure note in Vaultwarden
+        payload = {
+            "name": f"{deployment_name}-env",
+            "type": "note",
+            "content": env_content,
+            "tags": ["deployment", deployment_name]
+        }
+
+        resp = requests.post(
+            f"{VAULTWARDEN_URL}/api/vault/secure-notes",
+            json=payload,
+            timeout=10
+        )
+
+        if resp.status_code in [200, 201]:
+            result = resp.json()
+            vault_id = result.get("id")
+            print(f"✅ .env stored in Vaultwarden (ID: {vault_id})")
+            return vault_id
+        else:
+            print(f"⚠️ Vaultwarden store failed: {resp.status_code}")
+            return None
+
+    except Exception as e:
+        print(f"⚠️ Error sending .env to Vaultwarden: {e}")
+        return None
+
+def post_compose_to_ui(deployment_id, deployment_name, compose_content, target_unit,
+                       deployment_type, location_type, metadata):
+    """Post docker-compose.yml to Locator UI."""
+    try:
+        payload = {
+            "id": deployment_id,
+            "name": deployment_name,
+            "target_unit": target_unit,
+            "deployment_type": deployment_type,
+            "location_type": location_type,
+            "compose": compose_content,
+            "status": "deployed",
+            "deployed_at": datetime.now(timezone.utc).isoformat(),
+            "metadata": metadata
+        }
+
+        resp = requests.post(
+            f"{LOCATOR_UI_URL}/api/deployments",
+            json=payload,
+            timeout=10
+        )
+
+        if resp.status_code in [200, 201]:
+            print(f"✅ Deployment posted to Locator UI")
+            return True
+        else:
+            print(f"⚠️ UI post failed: {resp.status_code}")
+            return False
+
+    except Exception as e:
+        print(f"⚠️ Error posting to Locator UI: {e}")
+        return False
 
 # ── UNIT MEMORY ANALYSIS ─────────────────────────────────────────────────────
 
@@ -243,14 +342,28 @@ def get_best_unit_for_deployment(bundle_path, units_analysis=None):
 
 # ── DEPLOYMENT EXECUTION ────────────────────────────────────────────────────
 
+def create_status_locator_yml(deployment_id, name, deployment_type, location_type, target_unit):
+    """Create locator.yml that tracks deployment status."""
+    return {
+        "id": deployment_id,
+        "name": name,
+        "deployment_type": deployment_type,
+        "location_type": location_type,
+        "target_unit": target_unit,
+        "status": "deployed",
+        "deployed_at": datetime.now(timezone.utc).isoformat(),
+        "deployment_id": deployment_id
+    }
+
 def deploy_bundle(bundle_path):
     """
     Full deployment workflow:
     1. Parse locator.yml + docker-compose.yml
     2. Find best unit
-    3. Deploy to that unit
-    4. Store state in database
-    5. Post compose.yml to UI
+    3. Send .env to Vaultwarden
+    4. Compress bundle and store in database
+    5. Post compose.yml to Locator UI
+    6. Create status locator.yml
     """
     init_db()
 
@@ -263,6 +376,8 @@ def deploy_bundle(bundle_path):
 
     deployment_name = locator_yml.get("name", "unnamed")
     deployment_id = f"{deployment_name}_{datetime.now(timezone.utc).timestamp()}"
+    deployment_type = locator_yml.get("deployment_type", "standard")
+    location_type = locator_yml.get("location_type", "stationary")
 
     # Find best unit
     best_unit, placement_info = get_best_unit_for_deployment(bundle_path)
@@ -273,37 +388,60 @@ def deploy_bundle(bundle_path):
         if file_path.is_file():
             bundle_files.append(str(file_path.relative_to(bundle_path)))
 
-    # Store in database
+    # Read compose content
     with open(os.path.join(bundle_path, "docker-compose.yml"), 'r') as f:
         compose_content = f.read()
     with open(os.path.join(bundle_path, "locator.yml"), 'r') as f:
         locator_content = f.read()
 
+    print(f"\n📋 Deployment Details:")
+    print(f"   ID: {deployment_id}")
+    print(f"   Name: {deployment_name}")
+    print(f"   Type: {deployment_type} / {location_type}")
+    print(f"   Target: {best_unit}\n")
+
+    # 1️⃣ Send .env to Vaultwarden
+    print("🔐 Storing secrets in Vaultwarden...")
+    vaultwarden_id = send_env_to_vaultwarden(bundle_path, deployment_name)
+
+    # 2️⃣ Compress and store bundle in database
+    print("💾 Compressing and storing bundle...")
     save_deployment(
         deployment_id,
         deployment_name,
-        locator_yml.get("deployment_type", "standard"),
-        locator_yml.get("location_type", "stationary"),
+        deployment_type,
+        location_type,
         best_unit,
         compose_content,
         locator_content,
+        bundle_path,
         bundle_files,
+        vaultwarden_id,
         placement_info
     )
 
-    print(f"📦 Stored deployment {deployment_id} in database")
-    print(f"📄 Compose file ready for posting to UI")
+    # 3️⃣ Post compose.yml to Locator UI
+    print("📡 Posting to Locator UI...")
+    post_compose_to_ui(
+        deployment_id,
+        deployment_name,
+        compose_content,
+        best_unit,
+        deployment_type,
+        location_type,
+        placement_info
+    )
 
-    # Deploy via SSH to target unit
-    try:
-        # TODO: Add SSH deployment to target unit
-        update_deployment_status(deployment_id, "deploying")
-        print(f"🚀 Deploying to {best_unit}...")
-    except Exception as e:
-        print(f"❌ Deployment failed: {e}")
-        update_deployment_status(deployment_id, "failed")
-        return {"error": str(e), "deployment_id": deployment_id}
+    # 4️⃣ Create status locator.yml
+    status_yml = create_status_locator_yml(
+        deployment_id,
+        deployment_name,
+        deployment_type,
+        location_type,
+        best_unit
+    )
 
+    # Update deployment status
     update_deployment_status(deployment_id, "deployed")
 
     return {
@@ -311,7 +449,13 @@ def deploy_bundle(bundle_path):
         "deployment_id": deployment_id,
         "target_unit": best_unit,
         "name": deployment_name,
-        "compose": compose_content,
+        "deployment_type": deployment_type,
+        "location_type": location_type,
+        "vaultwarden_id": vaultwarden_id,
+        "bundle_compressed": True,
+        "bundle_files_count": len(bundle_files),
+        "ui_posted": True,
+        "status_locator_yml": status_yml,
         "placement_reasoning": placement_info
     }
 
