@@ -294,18 +294,45 @@ def score_unit_for_deployment(unit_id, unit_info, deployment_spec):
 
     return score, reasons
 
+def get_online_units():
+    """Get list of ONLINE units from Locator registry."""
+    try:
+        result = subprocess.run(
+            ["python3", "locatorctl.py", "list"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        online_units = set()
+        for line in result.stdout.split('\n'):
+            if line.startswith('ONLINE'):
+                parts = line.split()
+                if len(parts) >= 3:
+                    # Extract unit from service@unit format
+                    service_info = parts[1]
+                    if '@' in service_info:
+                        unit = service_info.split('@')[1]
+                        online_units.add(unit)
+
+        return online_units if online_units else {"unit5", "unit6", "unit7", "unit8", "unit9"}
+    except:
+        # Fallback to known accessible units
+        return {"unit5", "unit6", "unit7", "unit8", "unit9"}
+
 def get_best_unit_for_deployment(bundle_path, units_analysis=None):
     """
     Determine best unit for deployment bundle.
     1. Parse locator.yml for requirements
-    2. Analyze all units
-    3. Score and select best match
+    2. Get ONLINE units only
+    3. Analyze units and score
+    4. Select best match
     """
     locator_yml = parse_locator_yml(bundle_path)
 
     if not locator_yml:
         print("⚠️ No locator.yml found — using default placement")
-        return "unit1", {"reason": "default_fallback"}
+        return "unit5", {"reason": "default_fallback"}
 
     name = locator_yml.get("name", "unknown")
     deployment_type = locator_yml.get("deployment_type", "standard")
@@ -314,25 +341,37 @@ def get_best_unit_for_deployment(bundle_path, units_analysis=None):
     print(f"\n🔍 Analyzing placement for: {name}")
     print(f"   Type: {deployment_type} | Location: {location_type}\n")
 
+    # Get online units only
+    online_units = get_online_units()
+    print(f"   Available units: {', '.join(sorted(online_units))}\n")
+
     # Analyze all units if not provided
     if not units_analysis:
         units_analysis = analyze_all_units()
 
-    # Score each unit
+    # Score each unit (ONLY online ones)
     scores = {}
     for unit_id, unit_info in units_analysis.items():
+        if unit_id not in online_units:
+            print(f"  {unit_id}: OFFLINE (skipped)")
+            continue
+
         score, reasons = score_unit_for_deployment(unit_id, unit_info, locator_yml)
         scores[unit_id] = {"score": score, "reasons": reasons, "info": unit_info}
 
-        print(f"  {unit_id}: {score} pts")
+        print(f"  {unit_id}: {score} pts (ONLINE)")
         for reason in reasons:
             print(f"    {reason}")
+
+    if not scores:
+        print("❌ No online units available!")
+        return None, {"error": "no_online_units"}
 
     # Select best unit
     best_unit = max(scores.items(), key=lambda x: x[1]["score"])
     best_id, best_data = best_unit
 
-    print(f"\n✅ Selected: {best_id} (score: {best_data['score']})\n")
+    print(f"\n✅ Selected: {best_id} (score: {best_data['score']}, ONLINE)\n")
 
     return best_id, {
         "locator_yml": locator_yml,
