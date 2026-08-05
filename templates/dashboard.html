@@ -1391,12 +1391,23 @@
             const nodes = applyColumnSort('devices', Object.entries(registryData.nodes || {}).map(([id, n]) => ({ ...n, id })));
             el.innerHTML = nodes.map(n => {
                 const id = n.id;
+                const meta = n.metadata || {};
+                // lokey-native puts cpu/mem/disk at the top level of the node record;
+                // lokey-android only nests them under metadata (see the device
+                // close-up modal, which already reads from metadata) — fall back
+                // so Android nodes show MEM/DISK on the Tactical Grid cards too.
+                const pick = (k) => n[k] != null ? n[k] : meta[k];
+                const cpu = pick('cpu_percent');
+                const mem = pick('mem_percent');
+                const diskPct = pick('disk_percent');
+                const diskUsed = pick('disk_used_gb');
+                const diskTotal = pick('disk_total_gb');
                 const stale = !n.last_seen || (Date.now() - new Date(n.last_seen)) > 300000;
-                const oom = (n.mem_percent || 0) >= 90;
+                const oom = (mem || 0) >= 90;
                 const badge = n.status !== 'ONLINE' ? 'offline' : (stale ? 'stale' : 'online');
                 const ip = n.tailscale_ip || n.ip || 'unknown';
-                const disk = (n.disk_used_gb != null && n.disk_total_gb != null)
-                    ? ` · ${n.disk_used_gb}/${n.disk_total_gb} GB` : '';
+                const disk = (diskUsed != null && diskTotal != null)
+                    ? ` · ${diskUsed}/${diskTotal} GB` : '';
                 const bar = (v) => `<div class="mc-bar"><div class="mc-fill" style="width:${Math.min(v || 0, 100)}%;background:${pctColor(v)}"></div></div>`;
                 const row = (label, v) => `<div class="mc-row"><span class="mc-label">${label}</span><span style="color:${pctColor(v)}">${v != null ? v.toFixed(1) + '%' : '—'}</span></div>`;
                 const nc = badge === 'offline' ? OFFLINE_COLOR : nodeColor(id);
@@ -1405,9 +1416,9 @@
                     <div class="mc-name" style="color:${nc}">${id}</div>
                     <div class="mc-ip">${ip}${disk}</div>
                     <span class="mc-badge ${badge}">${oom ? 'OOM' : badge.toUpperCase()}</span>
-                    ${row('CPU', n.cpu_percent)}${bar(n.cpu_percent)}
-                    ${row('MEM', n.mem_percent)}${bar(n.mem_percent)}
-                    ${row('DISK', n.disk_percent)}${bar(n.disk_percent)}
+                    ${row('CPU', cpu)}${bar(cpu)}
+                    ${row('MEM', mem)}${bar(mem)}
+                    ${row('DISK', diskPct)}${bar(diskPct)}
                 </div>`;
             }).join('');
         }
