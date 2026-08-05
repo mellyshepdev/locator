@@ -171,6 +171,23 @@
         .yaml-item:hover { background: rgba(0,255,70,0.08); }
         .yaml-item.active { background: rgba(0,255,70,0.18); font-weight: bold; }
 
+        /* Essential indicator badge */
+        .essential-badge {
+            display: inline-block;
+            margin-left: 6px;
+            padding: 2px 6px;
+            background: #ff9500;
+            color: #000;
+            font-weight: bold;
+            border-radius: 3px;
+            font-size: 11px;
+            vertical-align: middle;
+            box-shadow: 0 0 8px rgba(255, 149, 0, 0.5);
+        }
+        .essential-badge::before {
+            content: "✓ ";
+        }
+
         /* add docker container button */
 #add-docker-btn {
     z-index: 9999 !important;
@@ -1317,9 +1334,11 @@
                 const hostBadges = hostList.map(h => `<span class="node-badge">${h}</span>`).join('');
                 const isOnline = item.status === 'ONLINE';
                 const safeName = (item.name || '').replace(/'/g, "\\'");
+                const isEssential = item.metadata && item.metadata.deployment_type === 'essential';
+                const essentialBadge = isEssential ? '<span class="essential-badge">ESSENTIAL</span>' : '';
 
                 tr.innerHTML = `
-                    <td style="font-weight:bold">${item.name}</td>
+                    <td style="font-weight:bold">${item.name}${essentialBadge}</td>
                     <td>${hostBadges}</td>
                     <td>${item.port || '-'}</td>
                     <td>${item.internal || '-'}</td>
@@ -1352,9 +1371,11 @@
                 tr.title = 'Click for full data sheet';
                 const hostList = item.hosts || [item.host || 'unknown'];
                 const hostBadges = hostList.map(h => `<span class="node-badge">${h}</span>`).join('');
+                const isEssential = item.metadata && item.metadata.deployment_type === 'essential';
+                const essentialBadge = isEssential ? '<span class="essential-badge">ESSENTIAL</span>' : '';
 
                 tr.innerHTML = `
-                    <td style="font-weight:bold">${item.name}</td>
+                    <td style="font-weight:bold">${item.name}${essentialBadge}</td>
                     <td>${hostBadges}</td>
                     <td><a href="${item.url}" target="_blank" onclick="event.stopPropagation()">${item.url}</a></td>
                     <td>
@@ -1376,9 +1397,11 @@
                 const hostList = item.hosts || [item.host || 'unknown'];
                 const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:#ff8800;color:#ff8800">${h}</span>`).join('');
                 const isOnline = item.status === 'ONLINE';
+                const isEssential = item.metadata && item.metadata.deployment_type === 'essential';
+                const essentialBadge = isEssential ? '<span class="essential-badge">ESSENTIAL</span>' : '';
 
                 tr.innerHTML = `
-                    <td style="font-weight:bold;color:#ff8800">${item.name}</td>
+                    <td style="font-weight:bold;color:#ff8800">${item.name}${essentialBadge}</td>
                     <td>${hostBadges}</td>
                     <td>${item.internal ? `<a href="${item.internal}" target="_blank" style="color:#ff8800" onclick="event.stopPropagation()">${item.internal}</a>` : '-'}</td>
                     <td>${item.url ? `<a href="${item.url}" target="_blank" style="color:#ff8800" onclick="event.stopPropagation()">${item.url}</a>` : '-'}</td>
@@ -1400,9 +1423,11 @@
                 tr.title = 'Click for full data sheet';
                 const platform = (item.metadata && item.metadata.platform) || item.host || '-';
                 const isOnline = item.status === 'ONLINE';
+                const isEssential = item.metadata && item.metadata.deployment_type === 'essential';
+                const essentialBadge = isEssential ? '<span class="essential-badge">ESSENTIAL</span>' : '';
 
                 tr.innerHTML = `
-                    <td style="font-weight:bold;color:#ff2d95">${item.name}</td>
+                    <td style="font-weight:bold;color:#ff2d95">${item.name}${essentialBadge}</td>
                     <td><span class="node-badge" style="border-color:#ff2d95;color:#ff2d95">${platform}</span></td>
                     <td>${item.url ? `<a href="${item.url}" target="_blank" style="color:#ff2d95" onclick="event.stopPropagation()">${item.url}</a>` : '-'}</td>
                     <td>
