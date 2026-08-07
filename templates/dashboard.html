@@ -614,15 +614,22 @@
         .filter-bar input:focus { box-shadow: 0 0 10px rgba(0, 240, 255, 0.4); }
         .filter-count { color: #6699aa; font-size: 12px; margin-left: auto; letter-spacing: 1px; }
         .event-box {
+            position: fixed;
+            top: 120px;
+            left: 20px;
+            width: 260px;
+            max-height: 320px;
+            overflow-y: auto;
             background-color: rgba(0, 0, 0, 0.8);
             border: 1px solid var(--neon-blue);
             border-left: 5px solid var(--neon-green);
-            padding: 10px 20px;
-            margin-bottom: 20px;
+            padding: 10px 16px;
             color: #fff;
             font-family: inherit;
-            font-size: 14px;
+            font-size: 13px;
+            z-index: 20;
         }
+        .event-box .grid-title { font-size: 12px; margin-bottom: 6px; }
 
     </style>
 <!-- Matomo -->
@@ -1648,64 +1655,6 @@
                 return cell;
             }
 
-
-               // Function to append a formatted event to the Event Box
-                   function renderEvent(event) {
-                                  const eventBox = document.querySelector('.event-box');
-                                  if (!eventBox) return;
- 
-                                 const entry = document.createElement('div');
-                                 entry.style.borderBottom = '1px solid rgba(0, 255, 0, 0.15)';
-                                 entry.style.padding = '6px 0';
-                                 entry.style.fontSize = '12px';
-                                 entry.style.lineHeight = '1.4';
-
-                                // Formats Date and Time
-                                const dateObj = event.timestamp ? new Date(event.timestamp) : new Date();
-                                const formattedDate = dateObj.toLocaleDateString();
-                                const formattedTime = dateObj.toLocaleTimeString();
-
-                                let details = `<span style="color: var(--neon-green);">[${formattedDate} ${formattedTime}]</span> `;
-
-    if (event.type === 'migration') {
-        details += `<strong style="color: var(--accent);">[MIGRATION]</strong> Container <code>${event.from_container}</code> shifted to <code>${event.to_container}</code> on <strong>${event.unit}</strong>`;
-    } else if (event.type === 'dns') {
-        details += `<strong style="color: #00f0ff;">[DNS]</strong> A Record <code>${event.a_record}</code> point -> PDNS <code>${event.pdns_server}</code>`;
-    } else {
-        details += `<span>${event.message || JSON.stringify(event)}</span>`;
-    }
-
-    entry.innerHTML = details;
-    eventBox.appendChild(entry);
-    
-    // Auto-scroll to keep newest events visible
-    eventBox.scrollTop = eventBox.scrollHeight;
-}
-
-// 1. Fetch initial event history on load
-fetch('/api/events')
-    .then(res => res.json())
-    .then(events => {
-        if (Array.isArray(events)) {
-            events.forEach(renderEvent);
-        }
-    })
-    .catch(err => console.error('Failed to load initial event log:', err));
-
-// 2. Connect to WebSocket for live event streaming
-const eventSocket = new WebSocket(`ws://${window.location.host}/ws/events`);
-
-eventSocket.onmessage = function(wsEvent) {
-    try {
-        const data = JSON.parse(wsEvent.data);
-        renderEvent(data);
-    } catch (e) {
-        renderEvent({ message: wsEvent.data });
-    }
-};
-
-
-
             // --- DEVICES TABLE ---
             nodes.forEach(item => {
                 const tr = document.createElement('tr');
@@ -2057,6 +2006,60 @@ eventSocket.onmessage = function(wsEvent) {
         setInterval(loadRegistryData, 10000);
         // Ticks the "Updated Xs ago" text every second, independent of the poll itself.
         setInterval(updateLiveStatusIndicator, 1000);
+
+        // --- Event log (tactical grid EVENT LOG box) ---
+        // Runs once at page load, not inside renderGrid()/loadRegistryData() — this
+        // used to be spliced into the 10s render loop and open a fresh (leaked)
+        // connection on every tick; see KNOWN_ISSUES.md.
+        function renderEvent(event) {
+            const eventBox = document.querySelector('.event-box');
+            if (!eventBox) return;
+
+            const entry = document.createElement('div');
+            entry.style.borderBottom = '1px solid rgba(0, 255, 0, 0.15)';
+            entry.style.padding = '6px 0';
+            entry.style.fontSize = '12px';
+            entry.style.lineHeight = '1.4';
+
+            const dateObj = event.timestamp ? new Date(event.timestamp) : new Date();
+            const formattedDate = dateObj.toLocaleDateString();
+            const formattedTime = dateObj.toLocaleTimeString();
+
+            let details = `<span style="color: var(--neon-green);">[${formattedDate} ${formattedTime}]</span> `;
+
+            if (event.type === 'migration') {
+                details += `<strong style="color: var(--accent);">[MIGRATION]</strong> Container <code>${event.from_container}</code> shifted to <code>${event.to_container}</code> on <strong>${event.unit}</strong>`;
+            } else if (event.type === 'dns') {
+                details += `<strong style="color: #00f0ff;">[DNS]</strong> A Record <code>${event.a_record}</code> point -> PDNS <code>${event.pdns_server}</code>`;
+            } else {
+                details += `<span>${event.message || JSON.stringify(event)}</span>`;
+            }
+
+            entry.innerHTML = details;
+            eventBox.appendChild(entry);
+            eventBox.scrollTop = eventBox.scrollHeight;
+        }
+
+        fetch('/api/events')
+            .then(res => res.json())
+            .then(events => {
+                if (Array.isArray(events)) events.forEach(renderEvent);
+            })
+            .catch(err => console.error('Failed to load initial event log:', err));
+
+        // Server-Sent Events, not WebSocket — this app runs under gunicorn's
+        // gthread worker class, which doesn't support WS upgrades. SSE works
+        // over plain HTTP and reconnects automatically on drop.
+        if (window.EventSource) {
+            const eventStream = new EventSource('/api/events/stream');
+            eventStream.onmessage = function(e) {
+                try {
+                    renderEvent(JSON.parse(e.data));
+                } catch (err) {
+                    renderEvent({ message: e.data });
+                }
+            };
+        }
 
         // ── STATIC "CLOUD & NATIVE PLATFORMS" TABLE — also clickable, same data-sheet modal ──
         // These rows are hand-authored reference entries, not live registry data, so their

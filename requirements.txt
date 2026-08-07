@@ -10,5 +10,6 @@ pandas
 openpyxl
 qrcode
 Pillow
+psycopg2-binary
 
 watchdog
