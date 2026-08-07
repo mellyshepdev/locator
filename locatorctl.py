@@ -8,13 +8,21 @@ actual host. Lokey picks it up, runs it locally, and reports back — so
 `start`/`stop` here only confirm the command was *queued*, not that it's
 done yet. Use `status`/`list` (or watch the dashboard) to see it land.
 
+migrate/dns follow the same "queue it, agent executes it" philosophy: migrate
+queues a job in Locator's migration_queue (container or native, picked
+automatically from the service's registered type) that the target/source
+unit's agent picks up and runs; dns sync only confirms ns1 sent a NOTIFY, not
+that a secondary applied it.
+
 Usage:
     export LOCATOR_URL="https://tobsco-locator.fly.dev"   # default shown
     locatorctl.py start <container-name>
     locatorctl.py stop  <container-name>
     locatorctl.py status <container-name>
     locatorctl.py list
-    locatorctl.py deploy <unit> <path/to/docker-compose.yml>
+    locatorctl.py migrate <name@host> --to <unit> [--force]
+    locatorctl.py dns status
+    locatorctl.py dns sync <zone>
 """
 import argparse
 import os
@@ -55,47 +63,42 @@ def list_services():
         print(f"{svc.get('status', '?'):8s} {name}")
 
 
-def migrate(name, to_node):
+def migrate(name, to_node, force):
     resp = requests.post(
         f"{LOCATOR_URL}/api/migrations",
-        json={"name": name, "to_node": to_node},
+        json={"service": name, "to_node": to_node, "force": force},
         timeout=30,
     )
     data = resp.json()
-    if resp.status_code != 200 or data.get("error"):
+    if resp.status_code != 200:
         print(f"error: {data.get('error', resp.text)}", file=sys.stderr)
+        if data.get("missing"):
+            print(f"  missing dependencies: {', '.join(data['missing'])}", file=sys.stderr)
+            print("  pass --force to migrate anyway", file=sys.stderr)
         sys.exit(1)
-    print(f"queued: migrate '{name}' → {to_node} (id {data['id']}, executing on {data['unit']})")
-    print("Native migrations can take a while (venv rebuild) — use `status`/`list` or the dashboard's Migration Queue panel to watch it land.")
+    print(f"queued: migration {data['id']} ({data['type']}) — '{name}' → {to_node}")
 
 
-def deploy(file_path, unit=None):
-    if not os.path.exists(file_path):
-        print(f"error: file not found: {file_path}", file=sys.stderr)
-        sys.exit(1)
-
-    with open(file_path, 'r') as f:
-        compose_content = f.read()
-
-    payload = {"compose": compose_content}
-    if unit:
-        payload["node"] = unit
-
-    resp = requests.post(
-        f"{LOCATOR_URL}/api/deploy/inline",
-        json=payload,
-        timeout=60,
-    )
+def dns_status():
+    resp = requests.get(f"{LOCATOR_URL}/api/dns/status", timeout=30)
+    resp.raise_for_status()
     data = resp.json()
-    if resp.status_code not in (200, 201) or data.get("error"):
-        print(f"error: {data.get('error', resp.text)}", file=sys.stderr)
-        sys.exit(1)
+    print(f"ns1: {data.get('ns1_host')}")
+    for zone, info in sorted(data.get("zones", {}).items()):
+        if info.get("ok"):
+            print(f"\n== {zone} ==\n{info['content']}")
+        else:
+            print(f"\n== {zone} ==\nerror: {info.get('error')}")
 
-    target_unit = data.get("node", "?")
-    status = data.get("result", "unknown")
-    print(f"✓ {status}: deployed to {target_unit}")
-    if data.get("output"):
-        print(f"\nDocker output:\n{data['output']}")
+
+def dns_sync(zone):
+    resp = requests.post(f"{LOCATOR_URL}/api/dns/sync", json={"zone": zone}, timeout=30)
+    data = resp.json()
+    if resp.status_code != 200 or not data.get("ok"):
+        print(f"error: {data.get('error', data.get('output', resp.text))}", file=sys.stderr)
+        sys.exit(1)
+    print(f"notified: {zone} from {data.get('notified_from')}")
+    print(f"  {data.get('note')}")
 
 
 COMMANDS = {
@@ -103,34 +106,16 @@ COMMANDS = {
     "status":  "Show the current status of one service",
     "start":   "Queue a container start on its host (runs via Lokey)",
     "stop":    "Queue a container stop on its host (runs via Lokey)",
-    "migrate": "Queue a move of a container or native service to another unit",
-    "deploy":  "Deploy a docker-compose.yml to a unit (or let Locator auto-select)",
+    "migrate": "Migrate a service to another node (container or native, auto-detected)",
+    "dns":     "Check or trigger a sync of the PowerDNS zones ns1 serves",
 }
 
 EPILOG = """\
 Environment:
   LOCATOR_URL  Registry URL (default: https://tobsco-locator.fly.dev)
 
-Examples:
-  locator list
-  locator status caddy
-  locator start caddy
-  locator deploy /path/to/docker-compose.yml
-  locator deploy unit3 /path/to/docker-compose.yml
-  locator migrate caddy unit7
-
 start/stop only confirm the command was queued — Lokey executes it on the
 container's actual host. Use `status`/`list` or the dashboard to see it land.
-
-deploy without a unit uses smart detection (analyzes available RAM/CPU/storage).
-Specify a unit to pin deployment to a specific machine.
-
-migrate works for both Docker containers and native (systemd/venv) services —
-the target service's registered type decides how it's moved. For native
-services, Lokey detects at run time whether it's a real systemd unit or a
-bare background process and migrates accordingly; native moves that need a
-venv are rebuilt from requirements.txt on the target, so they take longer
-than a container move.
 """
 
 
@@ -149,13 +134,16 @@ def main():
 
     sub.add_parser("list", help=COMMANDS["list"], description=COMMANDS["list"])
 
-    p = sub.add_parser("migrate", help=COMMANDS["migrate"], description=COMMANDS["migrate"])
-    p.add_argument("name", help="service/container name as registered in the Locator")
-    p.add_argument("to_node", help="unit to migrate it to, e.g. unit5")
+    mig_p = sub.add_parser("migrate", help=COMMANDS["migrate"], description=COMMANDS["migrate"])
+    mig_p.add_argument("name", help="service_id as shown by `list` (name@host)")
+    mig_p.add_argument("--to", required=True, dest="to_node", help="destination unit/node id")
+    mig_p.add_argument("--force", action="store_true", help="ignore unmet dependencies")
 
-    p = sub.add_parser("deploy", help=COMMANDS["deploy"], description=COMMANDS["deploy"])
-    p.add_argument("arg1", help="unit (e.g. unit3) or path to docker-compose.yml")
-    p.add_argument("arg2", nargs="?", help="path to docker-compose.yml (if arg1 is a unit)")
+    dns_p = sub.add_parser("dns", help=COMMANDS["dns"], description=COMMANDS["dns"])
+    dns_sub = dns_p.add_subparsers(dest="dns_command", required=True, metavar="<dns-command>")
+    dns_sub.add_parser("status", help="Show each configured zone's content as served by ns1")
+    sync_p = dns_sub.add_parser("sync", help="Force ns1 to NOTIFY secondaries of a zone")
+    sync_p.add_argument("zone", help="zone name, e.g. theofficialblacksheepco.com")
 
     args = parser.parse_args()
 
@@ -166,13 +154,12 @@ def main():
     elif args.command == "list":
         list_services()
     elif args.command == "migrate":
-        migrate(args.name, args.to_node)
-    elif args.command == "deploy":
-        # Handle both: deploy /path/file and deploy unit3 /path/file
-        if args.arg2:  # Unit + file specified
-            deploy(args.arg2, unit=args.arg1)
-        else:  # Only file specified, use smart detection
-            deploy(args.arg1, unit=None)
+        migrate(args.name, args.to_node, args.force)
+    elif args.command == "dns":
+        if args.dns_command == "status":
+            dns_status()
+        elif args.dns_command == "sync":
+            dns_sync(args.zone)
 
 
 if __name__ == "__main__":

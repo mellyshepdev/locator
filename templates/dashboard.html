@@ -81,19 +81,19 @@
             clientId: 'locator'
         });
         kc.init({
-            onLoad: 'check-sso',
+            onLoad: 'login-required',
             pkceMethod: 'S256',
-            silentCheckSsoRedirectUri: window.location.origin + '/silent-check-sso.html'
+            checkLoginIframe: false
         })
             .then(function(auth) {
                 if (auth) {
                     document.documentElement.classList.add('auth-ok');
                 } else {
-                    kc.login({ redirectUri: window.location.href });
+                    authFailed('Keycloak login-required resolved without a session');
                 }
             })
             .catch(function(err) {
-                authFailed('Keycloak init/check-sso failed: ' + (err && err.message ? err.message : JSON.stringify(err)), err);
+                authFailed('Keycloak init failed: ' + (err && err.message ? err.message : JSON.stringify(err)), err);
             });
     })();
     </script>
@@ -130,7 +130,7 @@
             position: absolute;
             top: 20px;
             right: 30px;
-            z-index: 100;
+            z-index: 10500; /* above Leaflet's default panes/controls (max ~1000) on the Traccar Map tab */
             display: flex;
             background: rgba(0, 0, 0, 0.8);
             border: 1px solid var(--accent);
@@ -171,23 +171,6 @@
         .yaml-item:hover { background: rgba(0,255,70,0.08); }
         .yaml-item.active { background: rgba(0,255,70,0.18); font-weight: bold; }
 
-        /* Essential indicator badge */
-        .essential-badge {
-            display: inline-block;
-            margin-left: 6px;
-            padding: 2px 6px;
-            background: #ff9500;
-            color: #000;
-            font-weight: bold;
-            border-radius: 3px;
-            font-size: 11px;
-            vertical-align: middle;
-            box-shadow: 0 0 8px rgba(255, 149, 0, 0.5);
-        }
-        .essential-badge::before {
-            content: "✓ ";
-        }
-
         /* add docker container button */
 #add-docker-btn {
     z-index: 9999 !important;
@@ -219,6 +202,9 @@
             display: block;
         }
         #view-yamls.active {
+            display: flex;
+        }
+        #view-traccar.active {
             display: flex;
         }
 
@@ -404,6 +390,13 @@
             box-shadow: 0 0 8px var(--danger);
             animation: pulse 1s infinite;
         }
+        .battery-critical {
+            animation: battery-blink 1s infinite;
+        }
+        @keyframes battery-blink {
+            0%, 100% { background-color: #ff2d2d; box-shadow: 0 0 8px #ff2d2d; }
+            50%      { background-color: #ffe600; box-shadow: 0 0 8px #ffe600; }
+        }
         .status-toggle-btn {
             background: transparent;
             border: 1px solid currentColor;
@@ -461,7 +454,23 @@
             font-size: 11px;
             border: 1px solid var(--neon-green);
             color: var(--neon-green);
+            white-space: nowrap;
+            display: inline-block;
+            margin: 2px;
         }
+
+        /* Node/Host column shouldn't get squeezed onto multiple lines */
+        .col-host { white-space: nowrap; min-width: 150px; }
+
+        /* Clickable column headers */
+        th[data-sort-table] { user-select: none; white-space: nowrap; }
+        th[data-sort-table]:hover { background: rgba(255, 255, 255, 0.08); }
+
+        /* Tables can have more columns than the container is wide — scroll
+           horizontally instead of silently clipping/wrapping data */
+        .table-scroll { overflow-x: auto; }
+        .table-scroll table { min-width: 1000px; }
+        .grid-green .table-scroll table { min-width: 1500px; }
 
         .meta-badge {
             display: inline-block;
@@ -604,6 +613,24 @@
         .filter-bar input { width: 280px; }
         .filter-bar input:focus { box-shadow: 0 0 10px rgba(0, 240, 255, 0.4); }
         .filter-count { color: #6699aa; font-size: 12px; margin-left: auto; letter-spacing: 1px; }
+        .event-box {
+            position: fixed;
+            top: 120px;
+            left: 20px;
+            width: 260px;
+            max-height: 320px;
+            overflow-y: auto;
+            background-color: rgba(0, 0, 0, 0.8);
+            border: 1px solid var(--neon-blue);
+            border-left: 5px solid var(--neon-green);
+            padding: 10px 16px;
+            color: #fff;
+            font-family: inherit;
+            font-size: 13px;
+            z-index: 20;
+        }
+        .event-box .grid-title { font-size: 12px; margin-bottom: 6px; }
+
     </style>
 <!-- Matomo -->
 <script>
@@ -621,6 +648,10 @@
 </script>
 <!-- End Matomo Code -->
 
+<!-- Leaflet (Traccar Map tab) -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
 </head>
 <body>
 
@@ -632,14 +663,21 @@
 
     <!-- UI TOGGLE -->
     <div id="ui-toggle">
-        <button class="toggle-btn active" onclick="switchView('map')">Mesh Map</button>
-        <button class="toggle-btn" onclick="switchView('grid')">Tactical Grid</button>
+        <button class="toggle-btn" onclick="switchView('map')">Mesh Map</button>
+        <button class="toggle-btn active" onclick="switchView('grid')">Tactical Grid</button>
         <button class="toggle-btn" onclick="switchView('3js')">3D Mesh</button>
+        <button class="toggle-btn" onclick="switchView('traccar')">Traccar Map</button>
         <button class="toggle-btn" onclick="switchView('yamls')">YAMLs</button>
     </div>
 
+    <!-- LIVE STATUS — shows the page is actually polling, and flags it loudly if it stops -->
+    <div id="live-status" style="position:absolute; top:20px; left:30px; z-index:10500; font-family:inherit; font-size:12px; letter-spacing:1px; padding:8px 14px; background:rgba(0,0,0,0.8); border:1px solid var(--accent); border-radius:4px; color:var(--accent);">
+        <span id="live-status-dot" style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--neon-green); box-shadow:0 0 6px var(--neon-green); margin-right:6px;"></span>
+        <span id="live-status-text">Connecting…</span>
+    </div>
+
     <!-- REGISTER A DEVICE — for phones/tablets to self-register + install Lokey -->
-    <a href="/register-device" id="register-device-btn" style="position:absolute; top:70px; right:30px; z-index:100; display:flex; align-items:center; gap:8px; background:rgba(0,0,0,0.8); border:1px solid var(--accent); border-radius:4px; padding:8px 16px; color:var(--accent); text-decoration:none; font-family:inherit; font-size:13px; text-transform:uppercase; letter-spacing:1px; box-shadow:0 0 10px rgba(0,240,255,0.3);">
+    <a href="/register-device" id="register-device-btn" style="position:absolute; top:70px; right:30px; z-index:10500; display:flex; align-items:center; gap:8px; background:rgba(0,0,0,0.8); border:1px solid var(--accent); border-radius:4px; padding:8px 16px; color:var(--accent); text-decoration:none; font-family:inherit; font-size:13px; text-transform:uppercase; letter-spacing:1px; box-shadow:0 0 10px rgba(0,240,255,0.3);">
         📱 Register a Device
     </a>
 
@@ -652,7 +690,7 @@
     </div>
 
     <!-- MESH MAP VIEW -->
-    <div id="view-map" class="view-container active">
+    <div id="view-map" class="view-container">
         <h1 class="map-title">S.H.E.E.P. Mesh Map</h1>
         <div id="mynetwork"></div>
         <div id="info-panel">
@@ -665,7 +703,12 @@
     </div>
 
     <!-- TACTICAL GRID VIEW -->
-    <div id="view-grid" class="view-container">
+    <div id="view-grid" class="view-container active">
+
+     <div class="event-box">
+      <div class="grid-title">EVENT LOG</div>
+       <p>System events and client errors will appear here.</p>
+      </div>
 
         <!-- BLUE RECTANGLE: DEVICES -->
         <div class="grid-container grid-blue">
@@ -682,16 +725,30 @@
                 <select id="grid-unit-filter" onchange="if (lastRegistryData) renderGrid(lastRegistryData)">
                     <option value="">ALL UNITS</option>
                 </select>
+                <select id="grid-node-sort" onchange="dropdownSort(this.value)">
+                    <option value="">SORT: DEFAULT</option>
+                    <option value="status">SORT: STATUS</option>
+                    <option value="name">SORT: NAME</option>
+                    <option value="mem">SORT: AVAILABLE MEM</option>
+                    <option value="disk">SORT: AVAILABLE STORAGE</option>
+                </select>
                 <span class="filter-count" id="filter-count"></span>
             </div>
 
             <!-- LIVE NODE METRICS -->
             <div class="node-cards-row" id="node-cards"></div>
 
-            <table>
-                <thead><tr><th style="color: #00f0ff;">Device</th><th style="color: #00f0ff;">IP Address</th><th style="color: #00f0ff;">Type / OS</th><th style="color: #00f0ff;">Status</th><th style="color: #00f0ff;">Metadata</th><th style="color: #00f0ff;">Last Seen</th></tr></thead>
+            <div class="table-scroll"><table>
+                <thead><tr>
+                    <th data-sort-table="devices" data-sort-key="name" data-label="Device" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','name')">Device</th>
+                    <th data-sort-table="devices" data-sort-key="ip" data-label="IP Address" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','ip')">IP Address</th>
+                    <th data-sort-table="devices" data-sort-key="type" data-label="Type / OS" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','type')">Type / OS</th>
+                    <th data-sort-table="devices" data-sort-key="status" data-label="Status" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','status')">Status</th>
+                    <th style="color: #00f0ff;">Metadata</th>
+                    <th data-sort-table="devices" data-sort-key="lastseen" data-label="Last Seen" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','lastseen')">Last Seen</th>
+                </tr></thead>
                 <tbody id="tbody-devices"></tbody>
-            </table>
+            </table></div>
         </div>
 
         <!-- GREEN RECTANGLE: DOCKER CONTAINERS -->
@@ -701,21 +758,21 @@
             <div class="status-header">
                 <div>ACTIVE CONTAINERS: <span id="count-docker" style="color: #00ff00;">0</span></div>
                 <div>SYSTEM STATUS: <span class="status-dot online"></span> NOMINAL</div>
-                <div style="margin-left: auto;">
-                    <label style="color: #00ff00; font-size: 12px; margin-right: 10px;">Sort by:</label>
-                    <select id="docker-sort" onchange="if (lastRegistryData) renderGrid(lastRegistryData)" style="background: #001030; color: #00ff00; border: 1px solid #00ff00; padding: 4px 8px; border-radius: 3px; font-size: 12px;">
-                        <option value="name">Name</option>
-                        <option value="ram">RAM</option>
-                        <option value="storage">Storage</option>
-                        <option value="cpu">CPU</option>
-                        <option value="status">Status</option>
-                    </select>
-                </div>
             </div>
-            <table>
-                <thead><tr><th>Service</th><th>Node / Host</th><th>Port</th><th>Internal IP</th><th>Public / Traefik</th><th>Stats (CPU/RAM/Temp/Disk)</th><th>Status</th><th>Metadata</th><th>Last Seen</th></tr></thead>
+            <div class="table-scroll"><table>
+                <thead><tr>
+                    <th data-sort-table="docker" data-sort-key="name" data-label="Service" style="cursor:pointer" onclick="sortByColumn('docker','name')">Service</th>
+                    <th class="col-host" data-sort-table="docker" data-sort-key="host" data-label="Node / Host" style="cursor:pointer" onclick="sortByColumn('docker','host')">Node / Host</th>
+                    <th data-sort-table="docker" data-sort-key="port" data-label="Port" style="cursor:pointer" onclick="sortByColumn('docker','port')">Port</th>
+                    <th data-sort-table="docker" data-sort-key="internal" data-label="Internal IP" style="cursor:pointer" onclick="sortByColumn('docker','internal')">Internal IP</th>
+                    <th data-sort-table="docker" data-sort-key="url" data-label="Public / Traefik" style="cursor:pointer" onclick="sortByColumn('docker','url')">Public / Traefik</th>
+                    <th>Stats (CPU/RAM/Temp/Disk)</th>
+                    <th data-sort-table="docker" data-sort-key="status" data-label="Status" style="cursor:pointer" onclick="sortByColumn('docker','status')">Status</th>
+                    <th>Metadata</th>
+                    <th data-sort-table="docker" data-sort-key="lastseen" data-label="Last Seen" style="cursor:pointer" onclick="sortByColumn('docker','lastseen')">Last Seen</th>
+                </tr></thead>
                 <tbody id="tbody-docker"></tbody>
-            </table>
+            </table></div>
         </div>
 
         <!-- PURPLE RECTANGLE: WEBSITES -->
@@ -726,10 +783,17 @@
                 <div>ACTIVE WEBSITES: <span id="count-websites" style="color: #a200ff;">0</span></div>
                 <div>SYSTEM STATUS: <span class="status-dot online" style="background-color: #a200ff; box-shadow: 0 0 8px #a200ff;"></span> NOMINAL</div>
             </div>
-            <table>
-                <thead><tr><th style="color: #a200ff;">Service</th><th style="color: #a200ff;">Node / Host</th><th style="color: #a200ff;">URL</th><th style="color: #a200ff;">Status</th><th style="color: #a200ff;">Metadata</th><th style="color: #a200ff;">Last Seen</th></tr></thead>
+            <div class="table-scroll"><table>
+                <thead><tr>
+                    <th data-sort-table="websites" data-sort-key="name" data-label="Service" style="color: #a200ff;cursor:pointer" onclick="sortByColumn('websites','name')">Service</th>
+                    <th class="col-host" data-sort-table="websites" data-sort-key="host" data-label="Node / Host" style="color: #a200ff;cursor:pointer" onclick="sortByColumn('websites','host')">Node / Host</th>
+                    <th data-sort-table="websites" data-sort-key="url" data-label="URL" style="color: #a200ff;cursor:pointer" onclick="sortByColumn('websites','url')">URL</th>
+                    <th data-sort-table="websites" data-sort-key="status" data-label="Status" style="color: #a200ff;cursor:pointer" onclick="sortByColumn('websites','status')">Status</th>
+                    <th style="color: #a200ff;">Metadata</th>
+                    <th data-sort-table="websites" data-sort-key="lastseen" data-label="Last Seen" style="color: #a200ff;cursor:pointer" onclick="sortByColumn('websites','lastseen')">Last Seen</th>
+                </tr></thead>
                 <tbody id="tbody-websites"></tbody>
-            </table>
+            </table></div>
         </div>
 
         <!-- AMBER RECTANGLE: VIRTUAL MACHINES -->
@@ -740,10 +804,18 @@
                 <div>ACTIVE VMs: <span id="count-vms" style="color: #ff8800;">0</span></div>
                 <div>HYPERVISOR: <span class="status-dot online" style="background-color: #ff8800; box-shadow: 0 0 8px #ff8800;"></span> VirtualBox 7.0</div>
             </div>
-            <table>
-                <thead><tr><th style="color: #ff8800;">VM Name</th><th style="color: #ff8800;">Node / Host</th><th style="color: #ff8800;">Internal URL</th><th style="color: #ff8800;">Public URL</th><th style="color: #ff8800;">Status</th><th style="color: #ff8800;">Metadata</th><th style="color: #ff8800;">Last Seen</th></tr></thead>
+            <div class="table-scroll"><table>
+                <thead><tr>
+                    <th data-sort-table="vms" data-sort-key="name" data-label="VM Name" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','name')">VM Name</th>
+                    <th class="col-host" data-sort-table="vms" data-sort-key="host" data-label="Node / Host" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','host')">Node / Host</th>
+                    <th data-sort-table="vms" data-sort-key="internal" data-label="Internal URL" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','internal')">Internal URL</th>
+                    <th data-sort-table="vms" data-sort-key="url" data-label="Public URL" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','url')">Public URL</th>
+                    <th data-sort-table="vms" data-sort-key="status" data-label="Status" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','status')">Status</th>
+                    <th style="color: #ff8800;">Metadata</th>
+                    <th data-sort-table="vms" data-sort-key="lastseen" data-label="Last Seen" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','lastseen')">Last Seen</th>
+                </tr></thead>
                 <tbody id="tbody-vms"></tbody>
-            </table>
+            </table></div>
         </div>
 
         <!-- PINK RECTANGLE: SERVERLESS / PaaS -->
@@ -754,10 +826,17 @@
                 <div>ACTIVE SERVERLESS: <span id="count-serverless" style="color: #ff2d95;">0</span></div>
                 <div>PLATFORMS: <span class="status-dot online" style="background-color: #ff2d95; box-shadow: 0 0 8px #ff2d95;"></span> Vercel · Netlify · Fly.io · Supabase · Render · GitLab Pages</div>
             </div>
-            <table>
-                <thead><tr><th style="color: #ff2d95;">Service</th><th style="color: #ff2d95;">Platform</th><th style="color: #ff2d95;">URL</th><th style="color: #ff2d95;">Status</th><th style="color: #ff2d95;">Metadata</th><th style="color: #ff2d95;">Last Seen</th></tr></thead>
+            <div class="table-scroll"><table>
+                <thead><tr>
+                    <th data-sort-table="serverless" data-sort-key="name" data-label="Service" style="color: #ff2d95;cursor:pointer" onclick="sortByColumn('serverless','name')">Service</th>
+                    <th class="col-host" data-sort-table="serverless" data-sort-key="platform" data-label="Platform" style="color: #ff2d95;cursor:pointer" onclick="sortByColumn('serverless','platform')">Platform</th>
+                    <th data-sort-table="serverless" data-sort-key="url" data-label="URL" style="color: #ff2d95;cursor:pointer" onclick="sortByColumn('serverless','url')">URL</th>
+                    <th data-sort-table="serverless" data-sort-key="status" data-label="Status" style="color: #ff2d95;cursor:pointer" onclick="sortByColumn('serverless','status')">Status</th>
+                    <th style="color: #ff2d95;">Metadata</th>
+                    <th data-sort-table="serverless" data-sort-key="lastseen" data-label="Last Seen" style="color: #ff2d95;cursor:pointer" onclick="sortByColumn('serverless','lastseen')">Last Seen</th>
+                </tr></thead>
                 <tbody id="tbody-serverless"></tbody>
-            </table>
+            </table></div>
         </div>
 
         <!-- CLOUD PLATFORMS SECTION -->
@@ -846,6 +925,15 @@
         <iframe src="/3d-mesh" style="width: 100%; height: 100%; border: none;"></iframe>
     </div>
 
+    <!-- TRACCAR MAP VIEW -->
+    <div id="view-traccar" class="view-container" style="flex-direction:column;">
+        <div style="padding:16px 30px 8px; border-bottom:1px solid var(--accent); flex-shrink:0; display:flex; align-items:center; gap:20px;">
+            <h2 style="margin:0; color:var(--accent); text-transform:uppercase; letter-spacing:4px; font-size:16px;">Traccar — Tracked Devices</h2>
+            <span id="traccar-count" style="font-size:12px; color:#888;"></span>
+        </div>
+        <div id="traccar-map" style="flex:1; background:#111;"></div>
+    </div>
+
     <!-- YAMLS VIEW -->
     <div id="view-yamls" class="view-container" style="background:var(--grid-bg); background-image:linear-gradient(var(--neon-green-dim) 1px,transparent 1px),linear-gradient(90deg,var(--neon-green-dim) 1px,transparent 1px); background-size:30px 30px; overflow:hidden; flex-direction:column;">
         <div style="padding:16px 30px 8px; border-bottom:1px solid var(--neon-green); flex-shrink:0; display:flex; align-items:center; gap:20px;">
@@ -872,12 +960,13 @@
             document.querySelectorAll('.toggle-btn').forEach(btn => btn.classList.remove('active'));
             document.querySelectorAll('.view-container').forEach(vc => vc.classList.remove('active'));
 
-            const viewMap = { map: [1, 'view-map'], grid: [2, 'view-grid'], '3js': [3, 'view-3js'], yamls: [4, 'view-yamls'] };
+            const viewMap = { map: [1, 'view-map'], grid: [2, 'view-grid'], '3js': [3, 'view-3js'], traccar: [4, 'view-traccar'], yamls: [5, 'view-yamls'] };
             const [btnIdx, viewId] = viewMap[viewName] || [1, 'view-map'];
             document.querySelector(`#ui-toggle button:nth-child(${btnIdx})`).classList.add('active');
             document.getElementById(viewId).classList.add('active');
 
             if (viewName === 'yamls') loadYamlList();
+            if (viewName === 'traccar') initTraccarMap();
         }
 
         // Deep link: /?view=grid opens straight into the Tactical Grid
@@ -886,6 +975,103 @@
             const requested = new URLSearchParams(window.location.search).get('view');
             if (requested) document.addEventListener('DOMContentLoaded', () => switchView(requested));
         })();
+
+        // ── TRACCAR MAP ──
+        // Devices come from /api/traccar-devices (Locator's own proxy — see
+        // locator.py), which is itself fed by Lokey's existing GPS heartbeats
+        // via the traccar_feeder background thread. Lazy-inits on first visit
+        // to this tab, then just refreshes markers every 30s.
+        let traccarMap = null;
+        let traccarMarkers = {};
+        let traccarRefreshTimer = null;
+
+        function initTraccarMap() {
+            if (!traccarMap) {
+                traccarMap = L.map('traccar-map', { worldCopyJump: true }).setView([20, 0], 2);
+                L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                    attribution: '&copy; OpenStreetMap &copy; CARTO',
+                    maxZoom: 19,
+                }).addTo(traccarMap);
+            }
+            refreshTraccarDevices();
+            if (!traccarRefreshTimer) traccarRefreshTimer = setInterval(refreshTraccarDevices, 30000);
+            setTimeout(() => traccarMap.invalidateSize(), 100); // container was hidden on first load
+        }
+
+        async function refreshTraccarDevices() {
+            try {
+                const res = await fetch('/api/traccar-devices');
+                const data = await res.json();
+                const devices = data.devices || [];
+                const seen = new Set();
+
+                // Show GPS-based locations (phones with precise GPS)
+                devices.forEach((d) => {
+                    if (!d.position) return;
+                    seen.add('gps-' + d.id);
+                    const { lat, lon } = d.position;
+                    const color = d.status === 'online' ? '#ff2d95' : '#ff4444';
+                    if (traccarMarkers['gps-' + d.id]) {
+                        traccarMarkers['gps-' + d.id].setLatLng([lat, lon]);
+                    } else {
+                        traccarMarkers['gps-' + d.id] = L.circleMarker([lat, lon], {
+                            radius: 8, color, fillColor: color, fillOpacity: 0.8, weight: 2,
+                        }).addTo(traccarMap);
+                    }
+                    const speed = (d.position.speed || 0).toFixed(1);
+                    traccarMarkers['gps-' + d.id].bindPopup(
+                        `<b>${d.name}</b><br>Status: ${d.status}<br>Speed: ${speed} kn<br>Fix: ${d.position.fixTime || '?'}`
+                    );
+                });
+
+                // Show IP-geolocation based locations (laptops/desktops with soft circles)
+                try {
+                    const registryRes = await fetch('/nodes');
+                    const nodes = await registryRes.json();
+                    Object.entries(nodes).forEach(([hostKey, node]) => {
+                        const meta = node.metadata || {};
+                        if (!meta.lat || !meta.lon) return; // Skip if no geolocation
+                        if (node.status !== 'ONLINE') return; // Skip offline nodes
+
+                        seen.add('geo-' + hostKey);
+                        const nodeColor = '#00ccff'; // Cyan for geolocation
+                        const markerId = 'geo-' + hostKey;
+
+                        if (traccarMarkers[markerId]) {
+                            traccarMarkers[markerId].setLatLng([meta.lat, meta.lon]);
+                        } else {
+                            // Larger, softer circle for IP-geolocation (lower precision than GPS)
+                            traccarMarkers[markerId] = L.circleMarker([meta.lat, meta.lon], {
+                                radius: 24, color: nodeColor, fillColor: nodeColor, fillOpacity: 0.3, weight: 1,
+                            }).addTo(traccarMap);
+                        }
+
+                        const location = meta.city ? `${meta.city}, ${meta.country}` : 'Unknown location';
+                        traccarMarkers[markerId].bindPopup(
+                            `<b>${node.name || hostKey}</b><br>Type: ${node.type}<br>Location: ${location}<br>(IP-based, low precision)`
+                        );
+                    });
+                } catch (e) {
+                    console.warn('Could not fetch Locator nodes for geolocation:', e);
+                }
+
+                // Count online devices
+                const onlineCount = devices.filter(d => d.status === 'online').length +
+                    Object.values(nodes || {}).filter(n => n.status === 'ONLINE' && n.metadata?.lat && n.metadata?.lon).length;
+                document.getElementById('traccar-count').textContent =
+                    `${onlineCount} online / ${devices.length + Object.keys(nodes || {}).filter(n => n.metadata?.lat && n.metadata?.lon).length} total`;
+
+                // Drop markers for devices no longer reporting
+                Object.keys(traccarMarkers).forEach((id) => {
+                    if (!seen.has(id)) {
+                        traccarMap.removeLayer(traccarMarkers[id]);
+                        delete traccarMarkers[id];
+                    }
+                });
+            } catch (e) {
+                console.error('Failed to load Traccar devices:', e);
+            }
+        }
 
         // ── PER-SECTION MAXIMIZE/RESTORE ──
         function toggleGridMaximize(btn) {
@@ -905,42 +1091,25 @@
         }
 
         // ── YAMLS FEATURE ──────────────────────────────────────────────
-        // Two sources feed this list:
-        //  - /api/yamls: live docker-label scan on whatever host Locator itself
-        //    runs on (path-addressed, almost always empty in production/Fly).
-        //  - /api/compose: the named store lokey agents push each unit's
-        //    docker-compose.yml to on every heartbeat (name-addressed).
-        let _yamlCurrent = null;  // { key, source: 'local'|'compose' }
+        let _yamlCurrentPath = null;
 
         async function loadYamlList() {
             const list = document.getElementById('yaml-list');
             list.innerHTML = '<div style="color:var(--neon-green);padding:12px;opacity:0.6;">Loading...</div>';
             try {
-                const [localRes, composeRes] = await Promise.all([
-                    fetch('/api/yamls'),
-                    fetch('/api/compose'),
-                ]);
-                const localData = await localRes.json();
-                const composeData = await composeRes.json();
-                const composeItems = Object.keys(composeData).sort().map(name => ({
-                    label: name, key: name, source: 'compose',
-                }));
-                const localItems = (localData || []).map(item => ({
-                    label: item.label, key: item.path, source: 'local',
-                }));
-                const items = [...composeItems, ...localItems];
-
+                const res = await fetch('/api/yamls');
+                const data = await res.json();
                 list.innerHTML = '';
-                if (!items.length) {
+                if (!data.length) {
                     list.innerHTML = '<div style="color:var(--neon-green);padding:12px;opacity:0.5;">No compose files found.</div>';
                     return;
                 }
-                items.forEach(item => {
+                data.forEach(item => {
                     const div = document.createElement('div');
                     div.className = 'yaml-item';
                     div.textContent = item.label;
-                    div.title = item.key;
-                    div.onclick = () => selectYaml(item.key, item.label, item.source);
+                    div.title = item.path;
+                    div.onclick = () => selectYaml(item.path, item.label);
                     list.appendChild(div);
                 });
             } catch(e) {
@@ -948,23 +1117,20 @@
             }
         }
 
-        async function selectYaml(key, label, source) {
+        async function selectYaml(path, label) {
             document.querySelectorAll('.yaml-item').forEach(el => el.classList.remove('active'));
-            const clicked = [...document.querySelectorAll('.yaml-item')].find(el => el.title === key);
+            const clicked = [...document.querySelectorAll('.yaml-item')].find(el => el.title === path);
             if (clicked) clicked.classList.add('active');
 
-            _yamlCurrent = { key, source };
-            document.getElementById('yaml-path-display').textContent = key;
+            _yamlCurrentPath = path;
+            document.getElementById('yaml-path-display').textContent = path;
             document.getElementById('yaml-editor').value = 'Loading...';
             document.getElementById('yaml-save-btn').style.display = 'none';
 
             try {
-                const url = source === 'compose'
-                    ? '/api/compose/' + encodeURIComponent(key)
-                    : '/api/yaml?path=' + encodeURIComponent(key);
-                const res = await fetch(url);
-                const content = source === 'compose' ? await res.text() : (await res.json()).content;
-                document.getElementById('yaml-editor').value = content;
+                const res = await fetch('/api/yaml?path=' + encodeURIComponent(path));
+                const data = await res.json();
+                document.getElementById('yaml-editor').value = data.content;
                 document.getElementById('yaml-save-btn').style.display = 'inline-block';
             } catch(e) {
                 document.getElementById('yaml-editor').value = 'Error loading file.';
@@ -972,29 +1138,17 @@
         }
 
         async function saveYaml() {
-            if (!_yamlCurrent) return;
-            const { key, source } = _yamlCurrent;
+            if (!_yamlCurrentPath) return;
             const content = document.getElementById('yaml-editor').value;
             try {
-                if (source === 'compose') {
-                    const res = await fetch('/api/compose/' + encodeURIComponent(key), {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'text/yaml' },
-                        body: content,
-                    });
-                    const data = await res.json();
-                    if (data.result === 'saved') notify('Saved: ' + key, 'info');
-                    else notify('Save failed: ' + (data.error || 'unknown'), 'error');
-                } else {
-                    const res = await fetch('/api/yaml?path=' + encodeURIComponent(key), {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ content })
-                    });
-                    const data = await res.json();
-                    if (data.ok) notify('Saved: ' + key, 'info');
-                    else notify('Save failed: ' + (data.error || 'unknown'), 'error');
-                }
+                const res = await fetch('/api/yaml?path=' + encodeURIComponent(_yamlCurrentPath), {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content })
+                });
+                const data = await res.json();
+                if (data.ok) notify('Saved: ' + _yamlCurrentPath, 'info');
+                else notify('Save failed: ' + (data.error || 'unknown'), 'error');
             } catch(e) {
                 notify('Save error: ' + e.message, 'error');
             }
@@ -1024,39 +1178,25 @@
 
     <!-- DEPLOYMENT MODAL -->
     <div id="deploy-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:10000; justify-content:center; align-items:center;">
-        <div style="background:#001030; border:2px solid var(--accent); padding:30px; border-radius:10px; width:500px; box-shadow: 0 0 30px var(--accent);">
+        <div style="background:#001030; border:2px solid var(--accent); padding:30px; border-radius:10px; width:400px; box-shadow: 0 0 30px var(--accent);">
             <h2 style="color:var(--accent); margin-top:0;">🚀 Deploy Configuration</h2>
-
-            <p style="font-size:14px; color:#aaa; margin-bottom:20px;"><strong>Where should this deployment go?</strong></p>
-
-            <!-- Deployment Destination Choice -->
-            <div style="border:1px solid #333; padding:15px; border-radius:6px; margin-bottom:20px; background:rgba(0,0,0,0.3);">
-                <label style="display:block; margin-bottom:12px; cursor:pointer;">
-                    <input type="radio" name="deploy-mode" value="auto" checked onchange="toggleDeployMode()">
-                    <span style="color:var(--accent); font-weight:bold;">🤖 Smart Detection</span>
-                    <br><span style="font-size:12px; color:#888; margin-left:24px;">Locator analyzes RAM, CPU, storage on units 3, 7, 8, 9 and picks the best fit</span>
-                </label>
-                <label style="display:block; margin-top:12px; cursor:pointer; padding-top:12px; border-top:1px solid #333;">
-                    <input type="radio" name="deploy-mode" value="manual" onchange="toggleDeployMode()">
-                    <span style="color:#ff9500; font-weight:bold;">📍 Specify Destination</span>
-                    <br><span style="font-size:12px; color:#888; margin-left:24px;">Choose a specific unit</span>
-                </label>
-            </div>
-
-            <!-- Manual destination selector (hidden by default) -->
-            <div id="manual-dest" style="display:none; margin-bottom:20px;">
-                <p style="font-size:14px; color:#aaa; margin-bottom:10px;">Select target unit:</p>
-                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
-                    <label><input type="radio" name="unit" value="unit3"> Unit 3</label>
-                    <label><input type="radio" name="unit" value="unit7"> Unit 7</label>
-                    <label><input type="radio" name="unit" value="unit8"> Unit 8</label>
-                    <label><input type="radio" name="unit" value="unit9"> Unit 9</label>
-                </div>
-            </div>
-
+            
             <p style="font-size:14px; color:#aaa;">Select networks to join:</p>
             <div id="network-list" style="margin-bottom:20px; max-height:100px; overflow-y:auto; border:1px solid #333; padding:10px;">
                 <!-- Dynamically filled -->
+            </div>
+
+            <p style="font-size:14px; color:#aaa;">Target Server:</p>
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:20px;">
+                <label><input type="checkbox" name="srv" value="unit1"> Unit 1</label>
+                <label><input type="checkbox" name="srv" value="unit2"> Unit 2</label>
+                <label><input type="checkbox" name="srv" value="unit3"> Unit 3</label>
+                <label><input type="checkbox" name="srv" value="unit4"> Unit 4</label>
+                <label><input type="checkbox" name="srv" value="unit5"> Unit 5</label>
+                <label><input type="checkbox" name="srv" value="unit6"> Unit 6</label>
+                <label style="grid-column: span 2; color:var(--accent); font-weight:bold;">
+                    <input type="checkbox" name="srv" value="efficient" checked> Most Efficient Option
+                </label>
             </div>
 
             <div style="display:flex; justify-content:space-between;">
@@ -1109,38 +1249,18 @@
             document.getElementById('deploy-modal').style.display = 'none';
         }
 
-        function toggleDeployMode() {
-            const mode = document.querySelector('input[name="deploy-mode"]:checked').value;
-            const manualDest = document.getElementById('manual-dest');
-            manualDest.style.display = mode === 'manual' ? 'block' : 'none';
-        }
-
         function confirmDeployment() {
             const networks = Array.from(document.querySelectorAll('.net-check:checked')).map(cb => cb.value);
-            const deployMode = document.querySelector('input[name="deploy-mode"]:checked').value;
-            let servers = [];
-
-            if (deployMode === 'manual') {
-                const selectedUnit = document.querySelector('input[name="unit"]:checked');
-                if (!selectedUnit) {
-                    notify("❌ Please select a target unit");
-                    return;
-                }
-                servers = [selectedUnit.value];
-            } else {
-                // Auto mode: use smart detection (empty array signals auto-selection)
-                servers = ['auto'];
-            }
-
+            const servers = Array.from(document.querySelectorAll('input[name="srv"]:checked')).map(cb => cb.value);
+            
             notify("Deploying services... please wait.");
-
+            
             fetch('/trigger-deploy-final', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
                     folder_path: selectedFolderPath,
                     networks: networks,
-                    deployment_mode: deployMode,
                     servers: servers
                 })
             })
@@ -1183,6 +1303,34 @@
 
         let lastRegistryData = null;
 
+        // ── PER-NODE COLOR ──
+        // Deterministic color per node/host name, so the same node reads as
+        // the same color everywhere it's referenced (device card, docker
+        // host badge, website host badge, etc.) — makes it possible to spot
+        // which node a container/service belongs to at a glance.
+        // MurmurHash3 fmix32 finalizer — gives the hash below a proper avalanche
+        // effect, so ids differing by one char (unit5 vs unit6 vs unit7...) land
+        // on well-spread hues instead of clustering a few degrees apart.
+        function fmix32(h) {
+            h ^= h >>> 16;
+            h = Math.imul(h, 0x85ebca6b);
+            h ^= h >>> 13;
+            h = Math.imul(h, 0xc2b2ae35);
+            h ^= h >>> 16;
+            return h >>> 0;
+        }
+        const OFFLINE_COLOR = '#666';
+        function nodeColor(id) {
+            if (!id) return '#00f0ff';
+            let hash = 0;
+            for (let i = 0; i < id.length; i++) {
+                hash = id.charCodeAt(i) + ((hash << 5) - hash);
+                hash |= 0;
+            }
+            const hue = fmix32(hash) % 360;
+            return `hsl(${hue}, 85%, 60%)`;
+        }
+
         // ── LIVE NODE METRIC CARDS ──
         function pctColor(v) {
             if (v == null) return '#6699aa';
@@ -1192,27 +1340,150 @@
             return '#00ff00';
         }
 
+        // ── COLUMN / DROPDOWN SORT (shared by node cards + every grid table) ──
+        // State persists across the 10s poll refresh (loadRegistryData rebuilds
+        // every table from scratch each cycle) because sorting happens on the
+        // underlying data array before render, not as a one-off DOM reorder.
+        let columnSort = {}; // { devices: {key, dir}, docker: {...}, websites: {...}, vms: {...}, serverless: {...} }
+
+        function availMem(n) {
+            if (n.mem_total_gb != null && n.mem_used_gb != null) return n.mem_total_gb - n.mem_used_gb;
+            if (n.mem_percent != null) return 100 - n.mem_percent;
+            return -Infinity;
+        }
+        function availDisk(n) {
+            if (n.disk_total_gb != null && n.disk_used_gb != null) return n.disk_total_gb - n.disk_used_gb;
+            if (n.disk_percent != null) return 100 - n.disk_percent;
+            return -Infinity;
+        }
+        function statusRank(item) {
+            if (item.status !== 'ONLINE') return 2;
+            const ts = item.last_seen || item.last_heartbeat;
+            const stale = !ts || (Date.now() - new Date(ts)) > 300000;
+            return stale ? 1 : 0;
+        }
+
+        const COLUMN_GETTERS = {
+            devices: {
+                name:     n => (n.name || n.id || '').toLowerCase(),
+                ip:       n => n.ip || n.tailscale_ip || '',
+                type:     n => (n.type || '').toLowerCase(),
+                status:   n => statusRank(n),
+                lastseen: n => n.last_seen ? new Date(n.last_seen).getTime() : -Infinity,
+                mem:      n => availMem(n),
+                disk:     n => availDisk(n),
+            },
+            docker: {
+                name:     s => (s.name || '').toLowerCase(),
+                host:     s => (s.hosts || [s.host || '']).join(',').toLowerCase(),
+                port:     s => Number(s.port) || -Infinity,
+                internal: s => s.internal || '',
+                url:      s => s.url || '',
+                status:   s => statusRank(s),
+                lastseen: s => s.last_heartbeat ? new Date(s.last_heartbeat).getTime() : -Infinity,
+            },
+            websites: {
+                name:     s => (s.name || '').toLowerCase(),
+                host:     s => (s.hosts || [s.host || '']).join(',').toLowerCase(),
+                url:      s => s.url || '',
+                status:   s => statusRank(s),
+                lastseen: s => s.last_heartbeat ? new Date(s.last_heartbeat).getTime() : -Infinity,
+            },
+            vms: {
+                name:     s => (s.name || '').toLowerCase(),
+                host:     s => (s.hosts || [s.host || '']).join(',').toLowerCase(),
+                internal: s => s.internal || '',
+                url:      s => s.url || '',
+                status:   s => statusRank(s),
+                lastseen: s => s.last_heartbeat ? new Date(s.last_heartbeat).getTime() : -Infinity,
+            },
+            serverless: {
+                name:     s => (s.name || '').toLowerCase(),
+                platform: s => ((s.metadata && s.metadata.platform) || s.host || '').toLowerCase(),
+                url:      s => s.url || '',
+                status:   s => statusRank(s),
+                lastseen: s => s.last_heartbeat ? new Date(s.last_heartbeat).getTime() : -Infinity,
+            },
+        };
+
+        function applyColumnSort(table, items) {
+            const st = columnSort[table];
+            const getter = st && COLUMN_GETTERS[table] && COLUMN_GETTERS[table][st.key];
+            if (!getter) return items;
+            const arr = items.slice();
+            arr.sort((a, b) => {
+                const av = getter(a), bv = getter(b);
+                const cmp = (typeof av === 'number' && typeof bv === 'number')
+                    ? av - bv : String(av).localeCompare(String(bv));
+                return st.dir === 'desc' ? -cmp : cmp;
+            });
+            return arr;
+        }
+
+        function updateSortIndicators() {
+            document.querySelectorAll('th[data-sort-table]').forEach(th => {
+                const st = columnSort[th.dataset.sortTable];
+                const active = st && st.key === th.dataset.sortKey;
+                th.textContent = th.dataset.label + (active ? (st.dir === 'asc' ? ' ▲' : ' ▼') : '');
+            });
+        }
+
+        function sortByColumn(table, key) {
+            const st = columnSort[table] || {};
+            if (st.key === key) st.dir = st.dir === 'asc' ? 'desc' : 'asc';
+            else { st.key = key; st.dir = 'asc'; }
+            columnSort[table] = st;
+            const sel = document.getElementById('grid-node-sort');
+            if (table === 'devices' && sel) sel.value = key;
+            updateSortIndicators();
+            if (!lastRegistryData) return;
+            renderGrid(lastRegistryData);
+            if (table === 'devices') renderNodeCards(lastRegistryData);
+        }
+
+        function dropdownSort(key) {
+            if (!key) delete columnSort.devices;
+            else columnSort.devices = { key, dir: 'asc' };
+            updateSortIndicators();
+            if (!lastRegistryData) return;
+            renderGrid(lastRegistryData);
+            renderNodeCards(lastRegistryData);
+        }
+
         function renderNodeCards(registryData) {
             const el = document.getElementById('node-cards');
             if (!el) return;
-            const nodes = Object.entries(registryData.nodes || {});
-            el.innerHTML = nodes.map(([id, n]) => {
+            const nodes = applyColumnSort('devices', Object.entries(registryData.nodes || {}).map(([id, n]) => ({ ...n, id })));
+            el.innerHTML = nodes.map(n => {
+                const id = n.id;
+                const meta = n.metadata || {};
+                // lokey-native puts cpu/mem/disk at the top level of the node record;
+                // lokey-android only nests them under metadata (see the device
+                // close-up modal, which already reads from metadata) — fall back
+                // so Android nodes show MEM/DISK on the Tactical Grid cards too.
+                const pick = (k) => n[k] != null ? n[k] : meta[k];
+                const cpu = pick('cpu_percent');
+                const mem = pick('mem_percent');
+                const diskPct = pick('disk_percent');
+                const diskUsed = pick('disk_used_gb');
+                const diskTotal = pick('disk_total_gb');
                 const stale = !n.last_seen || (Date.now() - new Date(n.last_seen)) > 300000;
-                const oom = (n.mem_percent || 0) >= 90;
+                const oom = (mem || 0) >= 90;
                 const badge = n.status !== 'ONLINE' ? 'offline' : (stale ? 'stale' : 'online');
                 const ip = n.tailscale_ip || n.ip || 'unknown';
-                const disk = (n.disk_used_gb != null && n.disk_total_gb != null)
-                    ? ` · ${n.disk_used_gb}/${n.disk_total_gb} GB` : '';
+                const disk = (diskUsed != null && diskTotal != null)
+                    ? ` · ${diskUsed}/${diskTotal} GB` : '';
                 const bar = (v) => `<div class="mc-bar"><div class="mc-fill" style="width:${Math.min(v || 0, 100)}%;background:${pctColor(v)}"></div></div>`;
                 const row = (label, v) => `<div class="mc-row"><span class="mc-label">${label}</span><span style="color:${pctColor(v)}">${v != null ? v.toFixed(1) + '%' : '—'}</span></div>`;
-                return `<div class="metric-card${oom ? ' oom' : ''}">
+                const nc = badge === 'offline' ? OFFLINE_COLOR : nodeColor(id);
+                return `<div class="metric-card${oom ? ' oom' : ''}" style="${oom ? '' : `border-color:${nc};box-shadow:0 0 12px ${nc}40`}">
                     <button type="button" class="mc-maximize" title="Maximize" onclick="maximizeNodeCard('${id}')">⛶</button>
-                    <div class="mc-name">${id}</div>
+                    <div class="mc-name" style="color:${nc}">${id}</div>
                     <div class="mc-ip">${ip}${disk}</div>
                     <span class="mc-badge ${badge}">${oom ? 'OOM' : badge.toUpperCase()}</span>
-                    ${row('CPU', n.cpu_percent)}${bar(n.cpu_percent)}
-                    ${row('MEM', n.mem_percent)}${bar(n.mem_percent)}
-                    ${row('DISK', n.disk_percent)}${bar(n.disk_percent)}
+                    ${row('CPU', cpu)}${bar(cpu)}
+                    ${row('MEM', mem)}${bar(mem)}
+                    ${row('DISK', diskPct)}${bar(diskPct)}
                 </div>`;
             }).join('');
         }
@@ -1250,16 +1521,50 @@
                 units.map(u => `<option value="${u}"${u === current ? ' selected' : ''}>${u.toUpperCase()}</option>`).join('');
         }
 
+        // ── LIVE STATUS INDICATOR ──
+        // The page polls every 10s (see the bottom of this script), but nothing
+        // told you if that polling silently stopped working — you'd just be
+        // staring at stale data. Track the last successful poll + consecutive
+        // failures, and surface it loudly (red banner) once it's actually stale.
+        let lastSuccessfulUpdate = null;
+        let liveUpdateFailures = 0;
+
+        function updateLiveStatusIndicator() {
+            const dot = document.getElementById('live-status-dot');
+            const text = document.getElementById('live-status-text');
+            if (!dot || !text) return;
+            if (!lastSuccessfulUpdate) {
+                dot.style.background = '#ffe600'; dot.style.boxShadow = '0 0 6px #ffe600';
+                text.textContent = 'Connecting…';
+                return;
+            }
+            const elapsedS = Math.floor((Date.now() - lastSuccessfulUpdate) / 1000);
+            // 3 missed 10s polls (or 2 outright fetch failures), whichever comes first.
+            const lost = liveUpdateFailures >= 2 || elapsedS > 30;
+            if (lost) {
+                dot.style.background = 'var(--danger)'; dot.style.boxShadow = '0 0 6px var(--danger)';
+                text.textContent = `⚠ Connection lost — last update ${elapsedS}s ago`;
+            } else {
+                dot.style.background = 'var(--neon-green)'; dot.style.boxShadow = '0 0 6px var(--neon-green)';
+                text.textContent = elapsedS < 2 ? 'Updated just now' : `Updated ${elapsedS}s ago`;
+            }
+        }
+
         function loadRegistryData() {
             fetch('/api/registry')
                 .then(response => response.json())
                 .then(data => {
                     lastRegistryData = data;
+                    lastSuccessfulUpdate = Date.now();
+                    liveUpdateFailures = 0;
                     renderGrid(data);
                     renderMap(data);
                     renderNodeCards(data);
+                    updateLiveStatusIndicator();
                 })
                 .catch(error => {
+                    liveUpdateFailures++;
+                    updateLiveStatusIndicator();
                     console.error("Failed to load registry data:", error);
                     if (window.__reportClientError) {
                         window.__reportClientError(
@@ -1284,38 +1589,19 @@
             tbodyServerless.innerHTML = '';
 
             const services = Object.values(registryData.services || {});
+            const hostColor = (h) => {
+                const st = registryData.nodes && registryData.nodes[h] && registryData.nodes[h].status;
+                return (st && st !== 'ONLINE') ? OFFLINE_COLOR : nodeColor(h);
+            };
             const allNodes = Object.entries(registryData.nodes || {}).map(([id, data]) => ({...data, id, category: 'devices'}));
 
             updateUnitFilterOptions(registryData);
-            const nodes = allNodes.filter(n => nodeMatchesFilter(n.id, n));
+            const nodes = applyColumnSort('devices', allNodes.filter(n => nodeMatchesFilter(n.id, n)));
 
-            let dockerList = services.filter(s => s.category === 'docker containers');
-            const websiteList = services.filter(s => s.category === 'websites');
-            const vmList = services.filter(s => s.category === 'virtual machines');
-            const serverlessList = services.filter(s => s.category === 'serverless');
-
-            // Apply Docker sorting based on dropdown
-            const dockerSortValue = document.getElementById('docker-sort')?.value || 'name';
-            dockerList = dockerList.sort((a, b) => {
-                switch(dockerSortValue) {
-                    case 'ram':
-                        const ramA = a.metadata?.mem_usage_mb || 0;
-                        const ramB = b.metadata?.mem_usage_mb || 0;
-                        return ramB - ramA;
-                    case 'storage':
-                        const storageA = a.metadata?.disk_percent || 0;
-                        const storageB = b.metadata?.disk_percent || 0;
-                        return storageB - storageA;
-                    case 'cpu':
-                        const cpuA = a.metadata?.cpu_usage_percent || 0;
-                        const cpuB = b.metadata?.cpu_usage_percent || 0;
-                        return cpuB - cpuA;
-                    case 'status':
-                        return (a.status === 'ONLINE' ? 0 : 1) - (b.status === 'ONLINE' ? 0 : 1);
-                    default:
-                        return (a.name || '').localeCompare(b.name || '');
-                }
-            });
+            const dockerList = applyColumnSort('docker', services.filter(s => s.category === 'docker containers'));
+            const websiteList = applyColumnSort('websites', services.filter(s => s.category === 'websites'));
+            const vmList = applyColumnSort('vms', services.filter(s => s.category === 'virtual machines'));
+            const serverlessList = applyColumnSort('serverless', services.filter(s => s.category === 'serverless'));
 
             document.getElementById('count-devices').innerText = allNodes.length;
             document.getElementById('count-docker').innerText = dockerList.length;
@@ -1376,7 +1662,11 @@
                 tr.title = 'Click for full device data sheet';
                 const isStale = item.status === 'ONLINE' && (!item.last_seen || (Date.now() - new Date(item.last_seen)) > 300000);
                 const displayStatus = isStale ? 'STALE' : item.status;
-                const dotClass = item.status !== 'ONLINE' ? 'offline' : (isStale ? 'stale' : 'online');
+                const battery = item.metadata?.battery_percent;
+                const batteryCritical = item.status === 'ONLINE' && battery != null && battery <= 30;
+                const dotClass = item.status !== 'ONLINE' ? 'offline'
+                                : batteryCritical ? 'battery-critical'
+                                : (isStale ? 'stale' : 'online');
                 tr.innerHTML = `
                     <td style="font-weight:bold">${item.name || item.id}</td>
                     <td>${item.ip || item.tailscale_ip || 'unknown'}</td>
@@ -1398,15 +1688,13 @@
                 tr.className = 'clickable-row';
                 tr.title = 'Click for full data sheet';
                 const hostList = item.hosts || [item.host || 'unknown'];
-                const hostBadges = hostList.map(h => `<span class="node-badge">${h}</span>`).join('');
+                const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:${hostColor(h)};color:${hostColor(h)}">${h}</span>`).join('');
                 const isOnline = item.status === 'ONLINE';
                 const safeName = (item.name || '').replace(/'/g, "\\'");
-                const isEssential = item.metadata && item.metadata.deployment_type === 'essential';
-                const essentialBadge = isEssential ? '<span class="essential-badge">ESSENTIAL</span>' : '';
 
                 tr.innerHTML = `
-                    <td style="font-weight:bold">${item.name}${essentialBadge}</td>
-                    <td>${hostBadges}</td>
+                    <td style="font-weight:bold">${item.name}</td>
+                    <td class="col-host">${hostBadges}</td>
                     <td>${item.port || '-'}</td>
                     <td>${item.internal || '-'}</td>
                     <td>${item.url ? `<a href="${item.url}" target="_blank" onclick="event.stopPropagation()">${item.url}</a>` : '-'}</td>
@@ -1437,13 +1725,11 @@
                 tr.className = 'clickable-row';
                 tr.title = 'Click for full data sheet';
                 const hostList = item.hosts || [item.host || 'unknown'];
-                const hostBadges = hostList.map(h => `<span class="node-badge">${h}</span>`).join('');
-                const isEssential = item.metadata && item.metadata.deployment_type === 'essential';
-                const essentialBadge = isEssential ? '<span class="essential-badge">ESSENTIAL</span>' : '';
+                const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:${hostColor(h)};color:${hostColor(h)}">${h}</span>`).join('');
 
                 tr.innerHTML = `
-                    <td style="font-weight:bold">${item.name}${essentialBadge}</td>
-                    <td>${hostBadges}</td>
+                    <td style="font-weight:bold">${item.name}</td>
+                    <td class="col-host">${hostBadges}</td>
                     <td><a href="${item.url}" target="_blank" onclick="event.stopPropagation()">${item.url}</a></td>
                     <td>
                         <span class="status-dot ${item.status === 'ONLINE' ? 'online' : 'offline'}"></span>
@@ -1462,14 +1748,12 @@
                 tr.className = 'clickable-row';
                 tr.title = 'Click for full data sheet';
                 const hostList = item.hosts || [item.host || 'unknown'];
-                const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:#ff8800;color:#ff8800">${h}</span>`).join('');
+                const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:${hostColor(h)};color:${hostColor(h)}">${h}</span>`).join('');
                 const isOnline = item.status === 'ONLINE';
-                const isEssential = item.metadata && item.metadata.deployment_type === 'essential';
-                const essentialBadge = isEssential ? '<span class="essential-badge">ESSENTIAL</span>' : '';
 
                 tr.innerHTML = `
-                    <td style="font-weight:bold;color:#ff8800">${item.name}${essentialBadge}</td>
-                    <td>${hostBadges}</td>
+                    <td style="font-weight:bold;color:#ff8800">${item.name}</td>
+                    <td class="col-host">${hostBadges}</td>
                     <td>${item.internal ? `<a href="${item.internal}" target="_blank" style="color:#ff8800" onclick="event.stopPropagation()">${item.internal}</a>` : '-'}</td>
                     <td>${item.url ? `<a href="${item.url}" target="_blank" style="color:#ff8800" onclick="event.stopPropagation()">${item.url}</a>` : '-'}</td>
                     <td>
@@ -1490,11 +1774,9 @@
                 tr.title = 'Click for full data sheet';
                 const platform = (item.metadata && item.metadata.platform) || item.host || '-';
                 const isOnline = item.status === 'ONLINE';
-                const isEssential = item.metadata && item.metadata.deployment_type === 'essential';
-                const essentialBadge = isEssential ? '<span class="essential-badge">ESSENTIAL</span>' : '';
 
                 tr.innerHTML = `
-                    <td style="font-weight:bold;color:#ff2d95">${item.name}${essentialBadge}</td>
+                    <td style="font-weight:bold;color:#ff2d95">${item.name}</td>
                     <td><span class="node-badge" style="border-color:#ff2d95;color:#ff2d95">${platform}</span></td>
                     <td>${item.url ? `<a href="${item.url}" target="_blank" style="color:#ff2d95" onclick="event.stopPropagation()">${item.url}</a>` : '-'}</td>
                     <td>
@@ -1722,6 +2004,62 @@
         // Auto-refresh data every 10 seconds
         loadRegistryData();
         setInterval(loadRegistryData, 10000);
+        // Ticks the "Updated Xs ago" text every second, independent of the poll itself.
+        setInterval(updateLiveStatusIndicator, 1000);
+
+        // --- Event log (tactical grid EVENT LOG box) ---
+        // Runs once at page load, not inside renderGrid()/loadRegistryData() — this
+        // used to be spliced into the 10s render loop and open a fresh (leaked)
+        // connection on every tick; see KNOWN_ISSUES.md.
+        function renderEvent(event) {
+            const eventBox = document.querySelector('.event-box');
+            if (!eventBox) return;
+
+            const entry = document.createElement('div');
+            entry.style.borderBottom = '1px solid rgba(0, 255, 0, 0.15)';
+            entry.style.padding = '6px 0';
+            entry.style.fontSize = '12px';
+            entry.style.lineHeight = '1.4';
+
+            const dateObj = event.timestamp ? new Date(event.timestamp) : new Date();
+            const formattedDate = dateObj.toLocaleDateString();
+            const formattedTime = dateObj.toLocaleTimeString();
+
+            let details = `<span style="color: var(--neon-green);">[${formattedDate} ${formattedTime}]</span> `;
+
+            if (event.type === 'migration') {
+                details += `<strong style="color: var(--accent);">[MIGRATION]</strong> Container <code>${event.from_container}</code> shifted to <code>${event.to_container}</code> on <strong>${event.unit}</strong>`;
+            } else if (event.type === 'dns') {
+                details += `<strong style="color: #00f0ff;">[DNS]</strong> A Record <code>${event.a_record}</code> point -> PDNS <code>${event.pdns_server}</code>`;
+            } else {
+                details += `<span>${event.message || JSON.stringify(event)}</span>`;
+            }
+
+            entry.innerHTML = details;
+            eventBox.appendChild(entry);
+            eventBox.scrollTop = eventBox.scrollHeight;
+        }
+
+        fetch('/api/events')
+            .then(res => res.json())
+            .then(events => {
+                if (Array.isArray(events)) events.forEach(renderEvent);
+            })
+            .catch(err => console.error('Failed to load initial event log:', err));
+
+        // Server-Sent Events, not WebSocket — this app runs under gunicorn's
+        // gthread worker class, which doesn't support WS upgrades. SSE works
+        // over plain HTTP and reconnects automatically on drop.
+        if (window.EventSource) {
+            const eventStream = new EventSource('/api/events/stream');
+            eventStream.onmessage = function(e) {
+                try {
+                    renderEvent(JSON.parse(e.data));
+                } catch (err) {
+                    renderEvent({ message: e.data });
+                }
+            };
+        }
 
         // ── STATIC "CLOUD & NATIVE PLATFORMS" TABLE — also clickable, same data-sheet modal ──
         // These rows are hand-authored reference entries, not live registry data, so their
@@ -1823,38 +2161,46 @@
                 }
             });
 
+              if (item.containers && item.containers.length > 0) {
+ const sep = document.createElement('tr');
+ sep.innerHTML = '<td colspan="2" style="padding-top: 14px; color: var(--neon-green);"><strong>Containers</strong></td>';
+ rows.appendChild(sep);
+
+ const containerRow = document.createElement('tr');
+ const containerCell = document.createElement('td');
+ containerCell.colSpan = 2;
+ 
+ const containerContainer = document.createElement('div');
+ containerContainer.style.display = 'flex';
+ containerContainer.style.flexWrap = 'wrap';
+ containerContainer.style.gap = '8px';
+ 
+ item.containers.forEach(container => {
+ const box = document.createElement('div');
+ box.style.border = '1px solid var(--neon-green)';
+ box.style.borderRadius = '4px';
+ box.style.padding = '6px';
+ box.style.backgroundColor = 'rgba(0, 255, 0, 0.1)';
+ box.style.fontSize = '12px';
+ box.innerText = container.name || container.service || 'Unknown';
+ containerContainer.appendChild(box);
+ });
+ 
+ containerCell.appendChild(containerContainer);
+ containerRow.appendChild(containerCell);
+ rows.appendChild(containerRow);
+ }
+
+ document.getElementById('device-modal').style.display = 'flex';
+}
+
+
             // Every remaining top-level field not already covered above
             Object.keys(item).forEach(key => {
                 if (!DEVICE_FIELD_ORDER.includes(key) && key !== 'metadata') {
                     addRow(DEVICE_FIELD_LABELS[key] || key, item[key]);
                 }
             });
-
-            // Running Services/Containers section
-            if (lastRegistryData && lastRegistryData.services) {
-                const runningServices = Object.entries(lastRegistryData.services)
-                    .filter(([id, svc]) => {
-                        const hosts = svc.hosts || [svc.host];
-                        return hosts.includes(item.name || item.id);
-                    })
-                    .map(([id, svc]) => ({
-                        name: svc.name,
-                        type: svc.type || 'container',
-                        status: svc.status,
-                        category: svc.category
-                    }))
-                    .sort((a, b) => a.name.localeCompare(b.name));
-
-                if (runningServices.length > 0) {
-                    const sep = document.createElement('tr');
-                    sep.innerHTML = `<td colspan="2" style="padding-top:14px;color:#ff9500;text-transform:uppercase;letter-spacing:2px;font-size:11px;">🚀 Running Services (${runningServices.length})</td>`;
-                    rows.appendChild(sep);
-                    runningServices.forEach(svc => {
-                        const statusDot = svc.status === 'ONLINE' ? '🟢' : '🔴';
-                        addRow(`${statusDot} ${svc.name}`, `[${svc.type}] ${svc.category || '-'}`);
-                    });
-                }
-            }
 
             // Full metadata dump — every key, not the filtered badge subset
             if (item.metadata && Object.keys(item.metadata).length) {

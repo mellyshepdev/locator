@@ -1,4 +1,5 @@
 flask
+gunicorn
 requests
 docker
 GitPython
@@ -9,5 +10,6 @@ pandas
 openpyxl
 qrcode
 Pillow
+psycopg2-binary
 
 watchdog

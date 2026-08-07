@@ -232,9 +232,9 @@ function updateInstallCommands() {
     document.getElementById('cmd-windows').textContent =
         'powershell -ExecutionPolicy Bypass -File .\\install-windows.ps1 -LocatorUrl "' + LOCATOR_ORIGIN + '" -UnitName "' + name + '"';
     document.getElementById('cmd-mac').textContent =
-        'git clone https://gitlab.com/gbonds1/lokey.git\ncd lokey\nLOCATOR_URL=' + LOCATOR_ORIGIN + ' ./install-unit3-mac.sh';
+        'git clone https://gitlab.com/gbonds1/lokey.git\ncd lokey\nUNIT_NAME=' + name + ' LOCATOR_URL=' + LOCATOR_ORIGIN + ' ./install-unit3-mac.sh';
     document.getElementById('cmd-linux').textContent =
-        'git clone https://gitlab.com/gbonds1/lokey.git\ncd lokey\nLOCATOR_URL=' + LOCATOR_ORIGIN + ' ./install-unit6-linux.sh';
+        'git clone https://gitlab.com/gbonds1/lokey.git\ncd lokey\nUNIT_NAME=' + name + ' LOCATOR_URL=' + LOCATOR_ORIGIN + ' ./install-unit6-linux.sh';
 }
 
 var platform = detectPlatform();

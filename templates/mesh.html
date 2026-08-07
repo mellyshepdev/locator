@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>3D Network Mesh — Dynamic Registry View</title>
 <!-- Client-side error reporter (added 2026-07-27) — see templates/dashboard.html
-     for the full rationale. Placed before the Keycloak/THREE.js scripts so it
+     for the full rationale. Placed before the Keycloak/Babylon.js scripts so it
      catches failures in either of those too (e.g. an unreachable auth domain
      throwing "Keycloak is not defined"). -->
 <script>
@@ -67,26 +67,26 @@
       clientId: 'locator'
     });
     kc.init({
-      onLoad: 'check-sso',
+      onLoad: 'login-required',
       pkceMethod: 'S256',
-      silentCheckSsoRedirectUri: window.location.origin + '/silent-check-sso.html'
+      checkLoginIframe: false
     })
       .then(function(auth) {
         if (auth) {
           document.documentElement.classList.add('auth-ok');
         } else {
-          kc.login({ redirectUri: window.location.href });
+          authFailed('Keycloak login-required resolved without a session');
         }
       })
       .catch(function(err) {
-        authFailed('Keycloak init/check-sso failed: ' + (err && err.message ? err.message : JSON.stringify(err)), err);
+        authFailed('Keycloak init failed: ' + (err && err.message ? err.message : JSON.stringify(err)), err);
       });
   })();
 </script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; }
-canvas { display: block; }
+canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 
 #ui {
   position: absolute; top: 20px; left: 20px;
@@ -148,6 +148,7 @@ canvas { display: block; }
   <h1>⬡ DYNAMIC NETWORK MESH</h1>
   <div class="stat">Nodes: <span id="nodeCount">0</span> online</div>
   <div class="stat">Services: <span id="serviceCount">0</span> running</div>
+  <div class="stat">Traccar Devices: <span id="deviceCount">0</span> tracked</div>
   <div class="stat">Active Connections: <span id="connCount">0</span></div>
   <div class="stat" id="fps">FPS: --</div>
 </div>
@@ -156,6 +157,7 @@ canvas { display: block; }
   <div><span class="dot" style="background:#0ff;box-shadow:0 0 6px #0ff"></span> Mesh Node (Unit)</div>
   <div><span class="dot" style="background:#0f0;box-shadow:0 0 6px #0f0"></span> Docker Container</div>
   <div><span class="dot" style="background:#ffff00;box-shadow:0 0 6px #ffff00"></span> Website</div>
+  <div><span class="dot" style="background:#ff2d95;box-shadow:0 0 6px #ff2d95"></span> Traccar Device</div>
   <div><span class="dot" style="background:#f44;box-shadow:0 0 6px #f44"></span> Offline</div>
 </div>
 
@@ -173,8 +175,8 @@ canvas { display: block; }
 
 <div id="focus-hint">TIP: Click any node to lock focus</div>
 
-<script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
-<script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<canvas id="renderCanvas"></canvas>
+<script src="https://cdn.babylonjs.com/babylon.js"></script>
 <script>
 // ── Utils ──
 function getDeterministicOffset(id, salt) {
@@ -187,77 +189,106 @@ function getDeterministicOffset(id, salt) {
     return (Math.abs(hash) % 1000) / 1000;
 }
 
-// ── Scene Setup ──
-const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0x000511, 0.006);
+// ── Engine / Scene Setup ──
+const canvas = document.getElementById('renderCanvas');
+const engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true, alpha: true }, true);
+const scene = new BABYLON.Scene(engine);
+scene.clearColor = new BABYLON.Color4(0, 0, 0, 0);
+scene.fogMode = BABYLON.Scene.FOGMODE_EXP2;
+scene.fogColor = BABYLON.Color3.FromHexString('#000511');
+scene.fogDensity = 0.006;
 
-const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 2000);
-camera.position.set(0, 100, 200);
-
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-renderer.setSize(innerWidth, innerHeight);
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-document.body.appendChild(renderer.domElement);
-
-const controls = new THREE.OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.05;
-controls.autoRotate = true;
-controls.autoRotateSpeed = 0.4;
+const camera = new BABYLON.ArcRotateCamera('camera', -Math.PI / 2, Math.PI / 2.6, 220, BABYLON.Vector3.Zero(), scene);
+camera.minZ = 0.1;
+camera.maxZ = 3000;
+camera.lowerRadiusLimit = 20;
+camera.upperRadiusLimit = 900;
+camera.wheelDeltaPercentage = 0.02;
+camera.panningSensibility = 0;
+camera.attachControl(canvas, true);
+camera.useAutoRotationBehavior = true;
+camera.autoRotationBehavior.idleRotationSpeed = 0.25;
 
 // ── Lighting ──
-scene.add(new THREE.AmbientLight(0x112244, 0.7));
-const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
-dirLight.position.set(50, 100, 50);
-scene.add(dirLight);
+const ambient = new BABYLON.HemisphericLight('ambient', new BABYLON.Vector3(0, 1, 0), scene);
+ambient.diffuse = BABYLON.Color3.FromHexString('#5577cc');
+ambient.groundColor = BABYLON.Color3.FromHexString('#112244');
+ambient.intensity = 0.7;
+
+const dirLight = new BABYLON.DirectionalLight('dir', new BABYLON.Vector3(-0.4, -1, -0.4), scene);
+dirLight.intensity = 0.5;
+
+// Emissive glow for online nodes/services/devices — replaces the old
+// manually-built translucent "glow sphere" mesh from the Three.js version.
+const glowLayer = new BABYLON.GlowLayer('glow', scene);
+glowLayer.intensity = 0.6;
 
 // ── Starfield ──
-const starGeo = new THREE.BufferGeometry();
-const starVerts = [];
-for (let i = 0; i < 3000; i++) {
-  starVerts.push((Math.random() - 0.5) * 1000, (Math.random() - 0.5) * 1000, (Math.random() - 0.5) * 1000);
-}
-starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starVerts, 3));
-const starMat = new THREE.PointsMaterial({ color: 0x88aaff, size: 0.4, transparent: true, opacity: 0.6 });
-scene.add(new THREE.Points(starGeo, starMat));
+const starPcs = new BABYLON.PointsCloudSystem('stars', 1.4, scene);
+starPcs.addPoints(3000, (particle) => {
+    particle.position = new BABYLON.Vector3(
+        (Math.random() - 0.5) * 1000,
+        (Math.random() - 0.5) * 1000,
+        (Math.random() - 0.5) * 1000
+    );
+    particle.color = new BABYLON.Color4(0.53, 0.67, 1, 0.6);
+});
+starPcs.buildMeshAsync().then((mesh) => {
+    mesh.material.disableLighting = true;
+    mesh.material.emissiveColor = BABYLON.Color3.White();
+    glowLayer.addExcludedMesh(mesh); // don't bloom the whole background
+});
 
-// ── Objects & Groups ──
-const nodeGroup = new THREE.Group();
-const serviceGroup = new THREE.Group();
-const connectionGroup = new THREE.Group();
-const particleGroup = new THREE.Group();
-scene.add(nodeGroup, serviceGroup, connectionGroup, particleGroup);
+// ── Groups (TransformNodes) ──
+// Nodes/services/devices are each their own free-floating TransformNode
+// (tracked in the nodes/services/devices collections below) rather than
+// parented under a shared group, so only links/particles need a parent here.
+const connectionGroup = new BABYLON.TransformNode('connectionGroup', scene);
+const particleGroup = new BABYLON.TransformNode('particleGroup', scene);
 
-let nodes = {}; 
+let nodes = {};
 let services = [];
+let devices = [];
 let connections = [];
 let particles = [];
 let lastDataJson = "";
+let lastDevicesJson = "";
 
 // ── Data Fetching ──
 async function refreshData(force = false) {
   try {
-    const response = await fetch('/api/registry');
-    const data = await response.json();
+    const [registryRes, devicesRes] = await Promise.all([
+      fetch('/api/registry'),
+      fetch('/api/traccar-devices').catch(() => null),
+    ]);
+    const data = await registryRes.json();
+    const deviceData = devicesRes ? await devicesRes.json() : { devices: [] };
+
     const currentJson = JSON.stringify(data);
-    
-    if (!force && currentJson === lastDataJson) return;
+    const currentDevicesJson = JSON.stringify(deviceData);
+    if (!force && currentJson === lastDataJson && currentDevicesJson === lastDevicesJson) return;
     lastDataJson = currentJson;
+    lastDevicesJson = currentDevicesJson;
 
     clearScene();
     buildFromRegistry(data);
+    buildDevices(deviceData.devices || []);
   } catch (err) {
     console.error("Failed to fetch registry:", err);
   }
 }
 
 function clearScene() {
-  while(nodeGroup.children.length) nodeGroup.remove(nodeGroup.children[0]);
-  while(serviceGroup.children.length) serviceGroup.remove(serviceGroup.children[0]);
-  while(connectionGroup.children.length) connectionGroup.remove(connectionGroup.children[0]);
-  while(particleGroup.children.length) particleGroup.remove(particleGroup.children[0]);
+  // node/service/device groups are disposed directly (they're free-floating
+  // TransformNodes, not parented under nodeGroup/serviceGroup/deviceGroup —
+  // dispose(false, true) recurses into their child meshes + materials/textures).
+  [...Object.values(nodes), ...services, ...devices].forEach((g) => g.dispose(false, true));
+  [connectionGroup, particleGroup].forEach((g) => {
+    g.getChildMeshes().forEach((m) => m.dispose());
+  });
   nodes = {};
   services = [];
+  devices = [];
   connections = [];
   particles = [];
 }
@@ -265,11 +296,11 @@ function clearScene() {
 function buildFromRegistry(data) {
   const registryNodes = data.nodes || {};
   const registryServices = data.services || {};
-  
+
   // Sort node IDs for stable circle placement
   const nodeIds = Object.keys(registryNodes).sort();
   const totalNodes = nodeIds.length;
-  
+
   // 1. Create Nodes in a stable circle
   nodeIds.forEach((id, i) => {
     const angle = (i / totalNodes) * Math.PI * 2;
@@ -277,18 +308,17 @@ function buildFromRegistry(data) {
     const x = Math.cos(angle) * radius;
     const z = Math.sin(angle) * radius;
     const y = (getDeterministicOffset(id, "y_off") - 0.5) * 30;
-    
+
     const nodeData = registryNodes[id];
-    const mesh = createNodeMesh(id, nodeData, { x, y, z });
-    nodes[id] = mesh;
-    nodeGroup.add(mesh);
+    const group = createNodeMesh(id, nodeData, { x, y, z });
+    nodes[id] = group;
   });
 
   // 2. Create inter-node links (Unit Mesh)
   nodeIds.forEach((id, i) => {
     for (let j = i + 1; j < nodeIds.length; j++) {
       const id2 = nodeIds[j];
-      createLink(nodes[id], nodes[id2], 0x004488, 0.15);
+      createLink(nodes[id], nodes[id2], BABYLON.Color3.FromHexString('#004488'), 0.15);
     }
   });
 
@@ -296,39 +326,38 @@ function buildFromRegistry(data) {
   Object.entries(registryServices).forEach(([sId, sData]) => {
     const hostList = sData.hosts || (sData.host ? [sData.host] : []);
     const isOnline = sData.status === 'ONLINE';
-    
+
     if (hostList.length === 0) return;
-    
+
     const primaryHost = nodes[hostList[0]];
     if (!primaryHost) return;
-    
+
     // Deterministic placement near host
     const angle = getDeterministicOffset(sId, "angle") * Math.PI * 2;
     const dist = 20 + getDeterministicOffset(sId, "dist") * 25;
     const hOff = (getDeterministicOffset(sId, "h_off") - 0.5) * 20;
-    
+
     const pos = {
       x: primaryHost.position.x + Math.cos(angle) * dist,
       y: primaryHost.position.y + hOff,
       z: primaryHost.position.z + Math.sin(angle) * dist
     };
-    
-    const sMesh = createServiceMesh(sId, sData, pos);
-    serviceGroup.add(sMesh);
-    services.push(sMesh);
-    
+
+    const sGroup = createServiceMesh(sId, sData, pos);
+    services.push(sGroup);
+
     // Link to ALL host units
     hostList.forEach((hId) => {
       const parentNode = nodes[hId];
       if (!parentNode) return;
-      
-      let linkColor = 0x00ff88;
-      if (sData.category === 'websites') linkColor = 0xffff00;
-      if (!isOnline) linkColor = 0xff0000;
-      
-      const link = createLink(parentNode, sMesh, linkColor, isOnline ? 0.4 : 0.1);
+
+      let linkColor = '#00ff88';
+      if (sData.category === 'websites') linkColor = '#ffff00';
+      if (!isOnline) linkColor = '#ff0000';
+
+      const link = createLink(parentNode, sGroup, BABYLON.Color3.FromHexString(linkColor), isOnline ? 0.4 : 0.1);
       if (isOnline) {
-        for(let p=0; p<2; p++) createParticle(link);
+        for (let p = 0; p < 2; p++) createParticle(link);
       }
     });
   });
@@ -338,150 +367,223 @@ function buildFromRegistry(data) {
   document.getElementById('connCount').textContent = connections.length;
 }
 
+// 4. Traccar-tracked devices — their own constellation past the outer
+// service ring (they have no "host" to sit next to), each linked back to
+// the nearest online mesh node so they still read as part of the mesh.
+function buildDevices(deviceList) {
+  const outerRadius = 140 + (Object.keys(nodes).length * 3);
+  const nodeList = Object.values(nodes);
+
+  deviceList.forEach((d, i) => {
+    const angle = getDeterministicOffset(String(d.id), 'device_angle') * Math.PI * 2;
+    const dist = outerRadius + getDeterministicOffset(String(d.id), 'device_dist') * 40;
+    const y = (getDeterministicOffset(String(d.id), 'device_y') - 0.5) * 50;
+    const pos = { x: Math.cos(angle) * dist, y, z: Math.sin(angle) * dist };
+
+    const dGroup = createDeviceMesh(d, pos);
+    devices.push(dGroup);
+
+    if (nodeList.length > 0) {
+      const nearest = nodeList.reduce((best, n) => {
+        const dd = BABYLON.Vector3.Distance(n.position, dGroup.position);
+        return (!best || dd < best.dist) ? { node: n, dist: dd } : best;
+      }, null).node;
+      const online = d.status === 'online';
+      createLink(nearest, dGroup, BABYLON.Color3.FromHexString(online ? '#ff2d95' : '#ff0000'), online ? 0.35 : 0.1);
+    }
+  });
+
+  document.getElementById('deviceCount').textContent = deviceList.length;
+}
+
 function createNodeMesh(id, data, pos) {
-  const group = new THREE.Group();
-  const isOnline = data.status === 'ONLINE';
-  const color = isOnline ? 0x00ffff : 0x444444;
-
-  const geo = new THREE.CylinderGeometry(5, 5, 2, 6);
-  const mat = new THREE.MeshPhongMaterial({ color: 0x001122, emissive: color, emissiveIntensity: 0.3, transparent: true, opacity: 0.8 });
-  const mesh = new THREE.Mesh(geo, mat);
-  group.add(mesh);
-
-  const ringGeo = new THREE.TorusGeometry(5.5, 0.3, 8, 6);
-  const ringMat = new THREE.MeshBasicMaterial({ color: color });
-  const ring = new THREE.Mesh(ringGeo, ringMat);
-  ring.rotation.x = Math.PI / 2;
-  group.add(ring);
-
-  const label = makeTextSprite(data.name || id, { fontSize: 24, color: isOnline ? '#00ffff' : '#888888' });
-  label.position.y = 10;
-  label.scale.set(15, 5, 1);
-  group.add(label);
-
+  const group = new BABYLON.TransformNode('node_' + id, scene);
   group.position.set(pos.x, pos.y, pos.z);
-  group.userData = { type: 'node', id, ...data };
+
+  const isOnline = data.status === 'ONLINE';
+  const color = isOnline ? '#00ffff' : '#444444';
+
+  const mesh = BABYLON.MeshBuilder.CreateCylinder('node_mesh_' + id, { diameterTop: 10, diameterBottom: 10, height: 2, tessellation: 6 }, scene);
+  const mat = new BABYLON.StandardMaterial('node_mat_' + id, scene);
+  mat.diffuseColor = BABYLON.Color3.FromHexString('#001122');
+  mat.emissiveColor = BABYLON.Color3.FromHexString(color);
+  mat.alpha = 0.8;
+  mesh.material = mat;
+  mesh.parent = group;
+
+  const ring = BABYLON.MeshBuilder.CreateTorus('node_ring_' + id, { diameter: 11, thickness: 0.6, tessellation: 8 }, scene);
+  ring.rotation.x = Math.PI / 2;
+  const ringMat = new BABYLON.StandardMaterial('node_ring_mat_' + id, scene);
+  ringMat.emissiveColor = BABYLON.Color3.FromHexString(color);
+  ringMat.disableLighting = true;
+  ring.material = ringMat;
+  ring.parent = group;
+
+  const label = makeLabelPlane(data.name || id, { fontSize: 24, color: isOnline ? '#00ffff' : '#888888' });
+  label.position.y = 10;
+  label.scaling.set(15, 5, 1);
+  label.parent = group;
+
+  mesh.metadata = { kind: 'node', id, group, ...data };
+  group.metadata = mesh.metadata;
   return group;
 }
 
 function createServiceMesh(id, data, pos) {
-  const group = new THREE.Group();
+  const group = new BABYLON.TransformNode('service_' + id, scene);
+  group.position.set(pos.x, pos.y, pos.z);
+
   const isOnline = data.status === 'ONLINE';
   const isWebsite = data.category === 'websites';
-  
-  let color = isOnline ? (isWebsite ? 0xffff00 : 0x00ff88) : 0xff0000;
-  
-  let geo;
-  if (isWebsite) geo = new THREE.SphereGeometry(2.5, 12, 12);
-  else geo = new THREE.BoxGeometry(4, 4, 4);
-  
-  const mat = new THREE.MeshPhongMaterial({ color: 0x000000, emissive: color, emissiveIntensity: 0.4, transparent: true, opacity: 0.9 });
-  const mesh = new THREE.Mesh(geo, mat);
-  group.add(mesh);
+  const color = isOnline ? (isWebsite ? '#ffff00' : '#00ff88') : '#ff0000';
 
-  if (isOnline) {
-    const glowGeo = new THREE.SphereGeometry(isWebsite ? 3 : 4.5, 12, 12);
-    const glowMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.1 });
-    group.add(new THREE.Mesh(glowGeo, glowMat));
-  }
+  let mesh;
+  if (isWebsite) mesh = BABYLON.MeshBuilder.CreateSphere('service_mesh_' + id, { diameter: 5, segments: 12 }, scene);
+  else mesh = BABYLON.MeshBuilder.CreateBox('service_mesh_' + id, { size: 4 }, scene);
 
-  const label = makeTextSprite(data.name || id, { fontSize: 18, color: isOnline ? '#ffffff' : '#ff4444' });
+  const mat = new BABYLON.StandardMaterial('service_mat_' + id, scene);
+  mat.diffuseColor = BABYLON.Color3.Black();
+  mat.emissiveColor = BABYLON.Color3.FromHexString(color);
+  mat.alpha = 0.9;
+  mesh.material = mat;
+  mesh.parent = group;
+
+  const label = makeLabelPlane(data.name || id, { fontSize: 18, color: isOnline ? '#ffffff' : '#ff4444' });
   label.position.y = 7;
-  label.scale.set(12, 4, 1);
-  group.add(label);
+  label.scaling.set(12, 4, 1);
+  label.parent = group;
 
-  group.position.set(pos.x, pos.y, pos.z);
-  group.userData = { type: 'service', id, ...data };
+  mesh.metadata = { kind: 'service', id, group, ...data };
+  group.metadata = mesh.metadata;
   return group;
 }
 
+function createDeviceMesh(data, pos) {
+  const group = new BABYLON.TransformNode('device_' + data.id, scene);
+  group.position.set(pos.x, pos.y, pos.z);
+
+  const isOnline = data.status === 'online';
+  const color = isOnline ? '#ff2d95' : '#ff0000';
+
+  const mesh = BABYLON.MeshBuilder.CreatePolyhedron('device_mesh_' + data.id, { type: 1, size: 2.6 }, scene); // octahedron
+  const mat = new BABYLON.StandardMaterial('device_mat_' + data.id, scene);
+  mat.diffuseColor = BABYLON.Color3.Black();
+  mat.emissiveColor = BABYLON.Color3.FromHexString(color);
+  mat.alpha = 0.9;
+  mesh.material = mat;
+  mesh.parent = group;
+
+  const label = makeLabelPlane(data.name || ('device-' + data.id), { fontSize: 18, color: isOnline ? '#ff2d95' : '#ff4444' });
+  label.position.y = 6;
+  label.scaling.set(12, 4, 1);
+  label.parent = group;
+
+  mesh.metadata = { kind: 'device', id: data.id, group, ...data };
+  group.metadata = mesh.metadata;
+  return group;
+}
+
+function quadraticBezierPoint(p0, p1, p2, t) {
+  const u = 1 - t;
+  return p0.scale(u * u).add(p1.scale(2 * u * t)).add(p2.scale(t * t));
+}
+
 function createLink(a, b, color, opacity) {
-  const points = [a.position, b.position];
-  const mid = new THREE.Vector3().lerpVectors(a.position, b.position, 0.5);
-  mid.y += 5;
-  const curve = new THREE.QuadraticBezierCurve3(a.position, mid, b.position);
-  const geo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(20));
-  
-  const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity });
-  const line = new THREE.Line(geo, mat);
-  line.userData = { curve, color, opacity };
-  
-  connectionGroup.add(line);
+  const p0 = a.position;
+  const p2 = b.position;
+  const p1 = p0.add(p2).scale(0.5);
+  p1.y += 5;
+
+  const points = [];
+  for (let i = 0; i <= 20; i++) points.push(quadraticBezierPoint(p0, p1, p2, i / 20));
+
+  const line = BABYLON.MeshBuilder.CreateLines('link', { points }, scene);
+  line.color = color;
+  line.alpha = opacity;
+  line.parent = connectionGroup;
+  line.metadata = { p0, p1, p2 };
+
   connections.push(line);
   return line;
 }
 
 function createParticle(link) {
-  const { curve, color } = link.userData;
-  const geo = new THREE.SphereGeometry(0.3, 6, 6);
-  const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.8 });
-  const p = new THREE.Mesh(geo, mat);
-  p.userData = { curve, t: Math.random(), speed: 0.001 + Math.random() * 0.003 };
-  particleGroup.add(p);
+  const { p0, p1, p2 } = link.metadata;
+  const p = BABYLON.MeshBuilder.CreateSphere('particle', { diameter: 0.6, segments: 6 }, scene);
+  const mat = new BABYLON.StandardMaterial('particle_mat', scene);
+  mat.emissiveColor = link.color;
+  mat.disableLighting = true;
+  mat.alpha = 0.8;
+  p.material = mat;
+  p.parent = particleGroup;
+  p.metadata = { p0, p1, p2, t: Math.random(), speed: 0.001 + Math.random() * 0.003 };
   particles.push(p);
 }
 
-function makeTextSprite(text, { fontSize = 24, color = '#ffffff' } = {}) {
-  const canvas = document.createElement('canvas');
-  canvas.width = 256; canvas.height = 64;
-  const ctx = canvas.getContext('2d');
-  ctx.font = `bold ${fontSize}px Courier New`;
-  ctx.fillStyle = color;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(text, 128, 32);
-  const tex = new THREE.CanvasTexture(canvas);
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
-  return sprite;
+function makeLabelPlane(text, { fontSize = 24, color = '#ffffff' } = {}) {
+  const dt = new BABYLON.DynamicTexture('label_tex', { width: 256, height: 64 }, scene, false);
+  dt.hasAlpha = true;
+  dt.drawText(text, null, 40, `bold ${fontSize}px Courier New`, color, 'transparent', true, true);
+
+  const mat = new BABYLON.StandardMaterial('label_mat', scene);
+  mat.diffuseTexture = dt;
+  mat.opacityTexture = dt;
+  mat.emissiveColor = BABYLON.Color3.White();
+  mat.disableLighting = true;
+  mat.backFaceCulling = false;
+
+  const plane = BABYLON.MeshBuilder.CreatePlane('label_plane', { width: 1, height: 1 }, scene);
+  plane.material = mat;
+  plane.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
+  glowLayer.addExcludedMesh(plane); // keep label text crisp, not bloomed
+  return plane;
 }
 
 // ── Interactivity ──
-const raycaster = new THREE.Raycaster();
-const mouse = new THREE.Vector2();
 const tooltip = document.getElementById('tooltip');
 let hovered = null;
 
-window.addEventListener('mousemove', e => {
-  mouse.x = (e.clientX / innerWidth) * 2 - 1;
-  mouse.y = -(e.clientY / innerHeight) * 2 + 1;
-  raycaster.setFromCamera(mouse, camera);
-  const intersects = raycaster.intersectObjects([...nodeGroup.children, ...serviceGroup.children], true);
-  
-  if (intersects.length > 0) {
-    let obj = intersects[0].object;
-    while(obj.parent && !obj.userData.type) obj = obj.parent;
-    if (obj !== hovered) {
-      hovered = obj;
-      showTooltip(e, obj.userData);
+scene.onPointerMove = function (evt) {
+  const pick = scene.pick(scene.pointerX, scene.pointerY, (m) => !!(m.metadata && m.metadata.kind));
+  if (pick.hit) {
+    const meta = pick.pickedMesh.metadata;
+    if (meta.group !== hovered) {
+      hovered = meta.group;
+      showTooltip(evt, meta);
     }
-    tooltip.style.left = (e.clientX + 15) + 'px';
-    tooltip.style.top = (e.clientY + 15) + 'px';
+    tooltip.style.left = (evt.clientX + 15) + 'px';
+    tooltip.style.top = (evt.clientY + 15) + 'px';
   } else {
     hovered = null;
     tooltip.style.display = 'none';
   }
-});
+};
 
-window.addEventListener('click', e => {
+canvas.addEventListener('click', (evt) => {
   if (hovered) {
-    const targetPos = hovered.position.clone();
-    controls.target.copy(targetPos);
-    controls.autoRotate = false; // Stop rotating once focused
+    camera.setTarget(hovered.position.clone());
+    camera.useAutoRotationBehavior = false;
   }
 });
 
 function showTooltip(e, d) {
   tooltip.style.display = 'block';
-  tooltip.querySelector('.label').textContent = (d.type === 'node' ? '🖥 ' : '⚙ ') + (d.name || d.id);
-  
+  const icon = d.kind === 'node' ? '🖥 ' : (d.kind === 'device' ? '📍 ' : '⚙ ');
+  tooltip.querySelector('.label').textContent = icon + (d.name || d.id);
+
   let info = '';
-  if (d.type === 'node') {
+  if (d.kind === 'node') {
     info = `IP: ${d.ip || '?'}<br>Status: ${d.status}<br>OS: ${d.type || '?'}`;
+  } else if (d.kind === 'device') {
+    const p = d.position;
+    info = `Status: ${d.status}<br>` + (p
+      ? `Lat/Lon: ${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}<br>Speed: ${(p.speed || 0).toFixed(1)} kn<br>Fix: ${p.fixTime || '?'}`
+      : 'No position reported yet');
   } else {
-    info = `Hosts: ${d.hosts?.join(', ') || d.host}<br>Status: ${d.status}<br>URL: ${d.url || d.internal || '-'}`;
+    info = `Hosts: ${(d.hosts && d.hosts.join(', ')) || d.host}<br>Status: ${d.status}<br>URL: ${d.url || d.internal || '-'}`;
   }
   tooltip.querySelector('.info').innerHTML = info;
-  
+
   let meta = '';
   if (d.metadata) {
     Object.entries(d.metadata).forEach(([k, v]) => {
@@ -493,51 +595,42 @@ function showTooltip(e, d) {
 
 // ── Animation Loop ──
 let time = 0;
-let frameCount = 0;
-let lastFpsTime = performance.now();
 
-function animate() {
-  requestAnimationFrame(animate);
+engine.runRenderLoop(() => {
   time += 0.01;
-  frameCount++;
 
-  if (performance.now() - lastFpsTime > 1000) {
-    document.getElementById('fps').textContent = 'FPS: ' + frameCount;
-    frameCount = 0; lastFpsTime = performance.now();
-  }
-
-  particles.forEach(p => {
-    p.userData.t += p.userData.speed;
-    if (p.userData.t > 1) p.userData.t = 0;
-    p.position.copy(p.userData.curve.getPoint(p.userData.t));
+  particles.forEach((p) => {
+    const md = p.metadata;
+    md.t += md.speed;
+    if (md.t > 1) md.t = 0;
+    p.position.copyFrom(quadraticBezierPoint(md.p0, md.p1, md.p2, md.t));
   });
 
-  [...nodeGroup.children, ...serviceGroup.children].forEach((obj, i) => {
-    obj.position.y += Math.sin(time + i) * 0.02;
-    if (obj === hovered) obj.scale.setScalar(1.2);
-    else obj.scale.setScalar(1.0);
+  let i = 0;
+  [...Object.values(nodes), ...services, ...devices].forEach((group) => {
+    group.position.y += Math.sin(time + i) * 0.02;
+    const scale = (group === hovered) ? 1.2 : 1.0;
+    group.scaling.set(scale, scale, scale);
+    i++;
   });
 
-  controls.update();
-  renderer.render(scene, camera);
-}
-
-function toggleRotation() { controls.autoRotate = !controls.autoRotate; }
-function resetView() { 
-    camera.position.set(0, 100, 200); 
-    controls.target.set(0,0,0); 
-    controls.autoRotate = true;
-}
-
-window.addEventListener('resize', () => {
-  camera.aspect = innerWidth / innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
+  document.getElementById('fps').textContent = 'FPS: ' + Math.round(engine.getFps());
+  scene.render();
 });
 
+function toggleRotation() { camera.useAutoRotationBehavior = !camera.useAutoRotationBehavior; }
+function resetView() {
+  camera.setTarget(BABYLON.Vector3.Zero());
+  camera.alpha = -Math.PI / 2;
+  camera.beta = Math.PI / 2.6;
+  camera.radius = 220;
+  camera.useAutoRotationBehavior = true;
+}
+
+window.addEventListener('resize', () => engine.resize());
+
 refreshData();
-animate();
-setInterval(refreshData, 20000); 
+setInterval(refreshData, 20000);
 </script>
 </body>
 </html>

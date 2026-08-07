@@ -14,5 +14,6 @@ RUN mkdir -p /app/data
 
 EXPOSE 5000
 
-# Run the main registry app
-CMD ["python", "locator.py"]
+# Run the main registry app via Gunicorn (production WSGI server)
+# Use gthread worker class to support Flask's threading model with multiple workers
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "8", "--worker-class", "gthread", "--timeout", "300", "--keep-alive", "5", "--access-logfile", "-", "--error-logfile", "-", "locator:app"]

@@ -1,0 +1,26 @@
+# Standalone standby locator — used by lokey's failover (_start_local_locator
+# in hard-stats.py) to bring up a local locator when the canonical instance
+# (tobsco-locator.fly.dev) misses LOCATOR_MISS_THRESHOLD heartbeats in a row.
+#
+# Unlike docker-compose.yml (which assumes the old unit1 Traefik/Keycloak
+# stack), this publishes port 5000 directly and has no external network or
+# reverse-proxy dependency, so it can come up standalone on any unit.
+# UNIT_NAME must be set per-unit (e.g. via .env) so locator's own cross-node
+# dedup can tell it apart from the canonical Fly instance and from other
+# units' standbys.
+services:
+  locator:
+    build: .
+    container_name: locator
+    restart: "no"
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./registry_data:/app/data
+    environment:
+      - UNIT_NAME=${UNIT_NAME:?Set UNIT_NAME in .env}
+      - LOCATOR_IS_PRIMARY=false
+      - SELF_CONTAINER_NAME=locator
+      - LOCATOR_CANONICAL_URL=${LOCATOR_CANONICAL_URL:-https://tobsco-locator.fly.dev}
+      - DATABASE_URL=${DATABASE_URL:-}
+      - PYTHONUNBUFFERED=1

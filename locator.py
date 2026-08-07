@@ -3,7 +3,7 @@
   THE LOCATOR — Universal Service Registry
   
   Single source of truth for every service,
-  container, API, and daemon in the Beast mesh.
+  container, API, and daemon in the mesh.
 ═══════════════════════════════════════════════
 """
 
@@ -47,12 +47,16 @@ import time
 import uuid
 import queue as _queue_module
 import requests
+import urllib3
 import re
 import io
 import qrcode
 import pandas as pd
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from flask import Flask, request, jsonify, Response, render_template
+
+import notifier
+import db
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -77,9 +81,34 @@ IDLE_LABEL_TIMEOUT     = "locator.idle.timeout"
 COMPOSE_DIR = os.environ.get("COMPOSE_DIR", os.path.join(os.environ.get("DATA_DIR", "/app/data"), "compose_store"))
 SSH_USER    = os.environ.get("SSH_USER", "swoopg111")
 SSH_KEY     = os.environ.get("SSH_KEY", "")  # path to private key, optional
+
+# Fly secrets are env vars, not files — SSH_KEY above wants a path, so accept
+# the key's raw PEM/OpenSSH content via SSH_PRIVATE_KEY instead and materialize
+# it to a private temp file once at startup. Set SSH_KEY normally for anything
+# non-Fly (e.g. running this on a box that already has the key file locally).
+if not SSH_KEY and os.environ.get("SSH_PRIVATE_KEY"):
+    import stat as _stat
+    import tempfile as _tempfile
+    _key_fd, _key_path = _tempfile.mkstemp(prefix="locator_ssh_key_")
+    with os.fdopen(_key_fd, "w") as _f:
+        _f.write(os.environ["SSH_PRIVATE_KEY"].strip() + "\n")
+    os.chmod(_key_path, _stat.S_IRUSR | _stat.S_IWUSR)  # 0600 — ssh refuses group/world-readable keys
+    SSH_KEY = _key_path
+
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 SEED_FILE = os.environ.get("SEED_FILE", "/app/seed_registry.json")
 EXCEL_FILE = "registry.xlsx"
+
+# DNS zone status/sync (unit9 = ns1, runs PowerDNS with a sqlite3 backend;
+# reached over SSH with the SSH_USER/SSH_KEY above since Locator itself runs
+# on Fly, not on the DNS box — see /api/dns/status and /api/dns/sync).
+DNS_SSH_HOST = os.environ.get("DNS_SSH_HOST", "66.175.238.103")
+DNS_SSH_USER = os.environ.get("DNS_SSH_USER", "root")
+DNS_ZONES = [z.strip() for z in os.environ.get(
+    "DNS_ZONES",
+    "theofficialblacksheepco.com,theofficialblacksheepco.info,"
+    "theofficialblacksheepco.online,theofficialblacksheepco.store",
+).split(",") if z.strip()]
 
 # Load-balancer config
 BALANCE_ENABLED  = os.environ.get("BALANCE_ENABLED", "true").lower() == "true"
@@ -90,6 +119,15 @@ BALANCE_COOLDOWN = int(os.environ.get("BALANCE_COOLDOWN", "300"))  # seconds bef
 BALANCE_DIFF     = float(os.environ.get("BALANCE_DIFF", "40"))     # % spread between busiest/least busy to trigger balance
 BALANCE_STRIKES  = int(os.environ.get("BALANCE_STRIKES", "2"))      # consecutive overloaded checks before migrating
 OOM_THRESHOLD    = float(os.environ.get("OOM_THRESHOLD", "90"))     # % mem — emergency migration, bypasses anti-flap/cooldown
+
+# Proactive pre-staging: watch nodes trending toward BALANCE_HIGH *before* they
+# get there, and validate (not execute) a migration ahead of time so the real
+# cutover — if it ends up being needed — has less work left to do. Derived
+# from BALANCE_HIGH rather than a second absolute constant, so there's still
+# only one number (BALANCE_HIGH) to reason about day to day.
+BALANCE_PRESTAGE_ENABLED = os.environ.get("BALANCE_PRESTAGE_ENABLED", "true").lower() == "true"
+BALANCE_PRESTAGE_MARGIN  = float(os.environ.get("BALANCE_PRESTAGE_MARGIN", "15"))  # % below BALANCE_HIGH that triggers pre-staging
+PRESTAGE_STALE_SECONDS   = int(os.environ.get("PRESTAGE_STALE_SECONDS", "600"))    # re-validate if older than this
 
 UNIT_NAME             = os.environ.get("UNIT_NAME", "unknown")
 LOCATOR_CANONICAL_URL = os.environ.get("LOCATOR_CANONICAL_URL", "https://locator.theofficialblacksheepco.online")
@@ -144,6 +182,53 @@ def beast_log(line: str, source: str = "locator"):
         pass
 
 
+def _check_battery_threshold(svc_id, current, previous):
+    """
+    Edge-triggered battery alerting: fires once when a device crosses at/below
+    BATTERY_ALERT_THRESHOLD, then re-alerts every BATTERY_REALERT_INTERVAL
+    seconds while it stays low, and sends one "cleared" notice on recovery
+    (e.g. it started charging). `current`/`previous` are battery_percent
+    values as they arrive in a service's metadata (see register_service()) —
+    there's no separate battery-specific endpoint, this rides the existing
+    heartbeat path Android's DeviceStats.kt already posts to.
+    """
+    if current is None:
+        return
+    now = datetime.now(timezone.utc)
+
+    with battery_alert_lock:
+        state = battery_alert_state.get(svc_id)
+
+        if current <= BATTERY_ALERT_THRESHOLD:
+            if state is None:
+                # Newly crossed — first alert, always urgent (attempts a call-invite too).
+                battery_alert_state[svc_id] = {"since": now.isoformat(), "last_notified": now.isoformat()}
+                fire, urgent = True, True
+            else:
+                last_notified = datetime.fromisoformat(state["last_notified"])
+                if (now - last_notified).total_seconds() >= BATTERY_REALERT_INTERVAL:
+                    state["last_notified"] = now.isoformat()
+                    fire, urgent = True, False
+                else:
+                    fire, urgent = False, False
+        elif state is not None:
+            # Recovered — clear and send one "back above threshold" notice.
+            battery_alert_state.pop(svc_id, None)
+            fire, urgent = True, False
+            current_desc = f"recovered to {current:.0f}%"
+        else:
+            fire = False
+
+    if not fire:
+        return
+
+    if current <= BATTERY_ALERT_THRESHOLD:
+        text = f"🔋 LOW BATTERY: {svc_id} at {current:.0f}% (threshold {BATTERY_ALERT_THRESHOLD:.0f}%)"
+    else:
+        text = f"🔋 {svc_id} battery {current_desc} — alert cleared"
+    notifier.notify_all(text, urgent=urgent)
+
+
 def _send_alert(service_name: str, status: str, extra: str = ""):
     """Fire-and-forget alert to ALERT_WEBHOOK_URL (Slack, Discord, or custom)."""
     if not ALERT_WEBHOOK_URL:
@@ -162,7 +247,7 @@ def _send_alert(service_name: str, status: str, extra: str = ""):
 # ── INSTANCE LIMITS ──────────────────────────────────────────────────────────
 
 # Containers that may run up to 3 instances; everything else is singleton (max 1).
-TRIPLE_ALLOWED = {"traefik", "apache", "lokey", "openvpn", "wireguard", "headscale", "tailscale", "bind"}
+TRIPLE_ALLOWED = {"traefik", "apache", "lokey", "openvpn", "wireguard", "headscale", "tailscale", "pdns"}
 
 def _base_name(container_name: str) -> str:
     """Derive a canonical base name by stripping project prefixes and numeric suffixes."""
@@ -257,6 +342,18 @@ migration_lock  = threading.Lock()
 node_last_migrated: dict = {}
 # Anti-flap: how many consecutive balance checks a node has been overloaded
 overload_strikes: dict = {}
+
+# Pre-stage state — keyed by svc_id, holds the last validation done for a
+# service on a node trending toward overload (see load_balancer()'s prestage
+# pass). Purely advisory/read-side: never itself causes a cutover.
+prestage_state: dict = {}
+prestage_lock = threading.Lock()
+
+# Battery alert state — keyed by svc_id, tracks re-alert-while-low/cleared-on-recovery.
+battery_alert_state: dict = {}
+battery_alert_lock = threading.Lock()
+BATTERY_ALERT_THRESHOLD  = float(os.environ.get("BATTERY_ALERT_THRESHOLD", "30"))
+BATTERY_REALERT_INTERVAL = int(os.environ.get("BATTERY_REALERT_INTERVAL", "1800"))  # seconds
 
 # ── COMPOSE STORE HELPERS ───────────────────────────────────────────────────
 
@@ -617,6 +714,7 @@ def register_service():
 
     with lock:
         existing = registry["services"].get(service_id, {})
+        _prev_battery = (existing.get("metadata") or {}).get("battery_percent")
 
         _svc_type = data.get("type", existing.get("type", "container"))
         _category = data.get("category", existing.get("category", _infer_category(_svc_type, data.get("url", existing.get("url", "")))))
@@ -632,7 +730,14 @@ def register_service():
             "status": "ONLINE",
             "last_heartbeat": now,
             "registered_at": existing.get("registered_at", now),
-            "metadata": data.get("metadata", existing.get("metadata", {}))
+            "metadata": data.get("metadata", existing.get("metadata", {})),
+            # Optional migration hints — additive, absent on most existing entries.
+            # depends_on: other service_ids ("name@host") that must have an ONLINE
+            #   instance somewhere before this one is migrated (see resolve_migration_order()).
+            # prereqs: target-host readiness needed before starting this service there
+            #   after a native migration (see migrate_native.py, added in Phase 2).
+            "depends_on": data.get("depends_on", existing.get("depends_on", [])),
+            "prereqs": data.get("prereqs", existing.get("prereqs", {})),
         }
 
         # Self-registered devices (phones/tablets/laptops via /register-device) are also
@@ -657,9 +762,13 @@ def register_service():
         registry["updated"] = now
 
     persist_registry()
-    log_activity("service", service_id, "heartbeat", status="ONLINE", host=host)
     if host != "unknown":
         _enforce_dedup(name, host)
+
+    _new_battery = (registry["services"][service_id].get("metadata") or {}).get("battery_percent")
+    if _new_battery is not None:
+        _check_battery_threshold(service_id, _new_battery, _prev_battery)
+
     print(f"📡 REGISTERED: {service_id} → {data.get('internal', data.get('url', 'unknown'))}")
     return jsonify({"result": "registered", "service": service_id}), 200
 
@@ -1044,91 +1153,82 @@ def report_client_error():
 
     print(f"\U0001f6a8 CLIENT-ERROR [{entry['page_url']}]: {entry['message']} "
           f"({entry['source_url']}:{entry['line']}:{entry['col']})")
+
+    try:
+        db.insert_client_error({**entry, "received_at": entry["received_at"]})
+    except Exception as e:
+        print(f"⚠️  Failed to persist client error to Postgres: {e}")
+
     return jsonify({"status": "logged"}), 200
 
 
 @app.route("/api/client-errors", methods=["GET"])
 def list_client_errors():
-    """Return recently reported browser-side JS errors, newest first."""
+    """Return recently reported browser-side JS errors, newest first.
+    Postgres first (survives restarts), falling back to the in-memory ring buffer."""
+    try:
+        persisted = db.list_client_errors(CLIENT_ERROR_MAX)
+        if persisted is not None:
+            return jsonify(persisted)
+    except Exception as e:
+        print(f"⚠️  Failed to read client errors from Postgres: {e}")
     with client_error_lock:
         return jsonify(list(reversed(client_errors)))
 
 
-@app.route("/api/activity/dates", methods=["GET"])
-def list_activity_dates():
-    """List available daily activity-log dates (YYYY-MM-DD), newest first."""
-    dates = []
-    if os.path.isdir(ACTIVITY_LOG_DIR):
-        for fname in os.listdir(ACTIVITY_LOG_DIR):
-            m = re.match(r"^activity_(\d{4}-\d{2}-\d{2})\.csv$", fname)
-            if m:
-                dates.append(m.group(1))
-    dates.sort(reverse=True)
-    return jsonify({"dates": dates, "retention_days": ACTIVITY_RETENTION_DAYS})
+# ── Event log ──────────────────────────────────────────────────────────────
+# Backs the tactical grid's EVENT LOG box. Postgres-backed (see db.py); GET
+# returns recent history, /stream is a Server-Sent Events feed for live
+# updates (not a WebSocket — this app runs under gunicorn's gthread worker
+# class, which doesn't support WebSocket upgrades; SSE works over plain HTTP).
+_event_stream_queues = []
+_event_stream_lock = threading.Lock()
 
 
-@app.route("/api/activity/export/<date>", methods=["GET"])
-def export_activity_day(date):
-    """Download one day's raw activity CSV (YYYY-MM-DD)."""
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
-        return jsonify({"error": "date must be YYYY-MM-DD"}), 400
-    filepath = os.path.join(ACTIVITY_LOG_DIR, f"activity_{date}.csv")
-    if not os.path.exists(filepath):
-        return jsonify({"error": "no activity log for that date"}), 404
-    with open(filepath, "r") as f:
-        data = f.read()
-    return Response(data, mimetype="text/csv",
-                     headers={"Content-Disposition": f"attachment; filename=locator_activity_{date}.csv"})
-
-
-@app.route("/api/activity/export", methods=["GET"])
-def export_activity_range():
-    """
-    Download a combined CSV across a date range.
-    Query params (all optional): days (default/max ACTIVITY_RETENTION_DAYS),
-    entity_type ("node"|"service"), entity_id (exact match).
-    """
-    import csv as _csv
+def emit_event(event_type, **data):
+    """Record an event to Postgres and push it to any connected SSE streams.
+    Call this from wherever something event-worthy happens (migrations, DNS
+    sync, etc.) — e.g. emit_event('migration', from_container=..., to_container=..., unit=...)."""
     try:
-        days = min(int(request.args.get("days", ACTIVITY_RETENTION_DAYS)), ACTIVITY_RETENTION_DAYS)
-    except ValueError:
-        days = ACTIVITY_RETENTION_DAYS
-    entity_type = request.args.get("entity_type", "")
-    entity_id = request.args.get("entity_id", "")
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        event = db.insert_event(event_type, data)
+    except Exception as e:
+        print(f"⚠️  Failed to persist event to Postgres: {e}")
+        event = {"type": event_type, "timestamp": datetime.now(timezone.utc).isoformat(), **data}
+    with _event_stream_lock:
+        for q in _event_stream_queues:
+            q.put(event)
+    return event
 
-    out = io.StringIO()
-    writer = _csv.DictWriter(out, fieldnames=_ACTIVITY_FIELDS)
-    writer.writeheader()
-    rows_written = 0
 
-    if os.path.isdir(ACTIVITY_LOG_DIR):
-        for fname in sorted(os.listdir(ACTIVITY_LOG_DIR)):
-            m = re.match(r"^activity_(\d{4}-\d{2}-\d{2})\.csv$", fname)
-            if not m:
-                continue
-            try:
-                file_day = datetime.strptime(m.group(1), "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            except ValueError:
-                continue
-            if file_day < cutoff - timedelta(days=1):
-                continue
-            filepath = os.path.join(ACTIVITY_LOG_DIR, fname)
-            try:
-                with open(filepath, "r", newline="") as f:
-                    for row in _csv.DictReader(f):
-                        if entity_type and row.get("entity_type") != entity_type:
-                            continue
-                        if entity_id and row.get("entity_id") != entity_id:
-                            continue
-                        writer.writerow(row)
-                        rows_written += 1
-            except Exception as e:
-                print(f"⚠️  Failed to read {fname} for export: {e}")
+@app.route("/api/events", methods=["GET"])
+def list_events_route():
+    """Return recent events, oldest first (matches what the dashboard expects to append in order)."""
+    try:
+        return jsonify(db.list_events(200))
+    except Exception as e:
+        print(f"⚠️  Failed to read events from Postgres: {e}")
+        return jsonify([])
 
-    fname_suffix = f"_{entity_id}" if entity_id else (f"_{entity_type}" if entity_type else "")
-    return Response(out.getvalue(), mimetype="text/csv",
-                     headers={"Content-Disposition": f"attachment; filename=locator_activity_{days}d{fname_suffix}.csv"})
+
+@app.route("/api/events/stream", methods=["GET"])
+def stream_events():
+    """Server-Sent Events feed of new events as they happen."""
+    q = _queue_module.Queue()
+    with _event_stream_lock:
+        _event_stream_queues.append(q)
+
+    def gen():
+        try:
+            while True:
+                event = q.get()
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            with _event_stream_lock:
+                if q in _event_stream_queues:
+                    _event_stream_queues.remove(q)
+
+    return Response(gen(), mimetype="text/event-stream",
+                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.route("/registry.json", methods=["GET"])
@@ -1144,6 +1244,146 @@ def download_registry():
 def mesh_3d():
     """Serve the 3D mesh visualization."""
     return render_template("mesh.html")
+
+
+# ── Traccar proxy ─────────────────────────────────────────────────────
+# Traccar runs on unit9 behind Caddy at traccar.theofficialblacksheepco.online,
+# but that domain isn't publicly resolvable yet (the .online zone is still
+# served by IONOS — unit9's own PowerDNS records are staged but not delegated
+# at the registrar, see blacksheep_welcome_dns_migration notes). We're on Fly,
+# so we can't reach unit9 by hostname until that delegation completes, and
+# Traccar's raw HTTP port (8082) isn't open externally — only Caddy's 443 is.
+# Caddy picks the vhost by TLS SNI, so we resolve the hostname to unit9's
+# public IP ourselves (via a scoped socket.getaddrinfo patch, restored right
+# after the call) while still presenting the real hostname for SNI. Once DNS
+# delegation is done, drop TRACCAR_PIN_IP and this shim entirely.
+TRACCAR_HOST = os.environ.get("TRACCAR_HOST", "traccar.theofficialblacksheepco.online")
+TRACCAR_PIN_IP = os.environ.get("TRACCAR_PIN_IP", "66.175.238.103")
+TRACCAR_USER = os.environ.get("TRACCAR_USER", "admin@theofficialblacksheepco.com")
+TRACCAR_PASS = os.environ.get("TRACCAR_PASS", "changeme123")
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)  # self-signed cert, see note above
+
+
+def _traccar_request(method, path, **kwargs):
+    """Call a Traccar path (REST API or the /osmand/ position endpoint),
+    pinned to its known IP (see note above)."""
+    real_getaddrinfo = socket.getaddrinfo
+
+    def _pinned_getaddrinfo(host, *args, **kw):
+        if host == TRACCAR_HOST:
+            host = TRACCAR_PIN_IP
+        return real_getaddrinfo(host, *args, **kw)
+
+    socket.getaddrinfo = _pinned_getaddrinfo
+    try:
+        return requests.request(
+            method, f"https://{TRACCAR_HOST}{path}",
+            verify=False, timeout=5, **kwargs,
+        )
+    finally:
+        socket.getaddrinfo = real_getaddrinfo
+
+
+def _traccar_get(path):
+    return _traccar_request("GET", path, auth=(TRACCAR_USER, TRACCAR_PASS))
+
+
+@app.route("/api/traccar-devices", methods=["GET"])
+def traccar_devices():
+    """Devices + their latest position, merged, for the 3D mesh's device layer."""
+    try:
+        devices = _traccar_get("/api/devices").json()
+        positions = {p["deviceId"]: p for p in _traccar_get("/api/positions").json()}
+    except Exception as e:
+        return jsonify({"error": str(e), "devices": []}), 200
+
+    result = []
+    for d in devices:
+        p = positions.get(d["id"])
+        result.append({
+            "id": d["id"],
+            "name": d.get("name", f"device-{d['id']}"),
+            "status": d.get("status", "unknown"),
+            "lastUpdate": d.get("lastUpdate"),
+            "position": ({
+                "lat": p["latitude"], "lon": p["longitude"],
+                "speed": p.get("speed"), "course": p.get("course"),
+                "fixTime": p.get("fixTime"),
+            } if p else None),
+        })
+    return jsonify({"devices": result})
+
+
+# ── Traccar feeder ────────────────────────────────────────────────────
+# Lokey phones already heartbeat GPS fixes into this registry (DeviceStats.kt
+# includes latitude/longitude in the heartbeat metadata whenever location
+# permission is granted). Rather than have every phone speak Traccar's
+# protocol directly, this background loop is the single bridge: every 60s it
+# reads fresh device GPS out of the registry and forwards it into Traccar via
+# the OsmAnd HTTP protocol (port 5055, proxied at /osmand/ — see Caddy note
+# above), so Traccar's own device list / map / history builds up from data
+# Lokey was already sending anyway.
+TRACCAR_FIX_MAX_AGE_S = int(os.environ.get("TRACCAR_FIX_MAX_AGE_S", 600))  # ignore stale fixes
+_traccar_known_device_ids = set()  # uniqueIds already registered in Traccar this process
+
+
+def _traccar_ensure_device(unique_id, name):
+    if unique_id in _traccar_known_device_ids:
+        return
+    try:
+        existing = _traccar_get("/api/devices").json()
+        if any(d.get("uniqueId") == unique_id for d in existing):
+            _traccar_known_device_ids.add(unique_id)
+            return
+        res = _traccar_request(
+            "POST", "/api/devices",
+            auth=(TRACCAR_USER, TRACCAR_PASS),
+            json={"name": name, "uniqueId": unique_id},
+        )
+        if res.status_code in (200, 201):
+            _traccar_known_device_ids.add(unique_id)
+        else:
+            print(f"traccar_feeder: device create failed for {unique_id}: {res.status_code} {res.text}")
+    except Exception as e:
+        print(f"traccar_feeder: device create error for {unique_id}: {e}")
+
+
+def traccar_feeder():
+    while True:
+        try:
+            with lock:
+                candidates = [
+                    (node_id, dict(node.get("metadata") or {}))
+                    for node_id, node in registry["nodes"].items()
+                ]
+
+            now_ms = time.time() * 1000
+            for node_id, meta in candidates:
+                lat, lon = meta.get("latitude"), meta.get("longitude")
+                if lat is None or lon is None:
+                    continue
+                fix_time_ms = meta.get("location_time_ms")
+                if fix_time_ms and (now_ms - fix_time_ms) > TRACCAR_FIX_MAX_AGE_S * 1000:
+                    continue  # stale fix, phone hasn't moved/reported recently
+
+                unique_id = re.sub(r"[^a-zA-Z0-9_-]", "_", str(node_id))
+                _traccar_ensure_device(unique_id, node_id)
+
+                params = {
+                    "id": unique_id,
+                    "lat": lat,
+                    "lon": lon,
+                    "timestamp": int((fix_time_ms or now_ms) / 1000),
+                }
+                if meta.get("location_accuracy_m") is not None:
+                    params["accuracy"] = meta["location_accuracy_m"]
+                try:
+                    _traccar_request("GET", "/osmand/", params=params)
+                except Exception as e:
+                    print(f"traccar_feeder: position push failed for {unique_id}: {e}")
+        except Exception as e:
+            print(f"traccar_feeder error: {e}")
+        time.sleep(60)
 
 
 @app.route("/silent-check-sso.html", methods=["GET"])
@@ -1258,10 +1498,6 @@ def update_node_metrics(node_id):
         node["status"]        = "ONLINE"
         registry["updated"]   = now
 
-    log_activity("node", node_id, "metrics", status="ONLINE",
-                  cpu_percent=data.get("cpu_percent"), mem_percent=data.get("mem_percent"),
-                  disk_percent=data.get("disk_percent"))
-
     return jsonify({"result": "metrics_updated", "node": node_id})
 
 
@@ -1329,6 +1565,9 @@ def complete_migration():
             mig["status"]       = "DONE" if success else "FAILED"
             mig["completed_at"] = datetime.now(timezone.utc).isoformat()
             print(f"{'✅' if success else '❌'} MIGRATION {mig_id}: {'DONE' if success else 'FAILED'}")
+            emit_event("migration", from_container=mig.get("from_node", ""),
+                       to_container=mig.get("to_node", ""), unit=mig.get("to_node", ""),
+                       container=mig.get("container", ""), success=success)
 
             # When a git_push_and_stop finishes, queue the follow-on pull on the target.
             # dedup     → git_pull_only      (container already running on target, just sync state)
@@ -1351,6 +1590,26 @@ def complete_migration():
                 }
                 print(f"🔁 AUTO-QUEUED {pull_type} {pull_id} → {mig.get('to_node')}")
 
+            # Native equivalent: once the source has stopped the unit and pushed
+            # its files, queue the target-side prereq-check + start.
+            if success and mig.get("type") == "native_stop_and_sync":
+                start_id = uuid.uuid4().hex[:8] + "-start"
+                migration_queue[start_id] = {
+                    "id":           start_id,
+                    "type":         "native_prereq_and_start",
+                    "unit":         mig.get("to_node", ""),
+                    "container":    mig.get("container", ""),
+                    "from_node":    mig.get("from_node", ""),
+                    "to_node":      mig.get("to_node", ""),
+                    "sync_path":    data.get("sync_path", mig.get("sync_path", "")),
+                    "systemd_unit": data.get("systemd_unit", mig.get("systemd_unit", "")),
+                    "prereqs":      mig.get("prereqs", {}),
+                    "status":       "PENDING",
+                    "queued_at":    datetime.now(timezone.utc).isoformat(),
+                    "reason":       f"follow-on native_prereq_and_start after {mig_id}",
+                }
+                print(f"🔁 AUTO-QUEUED native_prereq_and_start {start_id} → {mig.get('to_node')}")
+
     return jsonify({"result": "acknowledged"})
 
 
@@ -1365,62 +1624,120 @@ def list_migrations():
 @app.route("/api/migrations", methods=["POST"])
 def create_migration():
     """
-    Manually queue a migration for a container OR a native service — the CLI's
-    `locatorctl.py migrate <name> <target-unit>` entry point.
+    Manually enqueue a migration — the CLI/dashboard path for triggering one on
+    demand, as opposed to load_balancer()'s automatic threshold-based queueing
+    (both write into the same migration_queue, same dict shape, so claim/complete/
+    history all work unmodified either way).
 
-    Expected JSON: { "name": "<service-name>", "to_node": "<unit>" }
+    Expected JSON:
+    { "service": "name@host", "to_node": "unit4", "force": false }
 
-    The service's registered `type` ("container" or "native") decides how
-    it's executed: container moves reuse the proven single-shot legacy rsync
-    path (no "type" set, unlike the git push/pull flow the auto-balancer
-    uses); native moves are picked up by the agent's kind="native" dispatch,
-    which detects systemd-vs-bare-process on the source host at run time.
+    "service" is a service_id as shown by GET /services (locatorctl.py's `list`).
+    Rejects with 409 + the missing dependency list unless depends_on is satisfied
+    (see resolve_migration_order()) or force=true is passed.
     """
     data = request.get_json(silent=True) or {}
-    name    = data.get("name")
+    svc_id  = data.get("service")
     to_node = data.get("to_node")
-    if not name or not to_node:
-        return jsonify({"error": "name and to_node are required"}), 400
+    force   = bool(data.get("force", False))
+
+    if not svc_id or not to_node:
+        return jsonify({"error": "requires 'service' and 'to_node'"}), 400
 
     with lock:
-        _, svc = _find_service_entry(name)
+        svc = registry["services"].get(svc_id)
         if not svc:
-            return jsonify({"error": f"service '{name}' not found"}), 404
-        from_node = svc.get("host") or (svc.get("hosts") or [None])[0]
-        svc_type  = svc.get("type", "container")
-        metadata  = svc.get("metadata", {})
-        from_info = registry["nodes"].get(from_node, {})
-        to_info   = registry["nodes"].get(to_node)
+            return jsonify({"error": f"unknown service '{svc_id}'"}), 404
+        if svc.get("name") in _PINNED_NAMES:
+            return jsonify({"error": f"'{svc['name']}' is pinned — never auto/manually migrated"}), 400
 
-    if not to_info:
-        return jsonify({"error": f"target unit '{to_node}' not found"}), 404
-    if from_node == to_node:
-        return jsonify({"error": f"'{name}' is already on {to_node}"}), 400
+        deps, missing = resolve_migration_order(svc_id, registry["services"])
+        if missing and not force:
+            return jsonify({"error": "unmet dependencies", "missing": missing}), 409
 
-    to_ip = _best_ip(to_info)
-    if not to_ip:
-        return jsonify({"error": f"no reachable IP for target unit '{to_node}'"}), 400
+        tgt_info = registry["nodes"].get(to_node)
+        if not tgt_info or tgt_info.get("status") != "ONLINE":
+            return jsonify({"error": f"target node '{to_node}' is not ONLINE"}), 400
+        tgt_ip = _best_ip(tgt_info)
+        if not tgt_ip:
+            return jsonify({"error": f"target node '{to_node}' has no reachable IP"}), 400
 
-    now = datetime.now(timezone.utc).isoformat()
-    mig_id = str(uuid.uuid4())[:8]
-    with migration_lock:
-        migration_queue[mig_id] = {
-            "id":        mig_id,
-            "kind":      "native" if svc_type == "native" else "container",
-            "container": name,
-            "from_node": from_node,
-            "from_ip":   _best_ip(from_info) or "",
-            "to_node":   to_node,
-            "to_ip":     to_ip,
-            "metadata":  metadata,
-            "unit":      from_node,
-            "status":    "PENDING",
-            "queued_at": now,
-            "reason":    "manual CLI-triggered migration",
+        src_info = registry["nodes"].get(svc.get("host"), {})
+        src_ip   = _best_ip(src_info) or ""
+
+        mig_type = "git_push_and_stop" if svc.get("type") == "container" else "native_stop_and_sync"
+        mig_id = str(uuid.uuid4())[:8]
+        now_iso = datetime.now(timezone.utc).isoformat()
+        migration_entry = {
+            "id":         mig_id,
+            "container":  svc.get("name"),
+            "from_node":  svc.get("host"),
+            "from_ip":    src_ip,
+            "to_node":    to_node,
+            "to_ip":      tgt_ip,
+            "unit":       svc.get("host"),   # push step runs on the source
+            "status":     "PENDING",
+            "queued_at":  now_iso,
+            "reason":     "manual",
+            "type":       mig_type,
+            "sync_path":  svc.get("metadata", {}).get("sync_path", ""),
+            "systemd_unit": svc.get("metadata", {}).get("systemd_unit", svc.get("name")),
+            "prereqs":    svc.get("prereqs", {}),
         }
+        with migration_lock:
+            migration_queue[mig_id] = migration_entry
 
-    print(f"📦 MANUAL MIGRATION: queued {mig_id} — move '{name}' {from_node} → {to_node}")
-    return jsonify({"id": mig_id, "queued": True, "unit": from_node})
+    print(f"📦 MANUAL MIGRATION: queued {mig_id} — move '{svc.get('name')}' {svc.get('host')} → {to_node} ({mig_type})")
+    return jsonify({"result": "queued", "id": mig_id, "type": mig_type}), 200
+
+
+@app.route("/api/dns/status", methods=["GET"])
+def dns_status():
+    """
+    Report each configured zone's content as seen directly on ns1 (unit9),
+    via `pdnsutil list-zone` over SSH — the box that actually runs PowerDNS.
+    Locator runs on Fly, not on the DNS box, so this always goes over the
+    network using the SSH_KEY/SSH_USER deploy credential (see DNS_SSH_HOST).
+    """
+    results = {}
+    for zone in DNS_ZONES:
+        ok, out = _ssh_exec(DNS_SSH_HOST, DNS_SSH_USER, f"pdnsutil list-zone {zone}")
+        results[zone] = {"ok": ok, "content": out if ok else None, "error": None if ok else out}
+    return jsonify({"ns1_host": DNS_SSH_HOST, "zones": results})
+
+
+@app.route("/api/dns/sync", methods=["POST"])
+def dns_sync():
+    """
+    Force ns1 (unit9) to send a DNS NOTIFY for a zone to its configured
+    secondaries via `pdns_control notify` — the direct fix for `also-notify=`
+    being empty in unit9's PowerDNS config today, which means nothing
+    proactively pushes zone changes out right now.
+
+    Expected JSON: { "zone": "theofficialblacksheepco.com" }
+
+    NOTE: this can only confirm the NOTIFY was sent from ns1's side. Whether
+    ns2 (unit8) is even configured as a proper AXFR secondary is unconfirmed —
+    SSH to unit8 isn't currently available to verify or fix independently, so
+    this endpoint deliberately does not claim ns2 actually received/applied it.
+    """
+    data = request.get_json(silent=True) or {}
+    zone = data.get("zone")
+    if not zone:
+        return jsonify({"error": "requires 'zone'"}), 400
+    if zone not in DNS_ZONES:
+        return jsonify({"error": f"'{zone}' is not in the configured DNS_ZONES list", "known_zones": DNS_ZONES}), 400
+
+    ok, out = _ssh_exec(DNS_SSH_HOST, DNS_SSH_USER, f"pdns_control notify {zone}")
+    emit_event("dns", a_record=zone, pdns_server=DNS_SSH_HOST, ok=ok)
+    return jsonify({
+        "zone": zone,
+        "notified_from": DNS_SSH_HOST,
+        "ok": ok,
+        "output": out,
+        "note": "confirms NOTIFY was sent from ns1 only — ns2 receipt/AXFR success is not independently verifiable (unit8 SSH access unavailable)",
+    }), (200 if ok else 502)
+
 
 @app.route("/api/balance/status", methods=["GET"])
 def balance_status():
@@ -1439,6 +1756,8 @@ def balance_status():
         }
     with migration_lock:
         recent = sorted(migration_queue.values(), key=lambda m: m["queued_at"], reverse=True)[:20]
+    with prestage_lock:
+        prestage = dict(prestage_state)
 
     return jsonify({
         "enabled":          BALANCE_ENABLED,
@@ -1449,6 +1768,9 @@ def balance_status():
         "cooldown_seconds": BALANCE_COOLDOWN,
         "node_loads":       node_loads,
         "recent_migrations": recent,
+        "prestage_enabled":   BALANCE_PRESTAGE_ENABLED,
+        "prestage_threshold": BALANCE_HIGH - BALANCE_PRESTAGE_MARGIN,
+        "prestage":           prestage,
     })
 
 
@@ -1512,16 +1834,25 @@ def secure_the_bag(commit_message="Auto-commit: Securing data before container o
 
 
 def persist_registry():
-    """Write the current registry to disk for file-based consumers."""
+    """Write the current registry to disk for file-based consumers, and
+    snapshot it into Postgres (unit3) if DATABASE_URL is configured."""
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         filepath = os.path.join(DATA_DIR, "registry.json")
         with lock:
             snapshot = json.dumps(registry, indent=2)
+            registry_copy = {"nodes": dict(registry["nodes"]), "services": dict(registry["services"]),
+                              "updated": registry["updated"]}
         with open(filepath, "w") as f:
             f.write(snapshot)
     except Exception as e:
         print(f"⚠️  Failed to persist registry: {e}")
+        return
+
+    try:
+        db.save_registry_snapshot(registry_copy)
+    except Exception as e:
+        print(f"⚠️  Failed to persist registry to Postgres: {e}")
 
 
 def load_seed():
@@ -1652,127 +1983,59 @@ def load_seed():
         except Exception as e:
             print(f"⚠️ Failed to load seed: {e}")
 
-    # Also try to restore persisted registry (overrides seed with live data)
-    persisted_path = os.path.join(DATA_DIR, "registry.json")
-    if os.path.exists(persisted_path):
-        try:
-            with open(persisted_path, "r") as f:
-                persisted = json.load(f)
-            # Merge persisted data (it takes priority over seed)
-            for name, svc in persisted.get("services", {}).items():
-                registry["services"][name] = svc
-            for node_name, node_info in persisted.get("nodes", {}).items():
-                registry["nodes"][node_name] = node_info
-            registry["updated"] = persisted.get("updated", registry["updated"])
-            print(f"💾 Restored persisted registry: {len(registry['services'])} services")
-        except Exception as e:
-            print(f"⚠️  Failed to restore persisted registry: {e}")
-
-    ensure_core_services()
-
-
-def ensure_core_services():
-    """Ensures every known node has an entry for Apache, Bind, Traefik, and Lokey-Client."""
-    now = datetime.now(timezone.utc).isoformat()
-    core_services = ["apache", "bind", "traefik", "lokey-client"]
-
-    with lock:
-        nodes = list(registry["nodes"].keys())
-        for node_id in nodes:
-            for core in core_services:
-                already_exists = any(
-                    (svc["name"].lower() == core
-                     or (core == "bind" and "bind" in svc["name"].lower())
-                     or (core == "apache" and "httpd" in svc["name"].lower())
-                     or (core == "lokey-client" and "lokey" in svc["name"].lower()))
-                    and node_id in svc.get("hosts", [])
-                    for svc in registry["services"].values()
-                )
-                if not already_exists:
-                    registry["services"][f"{core}_{node_id}"] = {
-                        "name": core,
-                        "category": "docker containers",
-                        "hosts": [node_id],
-                        "status": "OFFLINE",
-                        "last_heartbeat": "",
-                        "registered_at": now,
-                        "metadata": {"discovered_via": "core_enforcement"}
-                    }
-        registry["updated"] = now
-    print(f"🛡️  Core services enforced for {len(nodes)} nodes")
-
-
-# ── ACTIVITY LOG (durable history, spreadsheet export, 90-day retention) ────
-# Node/service telemetry only ever lived as a single overwritten latest-state
-# snapshot (persist_registry() → registry.json), so there was no way to see
-# what a node's cpu/mem was doing in the run-up to an incident, or to prove
-# whether an OOM alert threshold was even crossed. This writes one row per
-# event to a daily CSV on the persistent Fly volume (DATA_DIR), so history
-# survives restarts/cold-starts and can be exported as a spreadsheet.
-
-ACTIVITY_LOG_DIR = os.environ.get("ACTIVITY_LOG_DIR", os.path.join(DATA_DIR, "activity"))
-ACTIVITY_RETENTION_DAYS = int(os.environ.get("ACTIVITY_RETENTION_DAYS", os.environ.get("RETENTION_DAYS", 90)))
-_ACTIVITY_FIELDS = ["timestamp", "entity_type", "entity_id", "event", "status",
-                     "cpu_percent", "mem_percent", "disk_percent", "host", "detail"]
-_activity_lock = threading.Lock()
-
-
-def _activity_file_for(day):
-    return os.path.join(ACTIVITY_LOG_DIR, f"activity_{day.strftime('%Y-%m-%d')}.csv")
-
-
-def log_activity(entity_type, entity_id, event, status="", cpu_percent=None,
-                  mem_percent=None, disk_percent=None, host="", detail=""):
-    """Append one row to today's activity CSV (creating the file/header if new)."""
-    import csv
-    now = datetime.now(timezone.utc)
-    row = {
-        "timestamp": now.isoformat(),
-        "entity_type": entity_type,
-        "entity_id": entity_id,
-        "event": event,
-        "status": status,
-        "cpu_percent": cpu_percent if cpu_percent is not None else "",
-        "mem_percent": mem_percent if mem_percent is not None else "",
-        "disk_percent": disk_percent if disk_percent is not None else "",
-        "host": host,
-        "detail": detail,
-    }
+    # Restore persisted registry — Postgres first (if configured and has data),
+    # falling back to the registry.json file (it takes priority over seed either way).
+    persisted = None
     try:
-        with _activity_lock:
-            os.makedirs(ACTIVITY_LOG_DIR, exist_ok=True)
-            filepath = _activity_file_for(now)
-            is_new = not os.path.exists(filepath)
-            with open(filepath, "a", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=_ACTIVITY_FIELDS)
-                if is_new:
-                    writer.writeheader()
-                writer.writerow(row)
+        persisted = db.load_registry_snapshot()
+        if persisted:
+            print(f"🗄️  Restored registry from Postgres: {len(persisted.get('services', {}))} services, "
+                  f"{len(persisted.get('nodes', {}))} nodes")
     except Exception as e:
-        print(f"⚠️  Failed to write activity log: {e}")
+        print(f"⚠️  Failed to restore registry from Postgres: {e}")
+
+    if not persisted:
+        persisted_path = os.path.join(DATA_DIR, "registry.json")
+        if os.path.exists(persisted_path):
+            try:
+                with open(persisted_path, "r") as f:
+                    persisted = json.load(f)
+                print(f"💾 Restored persisted registry from file: {len(persisted.get('services', {}))} services")
+            except Exception as e:
+                print(f"⚠️  Failed to restore persisted registry: {e}")
+
+    if persisted:
+        for name, svc in persisted.get("services", {}).items():
+            registry["services"][name] = svc
+        for node_name, node_info in persisted.get("nodes", {}).items():
+            registry["nodes"][node_name] = node_info
+        registry["updated"] = persisted.get("updated", registry["updated"])
+
+    purge_fabricated_core_services()
 
 
-def activity_log_reaper():
-    """Deletes daily activity CSVs older than ACTIVITY_RETENTION_DAYS."""
-    while True:
-        time.sleep(3600)  # hourly is plenty; files are date-stamped, not size-bounded
-        try:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=ACTIVITY_RETENTION_DAYS)
-            if not os.path.isdir(ACTIVITY_LOG_DIR):
-                continue
-            for fname in os.listdir(ACTIVITY_LOG_DIR):
-                m = re.match(r"^activity_(\d{4}-\d{2}-\d{2})\.csv$", fname)
-                if not m:
-                    continue
-                try:
-                    file_day = datetime.strptime(m.group(1), "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                except ValueError:
-                    continue
-                if file_day < cutoff:
-                    os.remove(os.path.join(ACTIVITY_LOG_DIR, fname))
-                    print(f"🗑️  ACTIVITY LOG PURGED: {fname} (> {ACTIVITY_RETENTION_DAYS} days)")
-        except Exception as e:
-            print(f"⚠️  activity_log_reaper error: {e}")
+def purge_fabricated_core_services():
+    """
+    One-time cleanup: removes service entries previously fabricated by the old
+    ensure_core_services() function, which unconditionally stamped apache/bind/
+    traefik/lokey-client entries onto EVERY node (including phones) regardless
+    of whether that node actually ran them — tagged discovered_via=core_enforcement.
+    Real detection already exists and is trustworthy without this: lokey-native's
+    register_stats() self-reports actually-running Docker containers by their
+    real names (see hard-stats.py), and active_discovery_scanner() genuinely
+    probes each node's Traefik API. Nothing needs to replace this function.
+    """
+    with lock:
+        fabricated = [
+            key for key, svc in registry["services"].items()
+            if (svc.get("metadata") or {}).get("discovered_via") == "core_enforcement"
+        ]
+        for key in fabricated:
+            del registry["services"][key]
+        if fabricated:
+            registry["updated"] = datetime.now(timezone.utc).isoformat()
+    if fabricated:
+        print(f"🧹 Purged {len(fabricated)} fabricated core-service entries (core_enforcement)")
 
 
 # ── HEARTBEAT REAPER ────────────────────────────────────────────────────────
@@ -1810,14 +2073,11 @@ def heartbeat_reaper():
                                 svc["offline_since"] = now.isoformat()
                             changed = True
                             print(f"💀 OFFLINE: {name}")
-                            log_activity("service", name, "offline_timeout", status="OFFLINE",
-                                         host=svc.get("host", ""), detail=f"no heartbeat > {_timeout}s")
                             if "lokey" in name.lower():
                                 node_id = svc.get("host", "")
                                 if node_id and node_id in registry["nodes"]:
                                     registry["nodes"][node_id]["status"] = "OFFLINE"
                                     print(f"💀 NODE OFFLINE: {node_id}")
-                                    log_activity("node", node_id, "offline_timeout", status="OFFLINE")
                     except (ValueError, TypeError):
                         pass
 
@@ -1837,8 +2097,6 @@ def heartbeat_reaper():
                 del registry["services"][name]
                 changed = True
                 print(f"🗑️  PURGED: {name} (offline > {RETENTION_DAYS} days)")
-                log_activity("service", name, "purged", status="PURGED",
-                             detail=f"offline > {RETENTION_DAYS} days")
 
             # Nodes whose own last_seen has expired go OFFLINE directly, independent of
             # whether a matching "lokey"-named service exists — the check above only
@@ -1857,8 +2115,6 @@ def heartbeat_reaper():
                         node["status"] = "OFFLINE"
                         changed = True
                         print(f"💀 NODE OFFLINE (stale heartbeat): {node_id}")
-                        log_activity("node", node_id, "offline_timeout", status="OFFLINE",
-                                     detail="stale last_seen")
                 except (ValueError, TypeError):
                     pass
 
@@ -1880,6 +2136,7 @@ _PINNED_NAMES = {
     "wg-easy", "crowdsec", "fail2ban",
 }
 
+
 def _clean_ip(raw):
     """Strip description suffixes like '10.0.0.1- hostname'."""
     if not raw:
@@ -1895,6 +2152,50 @@ def _best_ip(info):
         or _clean_ip(info.get("ip"))
         or _clean_ip(info.get("openvpn_ip"))
     )
+
+
+def resolve_migration_order(svc_id, services_snap):
+    """
+    Shallow (one-level) dependency check for a service about to be migrated.
+    Returns (deps, missing) — deps is the service's declared depends_on list,
+    missing is the subset with no ONLINE instance anywhere in the registry.
+    A dependency doesn't need to be co-located with the service being moved
+    (Locator services generally reach each other over Tailscale/openvpn, not
+    localhost) — it just needs to be reachable somewhere.
+
+    Not a general DAG scheduler: does not recurse into a dependency's own
+    depends_on, and does not order multiple simultaneous migrations relative
+    to each other.
+    """
+    svc = services_snap.get(svc_id, {})
+    deps = svc.get("depends_on", []) or []
+    missing = [d for d in deps if services_snap.get(d, {}).get("status") != "ONLINE"]
+    return deps, missing
+
+
+def _ssh_exec(host, user, cmd, timeout=20):
+    """
+    Run a command on a remote host over SSH using the configured deploy key
+    (SSH_KEY/SSH_USER — see CONFIG). Used by the DNS status/sync endpoints to
+    shell out to `pdnsutil`/`pdns_control` on the box actually running
+    PowerDNS, since Locator itself runs on Fly, not on that box.
+    Returns (success, stdout_or_error).
+    """
+    import subprocess
+    if not SSH_KEY:
+        return False, "SSH_KEY not configured — cannot reach remote host"
+    ssh_cmd = [
+        "ssh", "-i", SSH_KEY,
+        "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=8",
+        f"{user}@{host}", cmd,
+    ]
+    try:
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode != 0:
+            return False, (result.stderr or result.stdout).strip()
+        return True, result.stdout.strip()
+    except Exception as e:
+        return False, str(e)
 
 
 def load_balancer():
@@ -1923,6 +2224,9 @@ def load_balancer():
         overloaded     = []   # [(node_id, load_pct, node_info)]
         underloaded    = []   # [(node_id, load_pct, node_info)]
         all_nodes_load = []   # all nodes with valid metrics, for spread check
+        prestage_candidates = []  # [(node_id, load_pct, node_info)] — trending, not yet overloaded
+
+        prestage_threshold = BALANCE_HIGH - BALANCE_PRESTAGE_MARGIN
 
         for node_id, info in nodes_snap.items():
             if info.get("status") != "ONLINE":
@@ -1946,8 +2250,50 @@ def load_balancer():
                 overloaded.append((node_id, load, info))
             elif load <= BALANCE_LOW:
                 underloaded.append((node_id, load, info))
+            elif load >= prestage_threshold and BALANCE_PRESTAGE_ENABLED:
+                # Between prestage_threshold and BALANCE_HIGH: not yet actioned,
+                # but worth validating ahead of time (see prestage pass below).
+                prestage_candidates.append((node_id, load, info))
+                overload_strikes.pop(node_id, None)
             else:
                 overload_strikes.pop(node_id, None)  # no longer overloaded
+
+        # Pre-stage pass: validate (never execute) a would-be migration for nodes
+        # trending toward BALANCE_HIGH. Runs regardless of whether a real
+        # migration fires this cycle — it's watching a different, earlier band.
+        # Deliberately non-destructive: reachability + dependency checks only,
+        # no package installs or git fetches performed automatically in the
+        # background — see prestage_state's docstring for why that was scoped
+        # out. This still gives the dashboard early "watching X -> Y" visibility
+        # and skips redundant reachability lookups once a real migration is queued.
+        if BALANCE_PRESTAGE_ENABLED and prestage_candidates:
+            with_ip_underloaded = [
+                (nid, ld, inf) for nid, ld, inf in (underloaded + all_nodes_load)
+                if _best_ip(inf)
+            ]
+            for node_id, load, info in prestage_candidates:
+                candidates = [
+                    (svc_id, svc) for svc_id, svc in services_snap.items()
+                    if svc.get("host") == node_id
+                    and svc.get("status") == "ONLINE"
+                    and svc.get("type") in ("container", "native")
+                    and svc.get("name") not in _PINNED_NAMES
+                    and not svc.get("metadata", {}).get("pinned")
+                ]
+                for svc_id, svc in candidates:
+                    deps, missing = resolve_migration_order(svc_id, services_snap)
+                    tgt = next((t for t in with_ip_underloaded if t[0] != node_id), None)
+                    with prestage_lock:
+                        prestage_state[svc_id] = {
+                            "svc":               svc_id,
+                            "candidate_source":  node_id,
+                            "candidate_target":  tgt[0] if tgt else None,
+                            "load":              load,
+                            "deps":              deps,
+                            "missing_deps":      missing,
+                            "target_reachable":  bool(tgt),
+                            "checked_at":        now.isoformat(),
+                        }
 
         # Differential trigger: if spread between busiest and least busy >= BALANCE_DIFF,
         # promote the busiest into overloaded and least busy into underloaded even if
@@ -1976,11 +2322,6 @@ def load_balancer():
             is_oom = (src_info.get("mem_percent") or 0) >= OOM_THRESHOLD
             if is_oom:
                 print(f"🚨 BALANCE: OOM emergency on {src_id} mem={src_info.get('mem_percent'):.1f}% — bypassing anti-flap/cooldown")
-                log_activity("node", src_id, "oom_emergency", status="OOM",
-                             mem_percent=src_info.get("mem_percent"),
-                             cpu_percent=src_info.get("cpu_percent"),
-                             disk_percent=src_info.get("disk_percent"))
-                _send_alert(src_id, "OOM_EMERGENCY", f"mem={src_info.get('mem_percent'):.1f}% — migrating containers off")
 
             # Cooldown check (skipped in OOM emergency)
             last_mig = node_last_migrated.get(src_id)
@@ -1996,30 +2337,22 @@ def load_balancer():
                     print(f"⚠️  BALANCE: {src_id} at {src_load:.1f}% — strike {overload_strikes[src_id]}/{BALANCE_STRIKES}, watching")
                     continue
 
-            # Find movable containers on this node
+            # Find movable services on this node — container OR native, as long as
+            # their declared dependencies (if any) are satisfied somewhere in the
+            # registry. Native services used to be hard-excluded here entirely.
             movable = [
                 (svc_id, svc)
                 for svc_id, svc in services_snap.items()
                 if svc.get("host") == src_id
                 and svc.get("status") == "ONLINE"
-                and svc.get("type") == "container"
+                and svc.get("type") in ("container", "native")
                 and svc.get("name") not in _PINNED_NAMES
                 and not svc.get("metadata", {}).get("pinned")
+                and not resolve_migration_order(svc_id, services_snap)[1]  # no missing deps
             ]
 
             if not movable:
-                print(f"⚠️  BALANCE: {src_id} overloaded but no movable containers found")
-                continue
-
-            # Pick target — first underloaded node that has a usable IP
-            tgt_id = tgt_ip = tgt_info = tgt_load = None
-            for _tid, _tload, _tinfo in underloaded:
-                _tip = _best_ip(_tinfo)
-                if _tip:
-                    tgt_id, tgt_load, tgt_info, tgt_ip = _tid, _tload, _tinfo, _tip
-                    break
-            if not tgt_id:
-                print(f"⚠️  BALANCE: no reachable target node for {src_id}")
+                print(f"⚠️  BALANCE: {src_id} overloaded but no movable services found (container or native, deps satisfied)")
                 continue
 
             # Pick the container: oldest running first (most stable, least disruptive)
@@ -2027,8 +2360,41 @@ def load_balancer():
             svc_id, svc = movable[0]
             container_name = svc["name"]
 
+            # Fast path: if this exact service was already pre-staged (Phase 3)
+            # against a reachable target recently enough, skip re-searching for
+            # one — the prestage pass already did that reachability lookup.
+            tgt_id = tgt_ip = tgt_info = tgt_load = None
+            staged = prestage_state.get(svc_id)
+            if staged and staged.get("candidate_target") and not staged.get("missing_deps"):
+                staged_age = (now - datetime.fromisoformat(staged["checked_at"])).total_seconds()
+                if staged_age <= PRESTAGE_STALE_SECONDS:
+                    _stid = staged["candidate_target"]
+                    _sinfo = nodes_snap.get(_stid, {})
+                    _sip = _best_ip(_sinfo)
+                    if _sip and _sinfo.get("status") == "ONLINE":
+                        tgt_id, tgt_ip, tgt_info = _stid, _sip, _sinfo
+                        tgt_load = _sinfo.get("disk_percent") or max(_sinfo.get("cpu_percent") or 0, _sinfo.get("mem_percent") or 0)
+
+            if not tgt_id:
+                # Fall back to searching fresh — first underloaded node with a usable IP
+                for _tid, _tload, _tinfo in underloaded:
+                    _tip = _best_ip(_tinfo)
+                    if _tip:
+                        tgt_id, tgt_load, tgt_info, tgt_ip = _tid, _tload, _tinfo, _tip
+                        break
+            if not tgt_id:
+                print(f"⚠️  BALANCE: no reachable target node for {src_id}")
+                continue
+
+            with prestage_lock:
+                prestage_state.pop(svc_id, None)  # consumed — now a real migration, not just watched
+
             src_ip = _best_ip(src_info) or ""
             mig_id = str(uuid.uuid4())[:8]
+            # Explicit type, matching create_migration()'s logic — without this,
+            # native services would fall through to the Docker-only legacy rsync
+            # path (_execute_rsync_migration) and fail outright.
+            mig_type = "git_push_and_stop" if svc.get("type") == "container" else "native_stop_and_sync"
             with migration_lock:
                 migration_queue[mig_id] = {
                     "id":         mig_id,
@@ -2037,9 +2403,14 @@ def load_balancer():
                     "from_ip":    src_ip,
                     "to_node":    tgt_id,
                     "to_ip":      tgt_ip,
+                    "unit":       src_id,   # push/stop step runs on the source
                     "status":     "PENDING",
                     "queued_at":  now.isoformat(),
                     "reason":     f"{src_id} disk {src_load:.1f}% → {tgt_id} disk {tgt_load:.1f}%",
+                    "type":       mig_type,
+                    "sync_path":  svc.get("metadata", {}).get("sync_path", ""),
+                    "systemd_unit": svc.get("metadata", {}).get("systemd_unit", container_name),
+                    "prereqs":    svc.get("prereqs", {}),
                 }
 
             node_last_migrated[src_id] = now
@@ -2054,6 +2425,15 @@ def load_balancer():
         for node_id in list(overload_strikes):
             if node_id not in {n[0] for n in overloaded}:
                 overload_strikes.pop(node_id, None)
+
+        # Drop pre-stage entries for services whose node fell back out of the
+        # prestage band entirely (not still prestage-watched, and not consumed
+        # into a real migration above) — otherwise these accumulate forever.
+        watched_nodes = {n[0] for n in prestage_candidates}
+        with prestage_lock:
+            for svc_id in list(prestage_state):
+                if prestage_state[svc_id].get("candidate_source") not in watched_nodes:
+                    prestage_state.pop(svc_id, None)
 
 
 # ── LOCAL DOCKER DISCOVERY ────────────────────────────────────────────────
@@ -2507,25 +2887,47 @@ def active_discovery_scanner():
         changed = False
         
         with lock:
-            # We want to scan all known node IPs (Internal and OpenVPN)
+            # We want to scan all known node IPs (Internal and OpenVPN), plus any
+            # node that only has a stored traefik_api URL and no ip on file — e.g.
+            # seeded infra nodes (mac_mini, secondary_vps_unit2) that never call
+            # /register themselves, so nothing else ever refreshes their liveness
+            # and they were previously stuck ONLINE forever.
             nodes_to_scan = []
             for node_name, node_info in registry["nodes"].items():
-                ips = [node_info.get("ip")]
-                if node_info.get("openvpn_ip"):
-                    ips.append(node_info.get("openvpn_ip"))
-                
-                for ip in ips:
+                endpoints = []
+                has_ip = False
+                for ip in (node_info.get("ip"), node_info.get("openvpn_ip")):
                     if ip and ip != 'unknown' and 'pending' not in ip:
-                        nodes_to_scan.append((node_name, ip))
-            
-        for node_name, ip in nodes_to_scan:
-            # Try to hit Traefik API on default ports
-            for port in [80, 8080, 443]:
-                traefik_url = f"http://{ip}:{port}" if port != 443 else f"https://{ip}"
+                        has_ip = True
+                        for port in [80, 8080, 443]:
+                            endpoints.append(f"http://{ip}:{port}" if port != 443 else f"https://{ip}")
+                if node_info.get("traefik_api"):
+                    endpoints.append(node_info["traefik_api"])
+
+                # Only nodes with NO ip/openvpn_ip (i.e. no /register heartbeat
+                # path of their own — the mac_mini/secondary_vps_unit2 case) get
+                # their node-level status driven by this scan. Nodes that do have
+                # an ip self-register via POST /register already (see the "Update
+                # the node as ONLINE whenever any service heartbeats" block above)
+                # — letting a failed Traefik probe override THAT status caused
+                # lokey-registered nodes with no Traefik running (e.g. unit9,
+                # which uses Caddy) to flap ONLINE/OFFLINE against their own
+                # legitimate heartbeats. Traefik discovery still runs for them
+                # (to find containers), it just can't flip their own status.
+                if endpoints:
+                    nodes_to_scan.append((node_name, endpoints, not has_ip))
+
+        for node_name, endpoints, owns_node_status in nodes_to_scan:
+            reached = False
+            for traefik_url in endpoints:
+                # A stored traefik_api already ends in .../api; ip-based guesses don't.
+                routers_url = f"{traefik_url}/http/routers" if traefik_url.rstrip('/').endswith('/api') \
+                    else f"{traefik_url}/api/http/routers"
                 try:
-                    resp = requests.get(f"{traefik_url}/api/http/routers", timeout=3)
+                    resp = requests.get(routers_url, timeout=3)
                     if resp.status_code != 200: continue
-                    
+                    reached = True
+
                     routers = resp.json()
                     for router in routers:
                         if router.get("provider") == "internal" or router.get("name", "").endswith("@internal"):
@@ -2563,10 +2965,28 @@ def active_discovery_scanner():
                     break # Success on this node/IP
                 except Exception:
                     continue
-                        
+
+            # The Traefik check IS this node's heartbeat for nodes that have no
+            # other way to report in (nothing else ever touches their last_seen).
+            # A failed scan this cycle means no heartbeat — mark it OFFLINE now
+            # rather than leaving it ONLINE forever, same as service heartbeats.
+            if owns_node_status:
+                with lock:
+                    node = registry["nodes"].get(node_name)
+                    if node:
+                        if reached:
+                            node["status"] = "ONLINE"
+                            node["last_seen"] = now
+                            changed = True
+                        elif node.get("status") == "ONLINE":
+                            node["status"] = "OFFLINE"
+                            node["last_seen"] = node.get("last_seen") or now
+                            changed = True
+                            print(f"💀 NODE OFFLINE (traefik unreachable): {node_name}")
+
         if changed:
             persist_registry()
-            
+
         time.sleep(SCANNER_INTERVAL)
 
 
@@ -2731,7 +3151,6 @@ def main():
     print(f"  Heartbeat timeout: {HEARTBEAT_TIMEOUT}s")
     print(f"  Reaper interval:   {REAPER_INTERVAL}s")
     print(f"  Data directory:    {DATA_DIR}")
-    print(f"  Activity log:      {ACTIVITY_LOG_DIR} (retain {ACTIVITY_RETENTION_DAYS}d)")
     print(f"  Load balancer:     {'ENABLED' if BALANCE_ENABLED else 'DISABLED'}")
     print(f"  Idle auto-stop:    {'ENABLED' if IDLE_ENABLED else 'DISABLED'}"
           + (f" ({IDLE_DEFAULT_TIMEOUT // 60}m default, label {IDLE_LABEL_ENABLE}=true)" if IDLE_ENABLED else ""))
@@ -2743,6 +3162,7 @@ def main():
         print(f"    Cooldown:        {BALANCE_COOLDOWN}s")
     print("=" * 55)
 
+    db.init_schema()
     load_seed()
     persist_registry()
 
@@ -2752,9 +3172,6 @@ def main():
     # Start the heartbeat reaper in the background
     reaper = threading.Thread(target=heartbeat_reaper, daemon=True)
     reaper.start()
-
-    # Start the activity-log retention reaper (90-day CSV cleanup)
-    threading.Thread(target=activity_log_reaper, daemon=True).start()
 
     # Start the local Docker scanner
     docker_scanner = threading.Thread(target=local_docker_scanner, daemon=True)
@@ -2794,122 +3211,40 @@ def main():
     # Critical service watchdog — immediately restarts apache, lokey, locator if OFFLINE
     threading.Thread(target=critical_service_watchdog, daemon=True).start()
 
+    # Feed Lokey's already-collected GPS fixes into Traccar
+    threading.Thread(target=traccar_feeder, daemon=True).start()
+
     beast_log("🔦 LOCATOR online — registry loaded, telemetry forwarder active")
     app.run(host="0.0.0.0", port=PORT, threaded=True)
 
 
 if __name__ == "__main__":
     main()
-
-
-
-# ── DEPLOYMENT BUNDLE HANDLER ──────────────────────────────────────────────
-
-@app.route("/api/deploy-bundle", methods=["POST"])
-def deploy_bundle():
-    """
-    Accept deployment bundle (single file or directory).
-    - Extract and store .env in Vaultwarden
-    - Post docker-compose.yml to UI
-    - Return bundle metadata
-    """
-    import yaml as _yaml
-    import zipfile as _zipfile
-    from io import BytesIO as _BytesIO
-    import requests as _requests
-    
+else:
+    # When imported by Gunicorn or other WSGI servers, initialize the app
     try:
-        # Get bundle file from request
-        if 'bundle' not in request.files:
-            return jsonify({"error": "No bundle file provided"}), 400
-        
-        file = request.files['bundle']
-        bundle_data = _BytesIO(file.read())
-        
-        # Extract bundle
-        try:
-            with _zipfile.ZipFile(bundle_data) as zf:
-                files = zf.namelist()
-        except:
-            return jsonify({"error": "Invalid bundle format (must be ZIP)"}), 400
-        
-        # Look for locator.yml and docker-compose.yml
-        locator_yml_path = None
-        compose_yml_path = None
-        env_path = None
-        
-        for f in files:
-            if 'locator.yml' in f:
-                locator_yml_path = f
-            if 'docker-compose.yml' in f:
-                compose_yml_path = f
-            if '.env' in f:
-                env_path = f
-        
-        if not locator_yml_path or not compose_yml_path:
-            return jsonify({"error": "Bundle must contain locator.yml and docker-compose.yml"}), 400
-        
-        # Extract content
-        with _zipfile.ZipFile(bundle_data) as zf:
-            locator_content = zf.read(locator_yml_path).decode()
-            compose_content = zf.read(compose_yml_path).decode()
-            env_content = zf.read(env_path).decode() if env_path else ""
-        
-        locator_yml = _yaml.safe_load(locator_content)
-        bundle_name = locator_yml.get("name", "deployment")
-        
-        # 1. Store .env in Vaultwarden
-        vaultwarden_id = None
-        if env_content:
-            try:
-                vault_payload = {
-                    "name": f"{bundle_name}-env",
-                    "type": "note",
-                    "content": env_content,
-                    "tags": ["deployment", bundle_name]
-                }
-                vault_resp = _requests.post(
-                    f"{os.environ.get('VAULTWARDEN_URL', 'http://unit6:6000')}/api/vault/secure-notes",
-                    json=vault_payload,
-                    timeout=10
-                )
-                if vault_resp.status_code in [200, 201]:
-                    vaultwarden_id = vault_resp.json().get("id")
-            except Exception as e:
-                print(f"⚠️ Vaultwarden store failed: {e}")
-        
-        # 2. Post docker-compose.yml to UI
-        ui_posted = False
-        try:
-            ui_payload = {
-                "name": bundle_name,
-                "deployment_type": locator_yml.get("deployment_type", "standard"),
-                "location_type": locator_yml.get("location_type", "stationary"),
-                "compose": compose_content,
-                "vaultwarden_id": vaultwarden_id,
-                "posted_at": datetime.now(timezone.utc).isoformat()
-            }
-            ui_resp = _requests.post(
-                f"{os.environ.get('LOCATOR_UI_URL', 'http://unit6:5000')}/api/deployments",
-                json=ui_payload,
-                timeout=10
-            )
-            ui_posted = ui_resp.status_code in [200, 201]
-        except Exception as e:
-            print(f"⚠️ UI post failed: {e}")
-        
-        return jsonify({
-            "status": "success",
-            "bundle_name": bundle_name,
-            "files_count": len(files),
-            "vaultwarden_id": vaultwarden_id,
-            "ui_posted": ui_posted,
-            "compose_content": compose_content,
-            "locator_yml": locator_yml
-        }), 200
-    
+        load_seed()
+        persist_registry()
+        # Start background threads
+        import threading
+        threading.Thread(target=heartbeat_reaper, daemon=True).start()
+        threading.Thread(target=local_docker_scanner, daemon=True).start()
+        threading.Thread(target=duplicate_killer, daemon=True).start()
+        threading.Thread(target=active_discovery_scanner, daemon=True).start()
+        threading.Thread(target=website_pinger, daemon=True).start()
+        if BALANCE_ENABLED:
+            threading.Thread(target=load_balancer, daemon=True).start()
+        if IDLE_ENABLED:
+            threading.Thread(target=idle_reaper, daemon=True).start()
+        if GIT_AUTO_PUSH:
+            threading.Thread(target=_git_push_worker, daemon=True).start()
+        threading.Thread(target=_self_election, daemon=True).start()
+        threading.Thread(target=critical_service_watchdog, daemon=True).start()
+        threading.Thread(target=traccar_feeder, daemon=True).start()
+        beast_log("🔦 LOCATOR online (Gunicorn) — registry loaded, telemetry forwarder active")
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"ERROR initializing LOCATOR in Gunicorn mode: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT, debug=False)
+
