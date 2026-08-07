@@ -1,0 +1,6 @@
+Service:
+  filebeat:
+    deployement_type: essential
+    location_type: stationary
+    inactivity_timout_minutes: "0"
+    Unit: all
