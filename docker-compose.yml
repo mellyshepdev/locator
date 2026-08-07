@@ -40,8 +40,8 @@ services:
       - "traefik.http.routers.locator-api.service=locator"
       - "traefik.http.services.locator.loadbalancer.server.port=5000"
     networks:
-      - proxy
+      - networking
 
 networks:
-  proxy:
+  networking:
     external: true

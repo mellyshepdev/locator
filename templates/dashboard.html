@@ -613,6 +613,17 @@
         .filter-bar input { width: 280px; }
         .filter-bar input:focus { box-shadow: 0 0 10px rgba(0, 240, 255, 0.4); }
         .filter-count { color: #6699aa; font-size: 12px; margin-left: auto; letter-spacing: 1px; }
+        .event-box {
+            background-color: rgba(0, 0, 0, 0.8);
+            border: 1px solid var(--neon-blue);
+            border-left: 5px solid var(--neon-green);
+            padding: 10px 20px;
+            margin-bottom: 20px;
+            color: #fff;
+            font-family: inherit;
+            font-size: 14px;
+        }
+
     </style>
 <!-- Matomo -->
 <script>
@@ -686,6 +697,11 @@
 
     <!-- TACTICAL GRID VIEW -->
     <div id="view-grid" class="view-container active">
+
+     <div class="event-box">
+      <div class="grid-title">EVENT LOG</div>
+       <p>System events and client errors will appear here.</p>
+      </div>
 
         <!-- BLUE RECTANGLE: DEVICES -->
         <div class="grid-container grid-blue">
@@ -1632,6 +1648,64 @@
                 return cell;
             }
 
+
+               // Function to append a formatted event to the Event Box
+                   function renderEvent(event) {
+                                  const eventBox = document.querySelector('.event-box');
+                                  if (!eventBox) return;
+ 
+                                 const entry = document.createElement('div');
+                                 entry.style.borderBottom = '1px solid rgba(0, 255, 0, 0.15)';
+                                 entry.style.padding = '6px 0';
+                                 entry.style.fontSize = '12px';
+                                 entry.style.lineHeight = '1.4';
+
+                                // Formats Date and Time
+                                const dateObj = event.timestamp ? new Date(event.timestamp) : new Date();
+                                const formattedDate = dateObj.toLocaleDateString();
+                                const formattedTime = dateObj.toLocaleTimeString();
+
+                                let details = `<span style="color: var(--neon-green);">[${formattedDate} ${formattedTime}]</span> `;
+
+    if (event.type === 'migration') {
+        details += `<strong style="color: var(--accent);">[MIGRATION]</strong> Container <code>${event.from_container}</code> shifted to <code>${event.to_container}</code> on <strong>${event.unit}</strong>`;
+    } else if (event.type === 'dns') {
+        details += `<strong style="color: #00f0ff;">[DNS]</strong> A Record <code>${event.a_record}</code> point -> PDNS <code>${event.pdns_server}</code>`;
+    } else {
+        details += `<span>${event.message || JSON.stringify(event)}</span>`;
+    }
+
+    entry.innerHTML = details;
+    eventBox.appendChild(entry);
+    
+    // Auto-scroll to keep newest events visible
+    eventBox.scrollTop = eventBox.scrollHeight;
+}
+
+// 1. Fetch initial event history on load
+fetch('/api/events')
+    .then(res => res.json())
+    .then(events => {
+        if (Array.isArray(events)) {
+            events.forEach(renderEvent);
+        }
+    })
+    .catch(err => console.error('Failed to load initial event log:', err));
+
+// 2. Connect to WebSocket for live event streaming
+const eventSocket = new WebSocket(`ws://${window.location.host}/ws/events`);
+
+eventSocket.onmessage = function(wsEvent) {
+    try {
+        const data = JSON.parse(wsEvent.data);
+        renderEvent(data);
+    } catch (e) {
+        renderEvent({ message: wsEvent.data });
+    }
+};
+
+
+
             // --- DEVICES TABLE ---
             nodes.forEach(item => {
                 const tr = document.createElement('tr');
@@ -2083,6 +2157,40 @@
                     addRow(label, val);
                 }
             });
+
+              if (item.containers && item.containers.length > 0) {
+ const sep = document.createElement('tr');
+ sep.innerHTML = '<td colspan="2" style="padding-top: 14px; color: var(--neon-green);"><strong>Containers</strong></td>';
+ rows.appendChild(sep);
+
+ const containerRow = document.createElement('tr');
+ const containerCell = document.createElement('td');
+ containerCell.colSpan = 2;
+ 
+ const containerContainer = document.createElement('div');
+ containerContainer.style.display = 'flex';
+ containerContainer.style.flexWrap = 'wrap';
+ containerContainer.style.gap = '8px';
+ 
+ item.containers.forEach(container => {
+ const box = document.createElement('div');
+ box.style.border = '1px solid var(--neon-green)';
+ box.style.borderRadius = '4px';
+ box.style.padding = '6px';
+ box.style.backgroundColor = 'rgba(0, 255, 0, 0.1)';
+ box.style.fontSize = '12px';
+ box.innerText = container.name || container.service || 'Unknown';
+ containerContainer.appendChild(box);
+ });
+ 
+ containerCell.appendChild(containerContainer);
+ containerRow.appendChild(containerCell);
+ rows.appendChild(containerRow);
+ }
+
+ document.getElementById('device-modal').style.display = 'flex';
+}
+
 
             // Every remaining top-level field not already covered above
             Object.keys(item).forEach(key => {

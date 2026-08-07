@@ -3,7 +3,7 @@
   THE LOCATOR — Universal Service Registry
   
   Single source of truth for every service,
-  container, API, and daemon in the Beast mesh.
+  container, API, and daemon in the mesh.
 ═══════════════════════════════════════════════
 """
 
@@ -246,7 +246,7 @@ def _send_alert(service_name: str, status: str, extra: str = ""):
 # ── INSTANCE LIMITS ──────────────────────────────────────────────────────────
 
 # Containers that may run up to 3 instances; everything else is singleton (max 1).
-TRIPLE_ALLOWED = {"traefik", "apache", "lokey", "openvpn", "wireguard", "headscale", "tailscale", "bind"}
+TRIPLE_ALLOWED = {"traefik", "apache", "lokey", "openvpn", "wireguard", "headscale", "tailscale", "pdns"}
 
 def _base_name(container_name: str) -> str:
     """Derive a canonical base name by stripping project prefixes and numeric suffixes."""
