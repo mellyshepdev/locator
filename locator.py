@@ -99,10 +99,12 @@ DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 SEED_FILE = os.environ.get("SEED_FILE", "/app/seed_registry.json")
 EXCEL_FILE = "registry.xlsx"
 
-# DNS zone status/sync (unit9 = ns1, runs PowerDNS with a sqlite3 backend;
+# DNS zone status/sync (unit9 runs the PowerDNS primary with a sqlite3
+# backend, at ns2.theofficialblacksheepco.online — DNS delegation for the
+# .online zone completed 2026-08-07, so this resolves publicly now;
 # reached over SSH with the SSH_USER/SSH_KEY above since Locator itself runs
 # on Fly, not on the DNS box — see /api/dns/status and /api/dns/sync).
-DNS_SSH_HOST = os.environ.get("DNS_SSH_HOST", "66.175.238.103")
+DNS_SSH_HOST = os.environ.get("DNS_SSH_HOST", "ns2.theofficialblacksheepco.online")
 DNS_SSH_USER = os.environ.get("DNS_SSH_USER", "root")
 DNS_ZONES = [z.strip() for z in os.environ.get(
     "DNS_ZONES",
@@ -1247,41 +1249,24 @@ def mesh_3d():
 
 
 # ── Traccar proxy ─────────────────────────────────────────────────────
-# Traccar runs on unit9 behind Caddy at traccar.theofficialblacksheepco.online,
-# but that domain isn't publicly resolvable yet (the .online zone is still
-# served by IONOS — unit9's own PowerDNS records are staged but not delegated
-# at the registrar, see blacksheep_welcome_dns_migration notes). We're on Fly,
-# so we can't reach unit9 by hostname until that delegation completes, and
-# Traccar's raw HTTP port (8082) isn't open externally — only Caddy's 443 is.
-# Caddy picks the vhost by TLS SNI, so we resolve the hostname to unit9's
-# public IP ourselves (via a scoped socket.getaddrinfo patch, restored right
-# after the call) while still presenting the real hostname for SNI. Once DNS
-# delegation is done, drop TRACCAR_PIN_IP and this shim entirely.
+# Traccar runs on unit9 behind Caddy at traccar.theofficialblacksheepco.online.
+# DNS delegation for the .online zone completed (verified 2026-08-07 — the
+# zone's own nameservers answer authoritatively now), so plain hostname
+# resolution works and the old IP-pinning shim is gone. Caddy still serves
+# this vhost with `tls internal` (self-signed), so verify=False stays until
+# that's switched to a real ACME cert — a separate, unrelated fix.
 TRACCAR_HOST = os.environ.get("TRACCAR_HOST", "traccar.theofficialblacksheepco.online")
-TRACCAR_PIN_IP = os.environ.get("TRACCAR_PIN_IP", "66.175.238.103")
 TRACCAR_USER = os.environ.get("TRACCAR_USER", "admin@theofficialblacksheepco.com")
-TRACCAR_PASS = os.environ.get("TRACCAR_PASS", "changeme123")
+TRACCAR_PASS = os.environ.get("TRACCAR_PASS", "")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)  # self-signed cert, see note above
 
 
 def _traccar_request(method, path, **kwargs):
-    """Call a Traccar path (REST API or the /osmand/ position endpoint),
-    pinned to its known IP (see note above)."""
-    real_getaddrinfo = socket.getaddrinfo
-
-    def _pinned_getaddrinfo(host, *args, **kw):
-        if host == TRACCAR_HOST:
-            host = TRACCAR_PIN_IP
-        return real_getaddrinfo(host, *args, **kw)
-
-    socket.getaddrinfo = _pinned_getaddrinfo
-    try:
-        return requests.request(
-            method, f"https://{TRACCAR_HOST}{path}",
-            verify=False, timeout=5, **kwargs,
-        )
-    finally:
-        socket.getaddrinfo = real_getaddrinfo
+    """Call a Traccar path (REST API or the /osmand/ position endpoint)."""
+    return requests.request(
+        method, f"https://{TRACCAR_HOST}{path}",
+        verify=False, timeout=5, **kwargs,
+    )
 
 
 def _traccar_get(path):
@@ -2563,6 +2548,25 @@ COMMAND_RETRY_SECONDS = 180   # re-serve DISPATCHED commands the lokey never com
 COMMAND_RETENTION     = 100   # completed commands kept for history
 
 
+def enforce_units_all():
+    """Background: scan registry for services with 'units: all' and queue deploy commands."""
+    time.sleep(30)  # let registry initialize
+    while True:
+        try:
+            online_units = [
+                unit_id for unit_id, info in registry.get("nodes", {}).items()
+                if info.get("status") == "ONLINE"
+            ]
+            for svc_id, svc in registry.get("services", {}).items():
+                units_spec = (svc.get("metadata") or {}).get("units", "")
+                if units_spec == "all" and online_units:
+                    for unit in online_units:
+                        _queue_command(unit, svc_id, "deploy", source="units_all_enforcement")
+        except Exception as e:
+            print(f"⚠️  enforce_units_all error: {e}")
+        time.sleep(60)
+
+
 def _parse_duration(value, default):
     """'3600' / '90m' / '2h' / '45s' → seconds."""
     try:
@@ -3207,6 +3211,9 @@ def main():
 
     # Self-election: secondaries stop themselves if the canonical primary is up
     threading.Thread(target=_self_election, daemon=True).start()
+
+    # Enforce "units: all" deployments — queue deploy commands for all ONLINE units
+    threading.Thread(target=enforce_units_all, daemon=True).start()
 
     # Critical service watchdog — immediately restarts apache, lokey, locator if OFFLINE
     threading.Thread(target=critical_service_watchdog, daemon=True).start()
