@@ -703,6 +703,7 @@
             overflow-y: auto;
             min-height: 0;
         }
+        .event-box .grid-title { font-size: 12px; margin-bottom: 6px; }
 
     </style>
 <!-- Matomo -->
@@ -1736,90 +1737,6 @@
                 return cell;
             }
 
-
-               // Function to append a formatted event to the Event Box
-                   function renderEvent(event) {
-                                  // Body, not the panel itself — entries must land
-                                  // inside the scrollable region, below the header.
-                                  const eventBox = document.getElementById('event-box-body');
-                                  if (!eventBox) return;
-                                  const placeholder = document.getElementById('event-empty');
-                                  if (placeholder) placeholder.remove();
- 
-                                 const entry = document.createElement('div');
-                                 entry.style.borderBottom = '1px solid rgba(0, 255, 0, 0.15)';
-                                 entry.style.padding = '6px 0';
-                                 entry.style.fontSize = '12px';
-                                 entry.style.lineHeight = '1.4';
-
-                                // Formats Date and Time
-                                const dateObj = event.timestamp ? new Date(event.timestamp) : new Date();
-                                const formattedDate = dateObj.toLocaleDateString();
-                                const formattedTime = dateObj.toLocaleTimeString();
-
-                                let details = `<span style="color: var(--neon-green);">[${formattedDate} ${formattedTime}]</span> `;
-
-    if (event.type === 'migration') {
-        details += `<strong style="color: var(--accent);">[MIGRATION]</strong> Container <code>${event.from_container}</code> shifted to <code>${event.to_container}</code> on <strong>${event.unit}</strong>`;
-    } else if (event.type === 'dns') {
-        details += `<strong style="color: #00f0ff;">[DNS]</strong> A Record <code>${event.a_record}</code> point -> PDNS <code>${event.pdns_server}</code>`;
-    } else {
-        details += `<span>${event.message || JSON.stringify(event)}</span>`;
-    }
-
-    entry.innerHTML = details;
-    eventBox.appendChild(entry);
-    
-    // Auto-scroll to keep newest events visible
-    eventBox.scrollTop = eventBox.scrollHeight;
-}
-
-// Event log feed. Polls /api/events rather than opening a WebSocket: there is
-// no ws server, and a ws:// socket on an https page is blocked as mixed content
-// anyway, so the old socket could never deliver anything.
-let _lastEventStamp = null;
-
-function pollEvents() {
-    fetch('/api/events')
-        .then(res => res.ok ? res.json() : [])
-        .then(events => {
-            if (!Array.isArray(events)) return;
-            // Only render what is newer than the last one drawn, so repeated
-            // polls do not duplicate the whole history on every pass.
-            const fresh = _lastEventStamp
-                ? events.filter(e => (e.timestamp || '') > _lastEventStamp)
-                : events;
-            fresh.forEach(renderEvent);
-            if (events.length) {
-                _lastEventStamp = events[events.length - 1].timestamp || _lastEventStamp;
-            }
-        })
-        .catch(err => console.error('Failed to load event log:', err));
-}
-
-pollEvents();
-setInterval(pollEvents, 10000);
-
-// Assigned onto window rather than declared: this code sits two callbacks deep
-// inside a fetch chain, so a plain `function` declaration is scoped to that
-// callback and an inline onclick — which resolves against window — cannot see
-// it. That is why the buttons did nothing.
-window.toggleEventExpand = function () {
-    const box = document.getElementById('event-box');
-    if (!box) return;
-    box.classList.remove('collapsed');   // expanding implies showing
-    box.classList.toggle('expanded');
-};
-
-window.toggleEventCollapse = function () {
-    const box = document.getElementById('event-box');
-    if (!box) return;
-    box.classList.remove('expanded');
-    box.classList.toggle('collapsed');
-};
-
-
-
             // --- DEVICES TABLE ---
             nodes.forEach(item => {
                 const tr = document.createElement('tr');
@@ -2171,6 +2088,81 @@ window.toggleEventCollapse = function () {
         setInterval(loadRegistryData, 10000);
         // Ticks the "Updated Xs ago" text every second, independent of the poll itself.
         setInterval(updateLiveStatusIndicator, 1000);
+
+        // --- Event log (tactical grid EVENT LOG box) ---
+        // Runs once at page load, not inside renderGrid()/loadRegistryData() — this
+        // used to be spliced into the 10s render loop and open a fresh (leaked)
+        // connection on every tick; see KNOWN_ISSUES.md.
+        // Panel controls live on window because inline onclick resolves there;
+        // upstream's event code has no expand/collapse, so they are added here
+        // alongside it rather than in the nested block it replaced.
+        window.toggleEventExpand = function () {
+            const box = document.getElementById('event-box');
+            if (!box) return;
+            box.classList.remove('collapsed');   // expanding implies showing
+            box.classList.toggle('expanded');
+        };
+
+        window.toggleEventCollapse = function () {
+            const box = document.getElementById('event-box');
+            if (!box) return;
+            box.classList.remove('expanded');
+            box.classList.toggle('collapsed');
+        };
+
+        function renderEvent(event) {
+            // The scrollable body, not the panel root: entries must land below
+            // the fixed header, inside the region that scrolls.
+            const eventBox = document.getElementById('event-box-body');
+            if (!eventBox) return;
+            const placeholder = document.getElementById('event-empty');
+            if (placeholder) placeholder.remove();
+
+            const entry = document.createElement('div');
+            entry.style.borderBottom = '1px solid rgba(0, 255, 0, 0.15)';
+            entry.style.padding = '6px 0';
+            entry.style.fontSize = '12px';
+            entry.style.lineHeight = '1.4';
+
+            const dateObj = event.timestamp ? new Date(event.timestamp) : new Date();
+            const formattedDate = dateObj.toLocaleDateString();
+            const formattedTime = dateObj.toLocaleTimeString();
+
+            let details = `<span style="color: var(--neon-green);">[${formattedDate} ${formattedTime}]</span> `;
+
+            if (event.type === 'migration') {
+                details += `<strong style="color: var(--accent);">[MIGRATION]</strong> Container <code>${event.from_container}</code> shifted to <code>${event.to_container}</code> on <strong>${event.unit}</strong>`;
+            } else if (event.type === 'dns') {
+                details += `<strong style="color: #00f0ff;">[DNS]</strong> A Record <code>${event.a_record}</code> point -> PDNS <code>${event.pdns_server}</code>`;
+            } else {
+                details += `<span>${event.message || JSON.stringify(event)}</span>`;
+            }
+
+            entry.innerHTML = details;
+            eventBox.appendChild(entry);
+            eventBox.scrollTop = eventBox.scrollHeight;
+        }
+
+        fetch('/api/events')
+            .then(res => res.json())
+            .then(events => {
+                if (Array.isArray(events)) events.forEach(renderEvent);
+            })
+            .catch(err => console.error('Failed to load initial event log:', err));
+
+        // Server-Sent Events, not WebSocket — this app runs under gunicorn's
+        // gthread worker class, which doesn't support WS upgrades. SSE works
+        // over plain HTTP and reconnects automatically on drop.
+        if (window.EventSource) {
+            const eventStream = new EventSource('/api/events/stream');
+            eventStream.onmessage = function(e) {
+                try {
+                    renderEvent(JSON.parse(e.data));
+                } catch (err) {
+                    renderEvent({ message: e.data });
+                }
+            };
+        }
 
         // ── STATIC "CLOUD & NATIVE PLATFORMS" TABLE — also clickable, same data-sheet modal ──
         // These rows are hand-authored reference entries, not live registry data, so their

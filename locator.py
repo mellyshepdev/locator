@@ -56,6 +56,7 @@ from datetime import datetime, timezone
 from flask import Flask, request, jsonify, Response, render_template
 
 import notifier
+import db
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -98,10 +99,12 @@ DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 SEED_FILE = os.environ.get("SEED_FILE", "/app/seed_registry.json")
 EXCEL_FILE = "registry.xlsx"
 
-# DNS zone status/sync (unit9 = ns1, runs PowerDNS with a sqlite3 backend;
+# DNS zone status/sync (unit9 runs the PowerDNS primary with a sqlite3
+# backend, at ns2.theofficialblacksheepco.online — DNS delegation for the
+# .online zone completed 2026-08-07, so this resolves publicly now;
 # reached over SSH with the SSH_USER/SSH_KEY above since Locator itself runs
 # on Fly, not on the DNS box — see /api/dns/status and /api/dns/sync).
-DNS_SSH_HOST = os.environ.get("DNS_SSH_HOST", "66.175.238.103")
+DNS_SSH_HOST = os.environ.get("DNS_SSH_HOST", "ns2.theofficialblacksheepco.online")
 DNS_SSH_USER = os.environ.get("DNS_SSH_USER", "root")
 DNS_ZONES = [z.strip() for z in os.environ.get(
     "DNS_ZONES",
@@ -1412,14 +1415,82 @@ def report_client_error():
 
     print(f"\U0001f6a8 CLIENT-ERROR [{entry['page_url']}]: {entry['message']} "
           f"({entry['source_url']}:{entry['line']}:{entry['col']})")
+
+    try:
+        db.insert_client_error({**entry, "received_at": entry["received_at"]})
+    except Exception as e:
+        print(f"⚠️  Failed to persist client error to Postgres: {e}")
+
     return jsonify({"status": "logged"}), 200
 
 
 @app.route("/api/client-errors", methods=["GET"])
 def list_client_errors():
-    """Return recently reported browser-side JS errors, newest first."""
+    """Return recently reported browser-side JS errors, newest first.
+    Postgres first (survives restarts), falling back to the in-memory ring buffer."""
+    try:
+        persisted = db.list_client_errors(CLIENT_ERROR_MAX)
+        if persisted is not None:
+            return jsonify(persisted)
+    except Exception as e:
+        print(f"⚠️  Failed to read client errors from Postgres: {e}")
     with client_error_lock:
         return jsonify(list(reversed(client_errors)))
+
+
+# ── Event log ──────────────────────────────────────────────────────────────
+# Backs the tactical grid's EVENT LOG box. Postgres-backed (see db.py); GET
+# returns recent history, /stream is a Server-Sent Events feed for live
+# updates (not a WebSocket — this app runs under gunicorn's gthread worker
+# class, which doesn't support WebSocket upgrades; SSE works over plain HTTP).
+_event_stream_queues = []
+_event_stream_lock = threading.Lock()
+
+
+def emit_event(event_type, **data):
+    """Record an event to Postgres and push it to any connected SSE streams.
+    Call this from wherever something event-worthy happens (migrations, DNS
+    sync, etc.) — e.g. emit_event('migration', from_container=..., to_container=..., unit=...)."""
+    try:
+        event = db.insert_event(event_type, data)
+    except Exception as e:
+        print(f"⚠️  Failed to persist event to Postgres: {e}")
+        event = {"type": event_type, "timestamp": datetime.now(timezone.utc).isoformat(), **data}
+    with _event_stream_lock:
+        for q in _event_stream_queues:
+            q.put(event)
+    return event
+
+
+@app.route("/api/events", methods=["GET"])
+def list_events_route():
+    """Return recent events, oldest first (matches what the dashboard expects to append in order)."""
+    try:
+        return jsonify(db.list_events(200))
+    except Exception as e:
+        print(f"⚠️  Failed to read events from Postgres: {e}")
+        return jsonify([])
+
+
+@app.route("/api/events/stream", methods=["GET"])
+def stream_events():
+    """Server-Sent Events feed of new events as they happen."""
+    q = _queue_module.Queue()
+    with _event_stream_lock:
+        _event_stream_queues.append(q)
+
+    def gen():
+        try:
+            while True:
+                event = q.get()
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            with _event_stream_lock:
+                if q in _event_stream_queues:
+                    _event_stream_queues.remove(q)
+
+    return Response(gen(), mimetype="text/event-stream",
+                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.route("/registry.json", methods=["GET"])
@@ -1438,41 +1509,24 @@ def mesh_3d():
 
 
 # ── Traccar proxy ─────────────────────────────────────────────────────
-# Traccar runs on unit9 behind Caddy at traccar.theofficialblacksheepco.online,
-# but that domain isn't publicly resolvable yet (the .online zone is still
-# served by IONOS — unit9's own PowerDNS records are staged but not delegated
-# at the registrar, see blacksheep_welcome_dns_migration notes). We're on Fly,
-# so we can't reach unit9 by hostname until that delegation completes, and
-# Traccar's raw HTTP port (8082) isn't open externally — only Caddy's 443 is.
-# Caddy picks the vhost by TLS SNI, so we resolve the hostname to unit9's
-# public IP ourselves (via a scoped socket.getaddrinfo patch, restored right
-# after the call) while still presenting the real hostname for SNI. Once DNS
-# delegation is done, drop TRACCAR_PIN_IP and this shim entirely.
+# Traccar runs on unit9 behind Caddy at traccar.theofficialblacksheepco.online.
+# DNS delegation for the .online zone completed (verified 2026-08-07 — the
+# zone's own nameservers answer authoritatively now), so plain hostname
+# resolution works and the old IP-pinning shim is gone. Caddy still serves
+# this vhost with `tls internal` (self-signed), so verify=False stays until
+# that's switched to a real ACME cert — a separate, unrelated fix.
 TRACCAR_HOST = os.environ.get("TRACCAR_HOST", "traccar.theofficialblacksheepco.online")
-TRACCAR_PIN_IP = os.environ.get("TRACCAR_PIN_IP", "66.175.238.103")
 TRACCAR_USER = os.environ.get("TRACCAR_USER", "admin@theofficialblacksheepco.com")
-TRACCAR_PASS = os.environ.get("TRACCAR_PASS", "changeme123")
+TRACCAR_PASS = os.environ.get("TRACCAR_PASS", "")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)  # self-signed cert, see note above
 
 
 def _traccar_request(method, path, **kwargs):
-    """Call a Traccar path (REST API or the /osmand/ position endpoint),
-    pinned to its known IP (see note above)."""
-    real_getaddrinfo = socket.getaddrinfo
-
-    def _pinned_getaddrinfo(host, *args, **kw):
-        if host == TRACCAR_HOST:
-            host = TRACCAR_PIN_IP
-        return real_getaddrinfo(host, *args, **kw)
-
-    socket.getaddrinfo = _pinned_getaddrinfo
-    try:
-        return requests.request(
-            method, f"https://{TRACCAR_HOST}{path}",
-            verify=False, timeout=5, **kwargs,
-        )
-    finally:
-        socket.getaddrinfo = real_getaddrinfo
+    """Call a Traccar path (REST API or the /osmand/ position endpoint)."""
+    return requests.request(
+        method, f"https://{TRACCAR_HOST}{path}",
+        verify=False, timeout=5, **kwargs,
+    )
 
 
 def _traccar_get(path):
@@ -1762,6 +1816,9 @@ def complete_migration():
             mig["status"]       = "DONE" if success else "FAILED"
             mig["completed_at"] = datetime.now(timezone.utc).isoformat()
             print(f"{'✅' if success else '❌'} MIGRATION {mig_id}: {'DONE' if success else 'FAILED'}")
+            emit_event("migration", from_container=mig.get("from_node", ""),
+                       to_container=mig.get("to_node", ""), unit=mig.get("to_node", ""),
+                       container=mig.get("container", ""), success=success)
 
             # When a git_push_and_stop finishes, queue the follow-on pull on the target.
             # dedup     → git_pull_only      (container already running on target, just sync state)
@@ -1923,6 +1980,7 @@ def dns_sync():
         return jsonify({"error": f"'{zone}' is not in the configured DNS_ZONES list", "known_zones": DNS_ZONES}), 400
 
     ok, out = _ssh_exec(DNS_SSH_HOST, DNS_SSH_USER, f"pdns_control notify {zone}")
+    emit_event("dns", a_record=zone, pdns_server=DNS_SSH_HOST, ok=ok)
     return jsonify({
         "zone": zone,
         "notified_from": DNS_SSH_HOST,
@@ -2027,16 +2085,25 @@ def secure_the_bag(commit_message="Auto-commit: Securing data before container o
 
 
 def persist_registry():
-    """Write the current registry to disk for file-based consumers."""
+    """Write the current registry to disk for file-based consumers, and
+    snapshot it into Postgres (unit3) if DATABASE_URL is configured."""
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         filepath = os.path.join(DATA_DIR, "registry.json")
         with lock:
             snapshot = json.dumps(registry, indent=2)
+            registry_copy = {"nodes": dict(registry["nodes"]), "services": dict(registry["services"]),
+                              "updated": registry["updated"]}
         with open(filepath, "w") as f:
             f.write(snapshot)
     except Exception as e:
         print(f"⚠️  Failed to persist registry: {e}")
+        return
+
+    try:
+        db.save_registry_snapshot(registry_copy)
+    except Exception as e:
+        print(f"⚠️  Failed to persist registry to Postgres: {e}")
 
 
 def load_seed():
@@ -2167,21 +2234,33 @@ def load_seed():
         except Exception as e:
             print(f"⚠️ Failed to load seed: {e}")
 
-    # Also try to restore persisted registry (overrides seed with live data)
-    persisted_path = os.path.join(DATA_DIR, "registry.json")
-    if os.path.exists(persisted_path):
-        try:
-            with open(persisted_path, "r") as f:
-                persisted = json.load(f)
-            # Merge persisted data (it takes priority over seed)
-            for name, svc in persisted.get("services", {}).items():
-                registry["services"][name] = svc
-            for node_name, node_info in persisted.get("nodes", {}).items():
-                registry["nodes"][node_name] = node_info
-            registry["updated"] = persisted.get("updated", registry["updated"])
-            print(f"💾 Restored persisted registry: {len(registry['services'])} services")
-        except Exception as e:
-            print(f"⚠️  Failed to restore persisted registry: {e}")
+    # Restore persisted registry — Postgres first (if configured and has data),
+    # falling back to the registry.json file (it takes priority over seed either way).
+    persisted = None
+    try:
+        persisted = db.load_registry_snapshot()
+        if persisted:
+            print(f"🗄️  Restored registry from Postgres: {len(persisted.get('services', {}))} services, "
+                  f"{len(persisted.get('nodes', {}))} nodes")
+    except Exception as e:
+        print(f"⚠️  Failed to restore registry from Postgres: {e}")
+
+    if not persisted:
+        persisted_path = os.path.join(DATA_DIR, "registry.json")
+        if os.path.exists(persisted_path):
+            try:
+                with open(persisted_path, "r") as f:
+                    persisted = json.load(f)
+                print(f"💾 Restored persisted registry from file: {len(persisted.get('services', {}))} services")
+            except Exception as e:
+                print(f"⚠️  Failed to restore persisted registry: {e}")
+
+    if persisted:
+        for name, svc in persisted.get("services", {}).items():
+            registry["services"][name] = svc
+        for node_name, node_info in persisted.get("nodes", {}).items():
+            registry["nodes"][node_name] = node_info
+        registry["updated"] = persisted.get("updated", registry["updated"])
 
     purge_fabricated_core_services()
 
@@ -2733,6 +2812,25 @@ command_queue: dict = {}
 command_lock = threading.Lock()
 COMMAND_RETRY_SECONDS = 180   # re-serve DISPATCHED commands the lokey never completed
 COMMAND_RETENTION     = 100   # completed commands kept for history
+
+
+def enforce_units_all():
+    """Background: scan registry for services with 'units: all' and queue deploy commands."""
+    time.sleep(30)  # let registry initialize
+    while True:
+        try:
+            online_units = [
+                unit_id for unit_id, info in registry.get("nodes", {}).items()
+                if info.get("status") == "ONLINE"
+            ]
+            for svc_id, svc in registry.get("services", {}).items():
+                units_spec = (svc.get("metadata") or {}).get("units", "")
+                if units_spec == "all" and online_units:
+                    for unit in online_units:
+                        _queue_command(unit, svc_id, "deploy", source="units_all_enforcement")
+        except Exception as e:
+            print(f"⚠️  enforce_units_all error: {e}")
+        time.sleep(60)
 
 
 def _parse_duration(value, default):
@@ -3334,6 +3432,7 @@ def main():
         print(f"    Cooldown:        {BALANCE_COOLDOWN}s")
     print("=" * 55)
 
+    db.init_schema()
     load_seed()
     persist_registry()
 
@@ -3378,6 +3477,9 @@ def main():
 
     # Self-election: secondaries stop themselves if the canonical primary is up
     threading.Thread(target=_self_election, daemon=True).start()
+
+    # Enforce "units: all" deployments — queue deploy commands for all ONLINE units
+    threading.Thread(target=enforce_units_all, daemon=True).start()
 
     # Critical service watchdog — immediately restarts apache, lokey, locator if OFFLINE
     threading.Thread(target=critical_service_watchdog, daemon=True).start()
