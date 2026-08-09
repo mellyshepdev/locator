@@ -2147,8 +2147,12 @@ def load_seed():
                             detected_hosts = [f"unit{match.group(1)}"]
                             break
                 
+                # Was hardcoded to unit1, from when it was the primary node. Any
+                # seed row whose host could not be parsed was therefore filed
+                # under unit1 — which is how ~140 of unit8's containers ended up
+                # attributed to a node that no longer exists.
                 if not detected_hosts and category == "docker containers":
-                    detected_hosts = ["unit1"]
+                    detected_hosts = ["unknown"]
 
                 item_data = {
                     "name": name,
@@ -2156,7 +2160,7 @@ def load_seed():
                     "url": str(row.get('publib ip', '')) if pd.notna(row.get('publib ip')) else "",
                     "internal": private_val if pd.notna(row.get('private')) else "",
                     "openvpn": openvpn_val if pd.notna(row.get('openvpn')) else "",
-                    "hosts": detected_hosts if detected_hosts else ([name] if category == "devices" else ["unit1"]),
+                    "hosts": detected_hosts if detected_hosts else ([name] if category == "devices" else ["unknown"]),
                     "status": "OFFLINE",
                     "last_heartbeat": "",
                     "registered_at": now,
@@ -2686,15 +2690,25 @@ def local_docker_scanner():
             now = datetime.now(timezone.utc).isoformat()
             changed = False
             
+            _local_unit = os.environ.get("UNIT_NAME", "unknown")
+
             for container in containers:
                 name = container.name
                 if name == "locator": continue
-                
+
+                # Keyed name@host, matching /register. This used to key on the
+                # bare container name, which meant a local scan would refresh
+                # whatever entry happened to own that name — including records
+                # seeded for a DIFFERENT host. unit8's containers were therefore
+                # heartbeating the seeded unit1 records ONLINE forever: the host
+                # field was never touched, so they never aged out and looked
+                # alive long after unit1 was gone.
+                service_id = f"{name}@{_local_unit}"
+
                 with lock:
-                    if name not in registry["services"]:
+                    if service_id not in registry["services"]:
                         # Register new container discovered locally
-                        _local_unit = os.environ.get("UNIT_NAME", "unknown")
-                        registry["services"][name] = {
+                        registry["services"][service_id] = {
                             "name": name,
                             "category": "docker containers",
                             "host": _local_unit,
@@ -2710,9 +2724,9 @@ def local_docker_scanner():
                         }
                         changed = True
                     else:
-                        registry["services"][name]["status"] = "ONLINE"
-                        registry["services"][name]["last_heartbeat"] = now
-                        registry["services"][name].pop("offline_since", None)
+                        registry["services"][service_id]["status"] = "ONLINE"
+                        registry["services"][service_id]["last_heartbeat"] = now
+                        registry["services"][service_id].pop("offline_since", None)
 
             # Mark the local node ONLINE since we can see its containers
             _local_unit = os.environ.get("UNIT_NAME", "unknown")
