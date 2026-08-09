@@ -462,18 +462,16 @@ _last_election_signature = None
 
 
 def record_event(kind, message, **extra):
-    """Append an event for the dashboard, trimming to EVENT_LOG_MAX."""
-    entry = {
-        "type": kind,
-        "message": message,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        **extra,
-    }
-    with _event_lock:
-        _event_log.append(entry)
-        if len(_event_log) > EVENT_LOG_MAX:
-            del _event_log[:-EVENT_LOG_MAX]
-    return entry
+    """Record an event — delegates to emit_event().
+
+    This started as an in-memory ring buffer written before I noticed the
+    Postgres-backed event log already existed. Keeping both meant election
+    events lived only in memory (lost on restart) while the events table sat
+    empty, so this is now a thin shim onto the persistent path, which also
+    pushes to the SSE stream. Defined earlier in the file than emit_event, but
+    Python resolves the name at call time.
+    """
+    return emit_event(kind, message=message, **extra)
 
 
 # Election tuning. Ranking is by node health rather than start time: the unit
@@ -1315,34 +1313,6 @@ def health_check():
     })
 
 
-@app.route("/api/events", methods=["GET", "POST"])
-def api_events():
-    """Event feed backing the dashboard's EVENT LOG panel.
-
-    The panel has always fetched this path, but no handler existed — so the log
-    sat empty and its companion WebSocket (ws:// on an https page) was blocked
-    as mixed content. Polling this endpoint replaces that socket.
-
-    POST lets units report their own events (repo sync results, failed
-    updates). Those failures previously only ever reached a container log on
-    the unit itself, which is how a decommissioned URL and an 8-commit drift
-    went unnoticed for weeks — here they surface on the dashboard instead.
-    """
-    if request.method == "POST":
-        data = request.get_json(silent=True) or {}
-        message = str(data.get("message", ""))[:500]
-        if not message:
-            return jsonify({"error": "message required"}), 400
-        kind = str(data.get("type", "unit"))[:40]
-        unit = str(data.get("unit", ""))[:40]
-        entry = record_event(kind, message, unit=unit)
-        return jsonify({"result": "recorded", "timestamp": entry["timestamp"]})
-
-    limit = request.args.get("limit", type=int) or EVENT_LOG_MAX
-    with _event_lock:
-        return jsonify(list(_event_log)[-limit:])
-
-
 @app.route("/api/election", methods=["GET"])
 def election_status():
     """Live view of the locator election — who would win, and why.
@@ -1462,9 +1432,25 @@ def emit_event(event_type, **data):
     return event
 
 
-@app.route("/api/events", methods=["GET"])
+@app.route("/api/events", methods=["GET", "POST"])
 def list_events_route():
-    """Return recent events, oldest first (matches what the dashboard expects to append in order)."""
+    """Return recent events, oldest first (matches what the dashboard expects to append in order).
+
+    POST lets units report their own events — lokey's repo-sync posts its
+    failures here. Those previously reached only a container log on the unit
+    itself, which is how a decommissioned locator URL and an eight-commit drift
+    went unnoticed for weeks.
+    """
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        message = str(data.get("message", ""))[:500]
+        if not message:
+            return jsonify({"error": "message required"}), 400
+        kind = str(data.get("type", "unit"))[:40]
+        unit = str(data.get("unit", ""))[:40]
+        event = emit_event(kind, message=message, unit=unit)
+        return jsonify({"result": "recorded", "timestamp": (event or {}).get("created_at")})
+
     try:
         return jsonify(db.list_events(200))
     except Exception as e:
