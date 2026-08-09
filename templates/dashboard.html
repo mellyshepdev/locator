@@ -613,15 +613,95 @@
         .filter-bar input { width: 280px; }
         .filter-bar input:focus { box-shadow: 0 0 10px rgba(0, 240, 255, 0.4); }
         .filter-count { color: #6699aa; font-size: 12px; margin-left: auto; letter-spacing: 1px; }
+        /* Floating panel rather than an in-flow block: previously it sat in the
+           grid and was covered by the maximised section panels. Fixed position
+           plus a z-index above them keeps it readable while work is happening. */
         .event-box {
-            background-color: rgba(0, 0, 0, 0.8);
+            position: fixed;
+            top: 130px;
+            left: 20px;
+            width: 300px;
+            height: 300px;
+            z-index: 9000;
+            display: flex;
+            flex-direction: column;
+            background-color: rgba(0, 0, 0, 0.92);
             border: 1px solid var(--neon-blue);
-            border-left: 5px solid var(--neon-green);
-            padding: 10px 20px;
-            margin-bottom: 20px;
+            padding: 8px 10px;
             color: #fff;
             font-family: inherit;
             font-size: 14px;
+            box-shadow: 0 0 18px rgba(0, 240, 255, 0.35);
+            resize: both;
+            overflow: hidden;
+        }
+        .event-box.expanded {
+            width: min(70vw, 1100px);
+            height: min(75vh, 800px);
+        }
+        /* Collapsed folds into a narrow vertical strip against the left edge:
+           the title rotates to read down the spine and the controls stack, so
+           the panel gets out of the way without disappearing — it stays
+           visible and clickable to reopen. */
+        .event-box.collapsed {
+            width: 40px;
+            height: 240px;
+            padding: 8px 4px;
+            resize: none;
+        }
+        .event-box.collapsed .event-box-body { display: none; }
+        .event-box.collapsed .event-box-header {
+            flex-direction: column;
+            justify-content: flex-start;
+            align-items: center;
+            height: 100%;
+            gap: 12px;
+            border-bottom: none;
+            padding-bottom: 0;
+            margin-bottom: 0;
+        }
+        .event-box.collapsed .grid-title {
+            writing-mode: vertical-rl;
+            text-orientation: mixed;
+            white-space: nowrap;
+            letter-spacing: 2px;
+        }
+        .event-box.collapsed .event-box-controls {
+            display: flex;
+            flex-direction: column;
+        }
+        .event-box.collapsed .event-box-controls button {
+            margin: 4px 0 0 0;
+        }
+        .event-box-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            flex: 0 0 auto;
+            border-bottom: 1px solid var(--neon-green);
+            padding-bottom: 4px;
+            margin-bottom: 6px;
+        }
+        .event-box-controls button {
+            background: transparent;
+            border: 1px solid var(--neon-green);
+            color: var(--neon-green);
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 13px;
+            line-height: 1;
+            padding: 2px 7px;
+            margin-left: 4px;
+        }
+        .event-box-controls button:hover {
+            background: var(--neon-green);
+            color: #000;
+        }
+        .event-box-body {
+            flex: 1 1 auto;
+            overflow-y: auto;
+            min-height: 0;
         }
 
     </style>
@@ -698,9 +778,17 @@
     <!-- TACTICAL GRID VIEW -->
     <div id="view-grid" class="view-container active">
 
-     <div class="event-box">
-      <div class="grid-title">EVENT LOG</div>
-       <p>System events and client errors will appear here.</p>
+     <div class="event-box" id="event-box">
+      <div class="event-box-header">
+       <span class="grid-title" style="margin:0;">EVENT LOG</span>
+       <span class="event-box-controls">
+        <button type="button" onclick="toggleEventExpand()" title="Expand / restore">&#9974;</button>
+        <button type="button" onclick="toggleEventCollapse()" title="Collapse / show">&minus;</button>
+       </span>
+      </div>
+      <div class="event-box-body" id="event-box-body">
+       <p id="event-empty">System events and client errors will appear here.</p>
+      </div>
       </div>
 
         <!-- BLUE RECTANGLE: DEVICES -->
@@ -1651,8 +1739,12 @@
 
                // Function to append a formatted event to the Event Box
                    function renderEvent(event) {
-                                  const eventBox = document.querySelector('.event-box');
+                                  // Body, not the panel itself — entries must land
+                                  // inside the scrollable region, below the header.
+                                  const eventBox = document.getElementById('event-box-body');
                                   if (!eventBox) return;
+                                  const placeholder = document.getElementById('event-empty');
+                                  if (placeholder) placeholder.remove();
  
                                  const entry = document.createElement('div');
                                  entry.style.borderBottom = '1px solid rgba(0, 255, 0, 0.15)';
@@ -1682,26 +1774,48 @@
     eventBox.scrollTop = eventBox.scrollHeight;
 }
 
-// 1. Fetch initial event history on load
-fetch('/api/events')
-    .then(res => res.json())
-    .then(events => {
-        if (Array.isArray(events)) {
-            events.forEach(renderEvent);
-        }
-    })
-    .catch(err => console.error('Failed to load initial event log:', err));
+// Event log feed. Polls /api/events rather than opening a WebSocket: there is
+// no ws server, and a ws:// socket on an https page is blocked as mixed content
+// anyway, so the old socket could never deliver anything.
+let _lastEventStamp = null;
 
-// 2. Connect to WebSocket for live event streaming
-const eventSocket = new WebSocket(`ws://${window.location.host}/ws/events`);
+function pollEvents() {
+    fetch('/api/events')
+        .then(res => res.ok ? res.json() : [])
+        .then(events => {
+            if (!Array.isArray(events)) return;
+            // Only render what is newer than the last one drawn, so repeated
+            // polls do not duplicate the whole history on every pass.
+            const fresh = _lastEventStamp
+                ? events.filter(e => (e.timestamp || '') > _lastEventStamp)
+                : events;
+            fresh.forEach(renderEvent);
+            if (events.length) {
+                _lastEventStamp = events[events.length - 1].timestamp || _lastEventStamp;
+            }
+        })
+        .catch(err => console.error('Failed to load event log:', err));
+}
 
-eventSocket.onmessage = function(wsEvent) {
-    try {
-        const data = JSON.parse(wsEvent.data);
-        renderEvent(data);
-    } catch (e) {
-        renderEvent({ message: wsEvent.data });
-    }
+pollEvents();
+setInterval(pollEvents, 10000);
+
+// Assigned onto window rather than declared: this code sits two callbacks deep
+// inside a fetch chain, so a plain `function` declaration is scoped to that
+// callback and an inline onclick — which resolves against window — cannot see
+// it. That is why the buttons did nothing.
+window.toggleEventExpand = function () {
+    const box = document.getElementById('event-box');
+    if (!box) return;
+    box.classList.remove('collapsed');   // expanding implies showing
+    box.classList.toggle('expanded');
+};
+
+window.toggleEventCollapse = function () {
+    const box = document.getElementById('event-box');
+    if (!box) return;
+    box.classList.remove('expanded');
+    box.classList.toggle('collapsed');
 };
 
 
@@ -2187,10 +2301,6 @@ eventSocket.onmessage = function(wsEvent) {
  containerRow.appendChild(containerCell);
  rows.appendChild(containerRow);
  }
-
- document.getElementById('device-modal').style.display = 'flex';
-}
-
 
             // Every remaining top-level field not already covered above
             Object.keys(item).forEach(key => {

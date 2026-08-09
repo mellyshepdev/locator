@@ -9,7 +9,7 @@ services:
       - /home/swoopg111/.ssh:/root/.ssh:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      - UNIT_NAME=unit1
+      - UNIT_NAME=unit8
       - COMPOSE_DIR=/app/data/compose
       - BALANCE_HIGH=65
       - BALANCE_DIFF=5
@@ -21,6 +21,7 @@ services:
       - PYTHONUNBUFFERED=1
       - LOCATOR_IS_PRIMARY=false
       - SELF_CONTAINER_NAME=locator
+      - DISK_VETO_PERCENT=97
       - LOCATOR_CANONICAL_URL=https://locator.theofficialblacksheepco.online
     labels:
       - "traefik.enable=true"
@@ -28,14 +29,14 @@ services:
       - "traefik.http.routers.locator.rule=Host(`locator.theofficialblacksheepco.online`)"
       - "traefik.http.routers.locator.entrypoints=websecure"
       - "traefik.http.routers.locator.tls=true"
-      - "traefik.http.routers.locator.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.locator.tls.certresolver=myresolver"
       - "traefik.http.routers.locator.priority=100"
       - "traefik.http.routers.locator.service=locator"
       # API router — no auth so lokey heartbeats and all programmatic calls pass through
       - "traefik.http.routers.locator-api.rule=Host(`locator.theofficialblacksheepco.online`) && (PathPrefix(`/api/`) || PathPrefix(`/register`) || PathPrefix(`/deregister/`) || PathPrefix(`/nodes/`) || PathPrefix(`/wake/`) || PathPrefix(`/health`) || Path(`/silent-check-sso.html`))"
       - "traefik.http.routers.locator-api.entrypoints=websecure"
       - "traefik.http.routers.locator-api.tls=true"
-      - "traefik.http.routers.locator-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.locator-api.tls.certresolver=myresolver"
       - "traefik.http.routers.locator-api.priority=200"
       - "traefik.http.routers.locator-api.service=locator"
       - "traefik.http.services.locator.loadbalancer.server.port=5000"

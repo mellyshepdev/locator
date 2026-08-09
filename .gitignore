@@ -5,3 +5,7 @@ data/
 registry_data/
 .env
 *.log
+*.bak-*
+*.bak2-*
+*.bak3-*
+*.bak4-*

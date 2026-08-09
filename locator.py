@@ -447,45 +447,220 @@ def _stop_self():
     os._exit(0)
 
 
-def _self_election():
-    """
-    Dedup election: only one locator should ever run across all units.
-    On startup, ping the canonical URL. If another instance answers from a
-    different unit, compare started_at times and stop whichever is oldest.
-    The newer instance wins and stops the older one via lokey command.
-    """
-    if not LOCATOR_CANONICAL_URL:
-        return
-    time.sleep(20)  # let ourselves fully initialise first
-    for attempt in range(3):
-        try:
-            r = requests.get(f"{LOCATOR_CANONICAL_URL}/health", timeout=5, verify=False)
-            if r.status_code == 200:
-                data = r.json()
-                remote_unit = data.get("unit_name", "")
-                if not remote_unit or remote_unit == UNIT_NAME:
-                    # Same unit — no duplicate, nothing to do
-                    return
-                # A different unit has a locator running — dedup by start time
-                remote_started_raw = data.get("started_at")
-                try:
-                    remote_started = datetime.fromisoformat(remote_started_raw)
-                except Exception:
-                    remote_started = None
+# ── EVENT LOG ───────────────────────────────────────────────────────────────
+# Bounded in-memory feed of notable events (elections, migrations, DNS moves)
+# for the dashboard's EVENT LOG panel. Deliberately not persisted: the registry
+# is the durable record, this is the live operator view.
+EVENT_LOG_MAX = int(os.environ.get("EVENT_LOG_MAX", "300"))
+_event_log = []
+_event_lock = threading.Lock()
+# Last dry-run standings string, so unchanged rankings are not re-logged.
+_last_election_signature = None
 
-                if remote_started and _STARTED_AT > remote_started:
-                    # We are newer — stop the older remote instance
-                    print(f"🗳️  Duplicate locator on '{remote_unit}' started {remote_started_raw} (older than us) — evicting it")
-                    _queue_command(remote_unit, SELF_CONTAINER_NAME, "stop", source="dedup")
+
+def record_event(kind, message, **extra):
+    """Append an event for the dashboard, trimming to EVENT_LOG_MAX."""
+    entry = {
+        "type": kind,
+        "message": message,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **extra,
+    }
+    with _event_lock:
+        _event_log.append(entry)
+        if len(_event_log) > EVENT_LOG_MAX:
+            del _event_log[:-EVENT_LOG_MAX]
+    return entry
+
+
+# Election tuning. Ranking is by node health rather than start time: the unit
+# best able to afford hosting the registry keeps it. RAM is primary; disk acts
+# as a veto rather than a tiebreak, because a box can be nearly full on disk
+# and still be by far the best place to run a memory-resident registry.
+ELECTION_INTERVAL = int(os.environ.get("ELECTION_INTERVAL", "60"))
+ELECTION_GRACE    = int(os.environ.get("ELECTION_GRACE", "20"))
+DISK_VETO_PERCENT = float(os.environ.get("DISK_VETO_PERCENT", "90"))
+# Measured steady-state RSS of this process is ~91 MB; 256 MB is comfortable
+# headroom. A unit that cannot clear this has no business hosting the registry.
+ELECTION_MIN_RAM_MB = float(os.environ.get("ELECTION_MIN_RAM_MB", "256"))
+# Dry run logs the decision without acting, so the ranking can be observed
+# against real nodes before _stop_self() is ever armed.
+ELECTION_DRY_RUN = os.environ.get("ELECTION_DRY_RUN", "true").lower() == "true"
+
+
+def _node_is_fresh(info):
+    """True when the node heartbeated within HEARTBEAT_TIMEOUT."""
+    raw = info.get("last_seen")
+    if not raw:
+        return False
+    try:
+        seen = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return False
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - seen).total_seconds() <= HEARTBEAT_TIMEOUT
+
+
+def _node_ram_total_mb(info):
+    """Total RAM in MB.
+
+    Prefers the figure lokey reports (mem_total_mb / mem_total_gb) and falls
+    back to the seeded metadata string only for nodes that predate that, since
+    the seed is static inventory rather than anything the node measured.
+    """
+    for field, factor in (("mem_total_mb", 1), ("mem_total_gb", 1024)):
+        try:
+            if info.get(field) is not None:
+                return float(info[field]) * factor
+        except (TypeError, ValueError):
+            pass
+    raw = str((info.get("metadata") or {}).get("ram", "")).lower()
+    # Parsed as a float, not by stripping non-digits: "1.8 GB" must not become
+    # 18 GB. unit9 reports exactly that, and overstating it tenfold would hand
+    # the registry to the smallest box in the mesh.
+    match = re.search(r"(\d+(?:\.\d+)?)", raw)
+    if not match:
+        return None
+    value = float(match.group(1))
+    return value * 1024 if "gb" in raw or raw.strip().endswith("g") else value
+
+
+def _node_health(unit):
+    """(tier, ram_available_mb) for a unit — larger tuples rank better.
+
+    Ranked on ABSOLUTE free megabytes, not percentage. The units are wildly
+    heterogeneous (1.8 GB on unit9 vs 16 GB on unit8), so "20% free" means
+    ~370 MB on one and 3.2 GB on another; against a fixed ~91 MB requirement
+    only the absolute figure says whether a unit can actually host the registry.
+
+    tier  0 = disk below DISK_VETO_PERCENT, tier -1 = disk critical, so a unit
+    with room always outranks a full one and RAM decides within a tier.
+    ram_available_mb is -1.0 when the unit has never reported usable metrics,
+    which sorts it last: an unmeasured node is never promoted on an assumption.
+    """
+    with lock:
+        info = registry["nodes"].get(unit) or {}
+    # A node that stopped heartbeating is unmeasured, not healthy. Without this
+    # a dead unit keeps whatever figures it last reported and can still look
+    # like the best candidate — exactly what the stale unit1 tombstone did,
+    # ranking as eligible on numbers frozen when it went away.
+    if not _node_is_fresh(info):
+        return 0, -1.0
+    # Prefer what the node actually measured. psutil's "available" counts
+    # reclaimable cache, so it is a truer picture of what a migrated container
+    # could claim than total minus used.
+    try:
+        ram_available_mb = float(info["mem_available_mb"])
+    except (KeyError, TypeError, ValueError):
+        total_mb = _node_ram_total_mb(info)
+        try:
+            ram_available_mb = total_mb * (100.0 - float(info.get("mem_percent"))) / 100.0
+        except (TypeError, ValueError):
+            ram_available_mb = -1.0
+    try:
+        tier = -1 if float(info.get("disk_percent")) >= DISK_VETO_PERCENT else 0
+    except (TypeError, ValueError):
+        tier = 0
+    return tier, round(ram_available_mb, 1)
+
+
+def _locator_hosts():
+    """Units currently reporting an ONLINE locator, ourselves always included."""
+    base = _base_name(SELF_CONTAINER_NAME)
+    hosts = {UNIT_NAME}
+    with lock:
+        for svc in registry["services"].values():
+            if svc.get("status") != "ONLINE":
+                continue
+            if _base_name(svc.get("name", "")) != base:
+                continue
+            host = svc.get("host") or (svc.get("hosts") or [None])[0]
+            if host:
+                hosts.add(host)
+    return hosts
+
+
+def _self_election():
+    """Keep exactly one locator alive, on the healthiest unit.
+
+    Runs for the process lifetime instead of once at startup: a locator brought
+    up later by lokey failover, or a unit whose health degrades after boot, is
+    still resolved. Only the winner issues stop commands and only a loser stops
+    itself, so a single consistent ranking collapses the set to one instance.
+    """
+    time.sleep(ELECTION_GRACE)  # let ourselves fully initialise first
+    while True:
+        try:
+            hosts = _locator_hosts()
+            if ELECTION_DRY_RUN and len(hosts) == 1:
+                # Sole instance: nothing to decide, but publish how the mesh
+                # would rank so the scoring can be judged against real nodes
+                # before the destructive path is ever enabled.
+                with lock:
+                    known = list(registry["nodes"].keys())
+                board = sorted(
+                    ((u, _node_health(u)) for u in known),
+                    key=lambda x: (x[1], x[0]), reverse=True,
+                )[:5]
+                summary = ", ".join(f"{u}(tier={h[0]},{h[1]}MB)" for u, h in board)
+                print(f"🗳️  [DRY RUN] sole locator on {UNIT_NAME} "
+                      f"{_node_health(UNIT_NAME)} — ranking would be: {summary}")
+                # Recorded only when the standings actually change, so a 60s
+                # loop cannot flood a 300-entry log with identical rows.
+                global _last_election_signature
+                if summary != _last_election_signature:
+                    _last_election_signature = summary
+                    record_event(
+                        "election",
+                        f"[DRY RUN] Sole locator on {UNIT_NAME}. Ranking: {summary}",
+                        winner=UNIT_NAME, dry_run=True,
+                    )
+            if len(hosts) > 1:
+                # Unit name breaks exact ties so every instance derives the same
+                # order from the same numbers.
+                ranked = sorted(hosts, key=lambda u: (_node_health(u), u), reverse=True)
+                winner = ranked[0]
+                mine = _node_health(UNIT_NAME)
+                theirs = _node_health(winner)
+                tag = "[DRY RUN] " if ELECTION_DRY_RUN else ""
+                if winner == UNIT_NAME:
+                    for loser in ranked[1:]:
+                        msg = (f"{tag}Keeping {UNIT_NAME} (tier {mine[0]}, {mine[1]}MB free), "
+                               f"evicting {loser} (tier {_node_health(loser)[0]}, "
+                               f"{_node_health(loser)[1]}MB free)")
+                        print(f"🗳️  {tag}ELECTION: keeping {UNIT_NAME} {mine}, evicting "
+                              f"{loser} {_node_health(loser)}")
+                        record_event("election", msg, winner=UNIT_NAME, loser=loser,
+                                     dry_run=ELECTION_DRY_RUN)
+                        if not ELECTION_DRY_RUN:
+                            _queue_command(loser, SELF_CONTAINER_NAME, "stop", source="election")
+                elif theirs[1] < 0:
+                    # Winner has never reported metrics. Standing down for an
+                    # unmeasured node risks trading a working registry for a
+                    # dead one, so hold position until it proves itself.
+                    print(f"🗳️  {tag}ELECTION: {winner} leads but has no metrics yet — holding on {UNIT_NAME}")
+                elif theirs[1] < ELECTION_MIN_RAM_MB:
+                    # Nobody can host it properly; staying put beats handing the
+                    # registry to a unit that will only OOM.
+                    print(f"🗳️  {tag}ELECTION: {winner} leads but only {theirs[1]}MB free "
+                          f"(< {ELECTION_MIN_RAM_MB}MB) — holding on {UNIT_NAME}")
+                    record_event("election",
+                                 f"{tag}{winner} leads but only {theirs[1]}MB free "
+                                 f"(under {ELECTION_MIN_RAM_MB}MB) — holding on {UNIT_NAME}",
+                                 winner=UNIT_NAME, dry_run=ELECTION_DRY_RUN)
                 else:
-                    # We are older (or can't compare) — stop self, let the newer one win
-                    print(f"🗳️  Newer locator running on '{remote_unit}' — stopping self on {UNIT_NAME}")
-                    _stop_self()
-                return
+                    print(f"🗳️  {tag}ELECTION: {winner} {theirs} healthier than {UNIT_NAME} {mine} — stopping self")
+                    record_event("election",
+                                 f"{tag}{winner} (tier {theirs[0]}, {theirs[1]}MB free) is healthier "
+                                 f"than {UNIT_NAME} (tier {mine[0]}, {mine[1]}MB free) — stopping self",
+                                 winner=winner, loser=UNIT_NAME, dry_run=ELECTION_DRY_RUN)
+                    if not ELECTION_DRY_RUN:
+                        _stop_self()
+                        return
         except Exception as e:
-            print(f"🗳️  Election attempt {attempt+1}/3: canonical unreachable ({e})")
-        time.sleep(10)
-    print("🗳️  Canonical not reachable after 3 attempts — staying active as sole instance")
+            print(f"🗳️  election error: {e}")
+        time.sleep(ELECTION_INTERVAL)
 
 
 # ── COMPOSE GIT BACKUP ──────────────────────────────────────────────────────
@@ -909,24 +1084,33 @@ def delete_compose_file(name):
 
 @app.route("/api/yamls", methods=["GET"])
 def list_yamls():
-    """Return all docker-compose files discovered via live Docker container labels."""
-    seen = set()
+    """Compose files the units have uploaded, for the dashboard's YAMLs tab.
+
+    This used to read com.docker.compose.project.working_dir off live
+    containers and stat() those paths \u2014 but they are HOST paths and this
+    container mounts no host filesystem (only registry_data, templates, .ssh
+    and the docker socket). Every isfile() check therefore failed and the tab
+    rendered "No compose files found" while 26 files sat in the store.
+
+    Serve the uploaded store instead: lokey pushes each unit's compose files
+    here, the paths are real inside this container, and /api/yaml can read and
+    write them unchanged.
+    """
     results = []
-    if docker_client:
-        try:
-            for c in docker_client.containers.list(all=True):
-                proj_dir = c.labels.get("com.docker.compose.project.working_dir")
-                if not proj_dir or proj_dir in seen:
-                    continue
-                seen.add(proj_dir)
-                for fname in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"):
-                    fpath = os.path.join(proj_dir, fname)
-                    if os.path.isfile(fpath):
-                        results.append({"label": os.path.basename(proj_dir), "container": c.name, "path": fpath})
-                        break
-        except Exception as e:
-            print(f"\u26a0\ufe0f YAML scan error: {e}")
-    results.sort(key=lambda x: x["label"])
+    try:
+        for fname in sorted(os.listdir(COMPOSE_DIR)):
+            if not fname.endswith((".yml", ".yaml")):
+                continue
+            label = os.path.splitext(fname)[0]
+            results.append({
+                "label": label,
+                "container": label,
+                "path": os.path.join(COMPOSE_DIR, fname),
+            })
+    except FileNotFoundError:
+        print(f"\u26a0\ufe0f  YAML store not found at {COMPOSE_DIR}")
+    except Exception as e:
+        print(f"\u26a0\ufe0f  YAML scan error: {e}")
     return jsonify(results)
 
 @app.route("/api/yaml", methods=["GET"])
@@ -1125,6 +1309,82 @@ def health_check():
         "nodes_known": node_count,
         "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT,
         "timestamp": datetime.now(timezone.utc).isoformat()
+    })
+
+
+@app.route("/api/events", methods=["GET", "POST"])
+def api_events():
+    """Event feed backing the dashboard's EVENT LOG panel.
+
+    The panel has always fetched this path, but no handler existed — so the log
+    sat empty and its companion WebSocket (ws:// on an https page) was blocked
+    as mixed content. Polling this endpoint replaces that socket.
+
+    POST lets units report their own events (repo sync results, failed
+    updates). Those failures previously only ever reached a container log on
+    the unit itself, which is how a decommissioned URL and an 8-commit drift
+    went unnoticed for weeks — here they surface on the dashboard instead.
+    """
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        message = str(data.get("message", ""))[:500]
+        if not message:
+            return jsonify({"error": "message required"}), 400
+        kind = str(data.get("type", "unit"))[:40]
+        unit = str(data.get("unit", ""))[:40]
+        entry = record_event(kind, message, unit=unit)
+        return jsonify({"result": "recorded", "timestamp": entry["timestamp"]})
+
+    limit = request.args.get("limit", type=int) or EVENT_LOG_MAX
+    with _event_lock:
+        return jsonify(list(_event_log)[-limit:])
+
+
+@app.route("/api/election", methods=["GET"])
+def election_status():
+    """Live view of the locator election — who would win, and why.
+
+    Exposed so the ranking can be judged at a glance instead of by grepping
+    container logs, and so it stays inspectable while ELECTION_DRY_RUN is on.
+    """
+    hosts = _locator_hosts()
+    with lock:
+        known = list(registry["nodes"].keys())
+        nodes = {u: dict(registry["nodes"].get(u) or {}) for u in known}
+
+    board = []
+    for unit in known:
+        tier, ram_mb = _node_health(unit)
+        info = nodes[unit]
+        board.append({
+            "unit": unit,
+            "tier": tier,
+            "disk_critical": tier < 0,
+            "ram_available_mb": ram_mb,
+            "ram_total_mb": _node_ram_total_mb(info),
+            "mem_percent": info.get("mem_percent"),
+            "disk_percent": info.get("disk_percent"),
+            "runs_locator": unit in hosts,
+            "is_self": unit == UNIT_NAME,
+            "eligible": ram_mb >= ELECTION_MIN_RAM_MB and tier >= 0,
+        })
+    board.sort(key=lambda r: ((r["tier"], r["ram_available_mb"]), r["unit"]), reverse=True)
+
+    contenders = [r for r in board if r["runs_locator"]]
+    winner = contenders[0]["unit"] if contenders else None
+    return jsonify({
+        "dry_run": ELECTION_DRY_RUN,
+        "self": UNIT_NAME,
+        "winner": winner,
+        "would_stop_self": bool(winner and winner != UNIT_NAME),
+        "locator_hosts": sorted(hosts),
+        "thresholds": {
+            "min_ram_mb": ELECTION_MIN_RAM_MB,
+            "disk_veto_percent": DISK_VETO_PERCENT,
+            "interval_seconds": ELECTION_INTERVAL,
+        },
+        "ranking": board,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     })
 
 
@@ -1421,6 +1681,12 @@ def update_node_metrics(node_id):
         node["disk_percent"]  = data.get("disk_percent")
         node["disk_total_gb"] = data.get("disk_total_gb")
         node["disk_used_gb"]  = data.get("disk_used_gb")
+        # Absolute capacity figures. Older lokeys omit these, so each is stored
+        # only when present rather than overwriting a known value with None.
+        for field in ("mem_total_mb", "mem_available_mb", "mem_total_gb",
+                      "mem_used_gb", "disk_free_gb"):
+            if data.get(field) is not None:
+                node[field] = data[field]
         if data.get("ip"):
             node["ip"] = data["ip"]
         if data.get("tailscale_ip"):
