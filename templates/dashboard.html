@@ -377,9 +377,32 @@
             border-radius: 50%;
             margin-right: 10px;
         }
+        /* Whole-row device states. steps(1,end) gives a hard alternation
+           between yellow and red rather than a soft crossfade, so a problem
+           device is unmissable at a glance. */
+        @keyframes devAlertFlash {
+            0%,  49%  { background-color: rgba(255, 230, 0, 0.20);
+                        box-shadow: inset 0 0 0 2px #ffe600; }
+            50%, 100% { background-color: rgba(255, 0, 0, 0.20);
+                        box-shadow: inset 0 0 0 2px var(--danger); }
+        }
+        tr.dev-alert {
+            animation: devAlertFlash 1s steps(1, end) infinite;
+        }
+        /* Charging is a healthy state, so it sits steady rather than flashing. */
+        tr.dev-charging {
+            background-color: rgba(0, 160, 255, 0.16);
+            box-shadow: inset 0 0 0 2px #00a0ff;
+        }
         .online {
             background-color: var(--neon-green);
-            box-shadow: 0 0 8px var(--neon-green);
+            /* Brighter, layered glow so online reads at a glance against the
+               dim grid — a tight core plus a wider halo, rather than one soft
+               8px shadow that washed out on the dark background. */
+            box-shadow: 0 0 6px var(--neon-green),
+                        0 0 14px var(--neon-green),
+                        0 0 22px rgba(0, 255, 0, 0.55);
+            border: 1px solid #d6ffd6;
         }
         .stale {
             background-color: #ffe600;
@@ -618,7 +641,10 @@
            plus a z-index above them keeps it readable while work is happening. */
         .event-box {
             position: fixed;
-            top: 130px;
+            /* Anchored to the bottom, not the top: at top:130px this panel sat
+               directly over the sortable table headers and swallowed their
+               clicks, since it floats above them at z-index 9000. */
+            bottom: 20px;
             left: 20px;
             width: 300px;
             height: 300px;
@@ -644,9 +670,9 @@
            the panel gets out of the way without disappearing — it stays
            visible and clickable to reopen. */
         .event-box.collapsed {
-            width: 40px;
-            height: 240px;
-            padding: 8px 4px;
+            width: 26px;
+            height: 210px;
+            padding: 6px 2px;
             resize: none;
         }
         .event-box.collapsed .event-box-body { display: none; }
@@ -662,9 +688,14 @@
         }
         .event-box.collapsed .grid-title {
             writing-mode: vertical-rl;
-            text-orientation: mixed;
+            /* upright, not mixed: letters stack the right way up reading down
+               the spine instead of being rotated on their side */
+            text-orientation: upright;
             white-space: nowrap;
-            letter-spacing: 2px;
+            letter-spacing: 1px;
+            font-size: 11px;
+            color: var(--neon-blue);
+            text-shadow: 0 0 6px var(--neon-blue);
         }
         .event-box.collapsed .event-box-controls {
             display: flex;
@@ -683,20 +714,21 @@
             padding-bottom: 4px;
             margin-bottom: 6px;
         }
+        /* Borderless: the glyphs alone read as controls without boxing them in */
         .event-box-controls button {
             background: transparent;
-            border: 1px solid var(--neon-green);
+            border: none;
             color: var(--neon-green);
             cursor: pointer;
             font-family: inherit;
-            font-size: 13px;
+            font-size: 15px;
             line-height: 1;
-            padding: 2px 7px;
-            margin-left: 4px;
+            padding: 2px 5px;
+            margin-left: 2px;
         }
         .event-box-controls button:hover {
-            background: var(--neon-green);
-            color: #000;
+            color: #fff;
+            text-shadow: 0 0 8px var(--neon-green);
         }
         .event-box-body {
             flex: 1 1 auto;
@@ -1749,6 +1781,15 @@
                 const dotClass = item.status !== 'ONLINE' ? 'offline'
                                 : batteryCritical ? 'battery-critical'
                                 : (isStale ? 'stale' : 'online');
+                // Whole-row state: a device that is down or nearly flat flashes
+                // yellow/red; one that is plugged in sits steady blue.
+                const charging = item.metadata?.charging === true
+                              || String(item.metadata?.charging).toLowerCase() === 'true';
+                if (item.status !== 'ONLINE' || batteryCritical) {
+                    tr.classList.add('dev-alert');
+                } else if (charging) {
+                    tr.classList.add('dev-charging');
+                }
                 tr.innerHTML = `
                     <td style="font-weight:bold">${item.name || item.id}</td>
                     <td>${item.ip || item.tailscale_ip || 'unknown'}</td>
@@ -2131,7 +2172,17 @@
             let details = `<span style="color: var(--neon-green);">[${formattedDate} ${formattedTime}]</span> `;
 
             if (event.type === 'migration') {
-                details += `<strong style="color: var(--accent);">[MIGRATION]</strong> Container <code>${event.from_container}</code> shifted to <code>${event.to_container}</code> on <strong>${event.unit}</strong>`;
+                // from_container/to_container actually carry NODE names (the
+                // emitter fills them from from_node/to_node), so showing them
+                // as the container meant the migrated container was never
+                // named. The real name is in event.container.
+                const movedName = event.container || 'unknown container';
+                const fromNode = event.from_container || event.from_node || '?';
+                const toNode = event.to_container || event.to_node || event.unit || '?';
+                const failed = event.success === false;
+                details += `<strong style="color: ${failed ? 'var(--danger)' : 'var(--accent)'};">`
+                        + `[MIGRATION${failed ? ' FAILED' : ''}]</strong> `
+                        + `<code>${movedName}</code> — <strong>${fromNode}</strong> → <strong>${toNode}</strong>`;
             } else if (event.type === 'dns') {
                 details += `<strong style="color: #00f0ff;">[DNS]</strong> A Record <code>${event.a_record}</code> point -> PDNS <code>${event.pdns_server}</code>`;
             } else {
