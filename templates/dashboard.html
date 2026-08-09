@@ -1781,14 +1781,16 @@
                 const dotClass = item.status !== 'ONLINE' ? 'offline'
                                 : batteryCritical ? 'battery-critical'
                                 : (isStale ? 'stale' : 'online');
-                // Whole-row state: a device that is down or nearly flat flashes
-                // yellow/red; one that is plugged in sits steady blue.
+                // Whole-row state, driven by charge rather than reachability:
+                // below 30% flashes yellow/red, plugged in sits steady blue.
+                // Charging wins when both apply — a device on the charger is
+                // recovering, so it reads as handled rather than as an alarm.
                 const charging = item.metadata?.charging === true
                               || String(item.metadata?.charging).toLowerCase() === 'true';
-                if (item.status !== 'ONLINE' || batteryCritical) {
-                    tr.classList.add('dev-alert');
-                } else if (charging) {
+                if (charging) {
                     tr.classList.add('dev-charging');
+                } else if (batteryCritical) {
+                    tr.classList.add('dev-alert');
                 }
                 tr.innerHTML = `
                     <td style="font-weight:bold">${item.name || item.id}</td>
