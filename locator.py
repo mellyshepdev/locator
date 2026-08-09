@@ -50,6 +50,7 @@ import requests
 import urllib3
 import re
 import io
+import ipaddress
 import qrcode
 import pandas as pd
 from datetime import datetime, timezone
@@ -847,6 +848,14 @@ SERVERLESS_URL_PATTERN = re.compile(
     re.IGNORECASE)
 
 
+def _client_public_ip():
+    """Real client IP behind Traefik, falling back to the direct socket peer."""
+    fwd = request.headers.get("X-Forwarded-For", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.remote_addr or ""
+
+
 def _infer_category(svc_type, url=""):
     """Default category when a registration doesn't declare one."""
     if svc_type == "native":
@@ -927,6 +936,10 @@ def register_service():
                 "status": "ONLINE",
                 "last_seen": now,
                 "ip": existing_node.get("ip", meta.get("ip", "")),
+                # Real client-facing IP (not the self-reported LAN "ip" above) —
+                # used as the geolocation fallback when a device has no GPS fix
+                # (no location permission granted, or an indoor/no-signal node).
+                "public_ip": _client_public_ip(),
                 "metadata": meta,
             }
 
@@ -1557,6 +1570,46 @@ def traccar_devices():
 TRACCAR_FIX_MAX_AGE_S = int(os.environ.get("TRACCAR_FIX_MAX_AGE_S", 600))  # ignore stale fixes
 _traccar_known_device_ids = set()  # uniqueIds already registered in Traccar this process
 
+# ── IP-based location fallback ──────────────────────────────────────────
+# For nodes with no GPS fix (no location permission, indoor/no-signal, or
+# non-mobile nodes like servers) we place them approximately from their
+# public IP instead of dropping them from the map entirely. Free, no-key
+# lookup service (ipwho.is) — city-level accuracy, good enough for a rough
+# pin. Results are cached hard since an IP's location practically never
+# changes and this must stay well under the service's rate limit.
+IP_GEO_CACHE_TTL_S = 24 * 3600
+IP_GEO_ACCURACY_M = 50000  # flags these as coarse/IP-derived vs a real GPS fix
+_ip_geo_cache = {}  # ip -> (lat, lon, cached_at_s) or (None, None, cached_at_s) for a failed lookup
+_ip_geo_fed_at = {}  # node_id -> last time we pushed an IP-derived fix (throttled separately from GPS)
+IP_GEO_FEED_INTERVAL_S = 3600  # don't re-push the same rough IP fix every minute
+
+
+def _geolocate_ip(ip):
+    """(lat, lon) for a public IP, or None if it's private/unroutable/unresolvable."""
+    if not ip:
+        return None
+    try:
+        if ipaddress.ip_address(ip).is_private:
+            return None
+    except ValueError:
+        return None
+
+    cached = _ip_geo_cache.get(ip)
+    if cached and (time.time() - cached[2]) < IP_GEO_CACHE_TTL_S:
+        return (cached[0], cached[1]) if cached[0] is not None else None
+
+    lat, lon = None, None
+    try:
+        res = requests.get(f"https://ipwho.is/{ip}", timeout=4)
+        data = res.json()
+        if data.get("success", True) and data.get("latitude") is not None:
+            lat, lon = data["latitude"], data["longitude"]
+    except Exception as e:
+        print(f"_geolocate_ip: lookup failed for {ip}: {e}")
+
+    _ip_geo_cache[ip] = (lat, lon, time.time())
+    return (lat, lon) if lat is not None else None
+
 
 def _traccar_ensure_device(unique_id, name):
     if unique_id in _traccar_known_device_ids:
@@ -1584,18 +1637,33 @@ def traccar_feeder():
         try:
             with lock:
                 candidates = [
-                    (node_id, dict(node.get("metadata") or {}))
+                    (node_id, dict(node.get("metadata") or {}), node.get("public_ip", ""))
                     for node_id, node in registry["nodes"].items()
                 ]
 
             now_ms = time.time() * 1000
-            for node_id, meta in candidates:
+            now_s = time.time()
+            for node_id, meta, public_ip in candidates:
                 lat, lon = meta.get("latitude"), meta.get("longitude")
-                if lat is None or lon is None:
-                    continue
                 fix_time_ms = meta.get("location_time_ms")
-                if fix_time_ms and (now_ms - fix_time_ms) > TRACCAR_FIX_MAX_AGE_S * 1000:
-                    continue  # stale fix, phone hasn't moved/reported recently
+                is_gps_fix = lat is not None and lon is not None and not (
+                    fix_time_ms and (now_ms - fix_time_ms) > TRACCAR_FIX_MAX_AGE_S * 1000
+                )
+                accuracy_m = meta.get("location_accuracy_m")
+
+                if not is_gps_fix:
+                    # No usable GPS — fall back to placing it from its IP, but only
+                    # once an hour per node so we're not hammering Traccar (or the
+                    # geolocation service) with an identical position every minute.
+                    last_fed = _ip_geo_fed_at.get(node_id, 0)
+                    if now_s - last_fed < IP_GEO_FEED_INTERVAL_S:
+                        continue
+                    located = _geolocate_ip(public_ip)
+                    if located is None:
+                        continue
+                    lat, lon = located
+                    accuracy_m = IP_GEO_ACCURACY_M
+                    _ip_geo_fed_at[node_id] = now_s
 
                 unique_id = re.sub(r"[^a-zA-Z0-9_-]", "_", str(node_id))
                 _traccar_ensure_device(unique_id, node_id)
@@ -1606,8 +1674,8 @@ def traccar_feeder():
                     "lon": lon,
                     "timestamp": int((fix_time_ms or now_ms) / 1000),
                 }
-                if meta.get("location_accuracy_m") is not None:
-                    params["accuracy"] = meta["location_accuracy_m"]
+                if accuracy_m is not None:
+                    params["accuracy"] = accuracy_m
                 try:
                     _traccar_request("GET", "/osmand/", params=params)
                 except Exception as e:
