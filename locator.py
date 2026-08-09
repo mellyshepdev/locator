@@ -3496,6 +3496,13 @@ if __name__ == "__main__":
 else:
     # When imported by Gunicorn or other WSGI servers, initialize the app
     try:
+        # Must precede persist_registry(), which writes to these tables.
+        # init_schema() previously lived only in main(), i.e. the
+        # `python locator.py` path — but production runs gunicorn and takes
+        # this branch, so the schema was never created and every snapshot
+        # failed with 'relation "nodes" does not exist'. Postgres persistence
+        # could not have worked on any gunicorn deployment.
+        db.init_schema()
         load_seed()
         persist_registry()
         # Start background threads

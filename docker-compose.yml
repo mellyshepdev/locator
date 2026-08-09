@@ -22,6 +22,7 @@ services:
       - LOCATOR_IS_PRIMARY=false
       - SELF_CONTAINER_NAME=locator
       - DISK_VETO_PERCENT=97
+      - DATABASE_URL=${DATABASE_URL}
       - LOCATOR_CANONICAL_URL=https://locator.theofficialblacksheepco.online
     labels:
       - "traefik.enable=true"
