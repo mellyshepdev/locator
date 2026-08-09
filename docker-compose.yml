@@ -6,6 +6,7 @@ services:
     volumes:
       - ./registry_data:/app/data
       - ./templates:/app/templates
+      - ./locator.yml:/app/locator.yml
       - /home/swoopg111/.ssh:/root/.ssh:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
@@ -21,6 +22,7 @@ services:
       - PYTHONUNBUFFERED=1
       - LOCATOR_IS_PRIMARY=false
       - SELF_CONTAINER_NAME=locator
+      - BALANCE_ENABLED=false
       - ELECTION_DRY_RUN=false
       - DISK_VETO_PERCENT=97
       - DATABASE_URL=${DATABASE_URL}

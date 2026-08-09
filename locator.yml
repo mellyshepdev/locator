@@ -1,6 +1,86 @@
+# Service policy. Read by the locator on every change (no restart needed).
+#
+# location_type:  stationary = never migrate. Use for anything holding data on
+#                 local disk, since migration moves the compose file and NOT the
+#                 volume — a "moved" database arrives empty while the only copy
+#                 stays behind.
+#                 mobile = may be rebalanced between units.
+# deployment_type: essential | optional  (informational)
+# units:          current_unit (default) | all | 8 | 7_8_9
+# instances:      how many per unit (default 1)
+
 Service:
-  filebeat:
-    deployement_type: essential
+  # ── Stationary: hold data on local disk ────────────────────────────────
+  mariadb-11.4:
+    deployment_type: essential
     location_type: stationary
-    inactivity_timout_minutes: "0"
-    Unit: all
+    units: "8"
+    instances: 1
+
+  mariadb-pdns:
+    deployment_type: essential
+    location_type: stationary
+    units: "9"
+    instances: 1
+
+  postgres:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
+  comms-postgres:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
+  postgres-inventory-backup:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+
+  matomo-db:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
+  synapse:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
+  chatwoot-rails:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
+  # ── Stationary: bound to a unit's identity or network position ─────────
+  traefik:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
+  pdns:
+    deployment_type: essential
+    location_type: stationary
+    units: 8_9
+    instances: 1
+
+  lokey:
+    deployment_type: essential
+    location_type: stationary
+    units: all
+    instances: 1
+
+  filebeat:
+    deployment_type: essential
+    location_type: stationary
+    inactivity_timeout_minutes: "0"
+    units: all
+    instances: 1
