@@ -669,6 +669,11 @@
            the title rotates to read down the spine and the controls stack, so
            the panel gets out of the way without disappearing — it stays
            visible and clickable to reopen. */
+        /* Reserve the collapsed spine's width so no interactive element is ever
+           rendered beneath the panel. Without this the sort headers sat under
+           it and their clicks went to the panel instead. */
+        body { padding-left: 52px; }
+
         .event-box.collapsed {
             width: 26px;
             height: 210px;
@@ -811,7 +816,11 @@
     <!-- TACTICAL GRID VIEW -->
     <div id="view-grid" class="view-container active">
 
-     <div class="event-box" id="event-box">
+     <!-- Starts collapsed: expanded it is 300x300, which in a short window
+          covers over half the left side and swallowed clicks on the sortable
+          table headers underneath it. Collapsed it is a 26px spine, and the
+          body reserves that width so page content never sits under it. -->
+     <div class="event-box collapsed" id="event-box">
       <div class="event-box-header">
        <span class="grid-title" style="margin:0;">EVENT LOG</span>
        <span class="event-box-controls">
@@ -2317,35 +2326,59 @@
                 }
             });
 
-              if (item.containers && item.containers.length > 0) {
- const sep = document.createElement('tr');
- sep.innerHTML = '<td colspan="2" style="padding-top: 14px; color: var(--neon-green);"><strong>Containers</strong></td>';
- rows.appendChild(sep);
+            // Node records have no `containers` field — the registry stores each
+            // container as its own service keyed name@host. This block used to
+            // read item.containers, which never exists, so it was always skipped
+            // and clicking a device listed nothing. Derive what runs on this node
+            // from the registry instead, including native services and apps.
+            const _svcSource = (typeof lastRegistryData !== 'undefined' && lastRegistryData)
+                ? (lastRegistryData.services || lastRegistryData) : {};
+            const _hostId = item.id || item.name;
+            const _runningHere = Object.values(_svcSource).filter(s =>
+                (s.host === _hostId || (s.hosts || []).includes(_hostId)) &&
+                s.status === 'ONLINE' &&
+                s.name !== _hostId);
 
- const containerRow = document.createElement('tr');
- const containerCell = document.createElement('td');
- containerCell.colSpan = 2;
- 
- const containerContainer = document.createElement('div');
- containerContainer.style.display = 'flex';
- containerContainer.style.flexWrap = 'wrap';
- containerContainer.style.gap = '8px';
- 
- item.containers.forEach(container => {
- const box = document.createElement('div');
- box.style.border = '1px solid var(--neon-green)';
- box.style.borderRadius = '4px';
- box.style.padding = '6px';
- box.style.backgroundColor = 'rgba(0, 255, 0, 0.1)';
- box.style.fontSize = '12px';
- box.innerText = container.name || container.service || 'Unknown';
- containerContainer.appendChild(box);
- });
- 
- containerCell.appendChild(containerContainer);
- containerRow.appendChild(containerCell);
- rows.appendChild(containerRow);
- }
+            if (_runningHere.length > 0) {
+                const sep = document.createElement('tr');
+                sep.innerHTML = `<td colspan="2" style="padding-top:14px;color:var(--neon-green);">`
+                              + `<strong>Running here (${_runningHere.length})</strong></td>`;
+                rows.appendChild(sep);
+
+                const containerRow = document.createElement('tr');
+                const containerCell = document.createElement('td');
+                containerCell.colSpan = 2;
+
+                const wrap = document.createElement('div');
+                wrap.style.display = 'flex';
+                wrap.style.flexWrap = 'wrap';
+                wrap.style.gap = '8px';
+
+                // Containers first, then native services, then applications.
+                const rank = s => (s.category === 'docker containers' || s.type === 'container') ? 0
+                                : (s.category === 'native services') ? 1 : 2;
+                _runningHere.sort((a, b) => rank(a) - rank(b) || (a.name || '').localeCompare(b.name || ''));
+
+                _runningHere.forEach(svc => {
+                    const kind = rank(svc);
+                    const colour = kind === 0 ? 'var(--neon-green)'
+                                 : kind === 1 ? '#00f0ff' : '#a200ff';
+                    const box = document.createElement('div');
+                    box.style.border = `1px solid ${colour}`;
+                    box.style.borderRadius = '4px';
+                    box.style.padding = '6px 8px';
+                    box.style.backgroundColor = 'rgba(255,255,255,0.04)';
+                    box.style.fontSize = '12px';
+                    box.style.color = colour;
+                    box.title = `${svc.category || svc.type || 'service'}${svc.metadata?.image ? ' — ' + svc.metadata.image : ''}`;
+                    box.innerText = svc.name || 'unknown';
+                    wrap.appendChild(box);
+                });
+
+                containerCell.appendChild(wrap);
+                containerRow.appendChild(containerCell);
+                rows.appendChild(containerRow);
+            }
 
             // Every remaining top-level field not already covered above
             Object.keys(item).forEach(key => {
