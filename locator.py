@@ -1111,6 +1111,14 @@ def list_yamls():
     write them unchanged.
     """
     results = []
+    # Service policy first — it governs what may migrate and where, so it is the
+    # one file most worth being editable from the dashboard.
+    if os.path.isfile(LOCATOR_YML):
+        results.append({
+            "label": "locator.yml (service policy)",
+            "container": "locator.yml",
+            "path": LOCATOR_YML,
+        })
     try:
         for fname in sorted(os.listdir(COMPOSE_DIR)):
             if not fname.endswith((".yml", ".yaml")):
@@ -2434,6 +2442,94 @@ def heartbeat_reaper():
 # ── LOAD BALANCER ────────────────────────────────────────────────────────────
 
 # Containers that must never be migrated or deduped automatically
+LOCATOR_YML = os.environ.get("LOCATOR_YML", os.path.join(os.path.dirname(os.path.abspath(__file__)), "locator.yml"))
+_policy_cache = {"mtime": None, "data": {}}
+
+
+def load_policy():
+    """Service policy from locator.yml, keyed by lowercase service name.
+
+    This file existed but nothing read it, so services marked
+    'location_type: stationary' were migrated anyway — which is how the
+    database behind ns1's PowerDNS came to be queued for a move. Reloaded on
+    mtime change so edits take effect without a restart.
+
+    Tolerates the original misspellings ('deployement_type',
+    'inactivity_timout_minutes') alongside the corrected ones.
+    """
+    try:
+        mtime = os.path.getmtime(LOCATOR_YML)
+    except OSError:
+        return {}
+    if _policy_cache["mtime"] == mtime:
+        return _policy_cache["data"]
+
+    try:
+        import yaml as _yaml
+        with open(LOCATOR_YML) as fh:
+            doc = _yaml.safe_load(fh) or {}
+    except Exception as e:
+        print(f"⚠️  locator.yml unreadable: {e}")
+        return _policy_cache["data"]
+
+    # Accept "Service:" (as written) or a bare top-level mapping.
+    services = doc.get("Service") or doc.get("services") or doc
+    parsed = {}
+    if isinstance(services, dict):
+        for name, cfg in services.items():
+            if not isinstance(cfg, dict):
+                continue
+            parsed[str(name).lower()] = {
+                "location_type": str(cfg.get("location_type", "")).lower(),
+                "deployment_type": str(
+                    cfg.get("deployment_type", cfg.get("deployement_type", ""))).lower(),
+                "units": str(cfg.get("units", cfg.get("Unit", "current_unit"))).lower(),
+                "instances": cfg.get("instances", 1),
+            }
+    _policy_cache.update({"mtime": mtime, "data": parsed})
+    print(f"📄 locator.yml loaded — {len(parsed)} service policies")
+    return parsed
+
+
+def _policy_for(name):
+    """Policy entry for a container, matching on name or base name."""
+    pol = load_policy()
+    low = (name or "").lower()
+    if low in pol:
+        return pol[low]
+    base = _base_name(low)
+    if base in pol:
+        return pol[base]
+    # Allow a policy key to match a versioned container (mariadb -> mariadb-11.4)
+    for key, cfg in pol.items():
+        if key and key in low:
+            return cfg
+    return {}
+
+
+def _is_pinned(name):
+    """True when a container must never be migrated.
+
+    Honours locator.yml first — anything marked 'location_type: stationary' is
+    immovable — then falls back to the built-in list.
+
+    Substring match, not set membership. The balancer used `name in
+    _PINNED_NAMES`, which only catches bare names: "postgres" was protected but
+    "comms-postgres" was not, and "mariadb" was protected while "mariadb-11.4"
+    — the database behind ns1's PowerDNS — was freely migratable. It was queued
+    for a move to unit9 that would have taken DNS down for four domains and left
+    the only copy of an unbacked-up database behind, because migration moves the
+    compose file and not the volume.
+
+    Elsewhere in this file the same list is already applied as a substring test;
+    this makes the balancer agree with it.
+    """
+    low = (name or "").lower()
+    if _policy_for(low).get("location_type") == "stationary":
+        return True
+    return any(p in low for p in _PINNED_NAMES)
+
+
 _PINNED_NAMES = {
     "traefik", "apache", "apache2", "httpd", "varnish", "bind9", "bind",
     "openvpn", "openvpn-client", "headscale", "tailscale", "wireguard-client", "wireguard",
@@ -2586,7 +2682,7 @@ def load_balancer():
                     if svc.get("host") == node_id
                     and svc.get("status") == "ONLINE"
                     and svc.get("type") in ("container", "native")
-                    and svc.get("name") not in _PINNED_NAMES
+                    and not _is_pinned(svc.get("name"))
                     and not svc.get("metadata", {}).get("pinned")
                 ]
                 for svc_id, svc in candidates:
@@ -2655,7 +2751,7 @@ def load_balancer():
                 if svc.get("host") == src_id
                 and svc.get("status") == "ONLINE"
                 and svc.get("type") in ("container", "native")
-                and svc.get("name") not in _PINNED_NAMES
+                and not _is_pinned(svc.get("name"))
                 and not svc.get("metadata", {}).get("pinned")
                 and not resolve_migration_order(svc_id, services_snap)[1]  # no missing deps
             ]
@@ -2816,8 +2912,15 @@ def local_docker_scanner():
 
 def duplicate_killer():
     """
-    Detects containers running the same image more than once and stops the oldest.
+    Detects the *same service* running more than once and stops the oldest.
     Skips infrastructure services listed in _PINNED_NAMES.
+
+    Grouping is by compose project+service, NOT by image alone: several
+    distinct services legitimately share one image (e.g. every oauth2-proxy
+    guard runs quay.io/oauth2-proxy/oauth2-proxy but fronts a different
+    upstream). Keying on the image made those look like duplicates of each
+    other and silently stopped all but the newest, taking their sites down.
+    Only containers with no compose labels fall back to the image key.
     """
     if not docker_client:
         return
@@ -2836,7 +2939,11 @@ def duplicate_killer():
                     continue
                 tags = ctr.image.tags
                 image_key = tags[0].split(":")[0] if tags else ctr.image.id[:12]
-                by_image.setdefault(image_key, []).append(ctr)
+                labels = ctr.labels or {}
+                project = labels.get("com.docker.compose.project")
+                service = labels.get("com.docker.compose.service")
+                group_key = f"compose:{project}/{service}" if project and service else f"image:{image_key}"
+                by_image.setdefault(group_key, []).append(ctr)
 
             for image_key, ctrs in by_image.items():
                 if len(ctrs) < 2:

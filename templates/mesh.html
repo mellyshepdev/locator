@@ -48,7 +48,12 @@
   }
   html.auth-failed #auth-fail { display: flex; }
 </style>
-<script src="https://bsco-keycloak.fly.dev/js/keycloak.js"></script>
+<!-- Self-hosted Keycloak JS adapter (v24 UMD). Was loaded from the IdP
+     at /js/keycloak.js, but Keycloak 26 (unit7) no longer serves that
+     endpoint, and the 26.x npm build is ESM-only — it sets no global
+     Keycloak, which the code below requires. Pinned here so the page
+     no longer depends on the IdP version at all. -->
+<script src="/static/keycloak.js"></script>
 <script>
   (function() {
     function authFailed(msg, err) {
@@ -58,11 +63,11 @@
       document.documentElement.classList.add('auth-failed');
     }
     if (typeof Keycloak === 'undefined') {
-      authFailed('Keycloak adapter failed to load from bsco-keycloak.fly.dev');
+      authFailed('Keycloak adapter failed to load from auth.theofficialblacksheepco.online');
       return;
     }
     var kc = new Keycloak({
-      url: 'https://bsco-keycloak.fly.dev',
+      url: 'https://auth.theofficialblacksheepco.online',
       realm: 'blacksheep',
       clientId: 'locator'
     });
@@ -145,7 +150,7 @@ canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 </head>
 <body>
 
-<div id="auth-fail">SSO UNAVAILABLE — sign-in could not be verified, registry data hidden.<br>Check bsco-keycloak.fly.dev, then reload.</div>
+<div id="auth-fail">SSO UNAVAILABLE — sign-in could not be verified, registry data hidden.<br>Check auth.theofficialblacksheepco.online, then reload.</div>
 
 <div id="ui">
   <h1>⬡ DYNAMIC NETWORK MESH</h1>
