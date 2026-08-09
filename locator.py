@@ -2980,14 +2980,35 @@ def commands_complete():
 
 def _find_service_entry(container):
     """Locate a container's registry entry — keys may be 'name' or 'name@host'.
-    Caller must hold `lock`. Returns (key, svc) or (None, None)."""
+
+    Prefers an ONLINE instance. The exact-key lookup used to win outright, which
+    meant a stale bare-name record beat the live 'name@host' one: asking to stop
+    'matomo' resolved to a record still attributed to unit1, so the command was
+    queued for a node that no longer exists and the container kept running while
+    the UI reported success.
+
+    Caller must hold `lock`. Returns (key, svc) or (None, None).
+    """
+    candidates = []
     svc = registry["services"].get(container)
     if svc:
-        return container, svc
+        candidates.append((container, svc))
     for key, s in registry["services"].items():
+        if key == container:
+            continue
         if key.split("@")[0] == container or s.get("name") == container:
-            return key, s
-    return None, None
+            candidates.append((key, s))
+    if not candidates:
+        return None, None
+
+    # An ONLINE instance is the one worth acting on; among equals prefer a
+    # name@host key, since that names the host explicitly.
+    def rank(item):
+        key, s = item
+        return (0 if s.get("status") == "ONLINE" else 1, 0 if "@" in key else 1)
+
+    candidates.sort(key=rank)
+    return candidates[0]
 
 
 def _find_container_unit(container):

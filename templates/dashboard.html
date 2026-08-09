@@ -193,8 +193,13 @@
         .view-container {
             position: absolute;
             top: 0;
-            left: 0;
-            width: 100%;
+            /* Offset by the event panel's collapsed spine. body padding cannot
+               do this: body is statically positioned, so an absolutely
+               positioned child at left:0 anchors to the viewport and ignores
+               it — which is why the sort headers stayed underneath the panel
+               and kept losing their clicks. */
+            left: 52px;
+            width: calc(100% - 52px);
             height: 100%;
             display: none;
         }
@@ -669,11 +674,6 @@
            the title rotates to read down the spine and the controls stack, so
            the panel gets out of the way without disappearing — it stays
            visible and clickable to reopen. */
-        /* Reserve the collapsed spine's width so no interactive element is ever
-           rendered beneath the panel. Without this the sort headers sat under
-           it and their clicks went to the panel instead. */
-        body { padding-left: 52px; }
-
         .event-box.collapsed {
             width: 26px;
             height: 210px;
@@ -2284,7 +2284,14 @@
                 if (data.error) {
                     notify(`Error: ${data.error}`, 'error');
                 } else {
-                    notify(`${name} is now ${data.status || (action === 'start' ? 'ONLINE' : 'OFFLINE')}`);
+                    // The API only QUEUES a command for the owning unit's agent;
+                    // it never touches Docker itself. Claiming the container "is
+                    // now OFFLINE" was a flat assertion that the work had been
+                    // done — which hid commands queued for a unit with no agent
+                    // polling, where nothing ever executed. Report what actually
+                    // happened and let the registry refresh show the real state.
+                    const _where = data.unit ? ` on ${data.unit}` : '';
+                    notify(`${action === 'start' ? 'Start' : 'Stop'} queued for ${name}${_where} — awaiting agent`);
                     loadRegistryData();
                 }
             })
