@@ -1724,7 +1724,7 @@ def update_node_metrics(node_id):
         # Absolute capacity figures. Older lokeys omit these, so each is stored
         # only when present rather than overwriting a known value with None.
         for field in ("mem_total_mb", "mem_available_mb", "mem_total_gb",
-                      "mem_used_gb", "disk_free_gb"):
+                      "mem_used_gb", "disk_free_gb", "mounts"):
             if data.get(field) is not None:
                 node[field] = data[field]
         if data.get("ip"):
