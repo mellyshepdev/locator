@@ -1252,7 +1252,7 @@
             if (clicked) clicked.classList.add('active');
 
             _yamlCurrentPath = path;
-            document.getElementById('yaml-path-display').textContent = path;
+            document.getElementById('yaml-editor-path').textContent = path;
             document.getElementById('yaml-editor').value = 'Loading...';
             document.getElementById('yaml-save-btn').style.display = 'none';
 
@@ -1271,7 +1271,7 @@
             const content = document.getElementById('yaml-editor').value;
             try {
                 const res = await fetch('/api/yaml?path=' + encodeURIComponent(_yamlCurrentPath), {
-                    method: 'PUT',
+                    method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ content })
                 });
