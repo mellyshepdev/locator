@@ -898,6 +898,7 @@
                     <th data-sort-table="docker" data-sort-key="status" data-label="Status" style="cursor:pointer" onclick="sortByColumn('docker','status')">Status</th>
                     <th>Metadata</th>
                     <th data-sort-table="docker" data-sort-key="lastseen" data-label="Last Seen" style="cursor:pointer" onclick="sortByColumn('docker','lastseen')">Last Seen</th>
+                    <th>Actions</th>
                 </tr></thead>
                 <tbody id="tbody-docker"></tbody>
             </table></div>
@@ -1284,6 +1285,25 @@
     </script>
 
     <!-- TOGGLE CONFIRMATION MODAL -->
+    <div id="migrate-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:20000; justify-content:center; align-items:center;">
+        <div style="background:#000510; border:1px solid var(--neon-green); box-shadow:0 0 30px var(--neon-green); padding:24px; min-width:380px; max-width:90vw; font-family:'Courier New',monospace;">
+            <h3 id="migrate-modal-title" style="color:var(--neon-green); margin:0 0 14px; letter-spacing:3px;">MIGRATE SERVICE</h3>
+            <div style="color:#aaa; font-size:13px; margin-bottom:12px;">
+                From node: <strong id="migrate-modal-from" style="color:var(--neon-green);"></strong>
+            </div>
+            <label style="color:#aaa; font-size:12px; display:block; margin-bottom:6px;">TARGET NODE</label>
+            <select id="migrate-target" style="width:100%; background:#000; color:var(--neon-green); border:1px solid var(--neon-green); padding:8px; font-family:inherit; font-size:13px; margin-bottom:14px;"></select>
+            <label style="color:#aaa; font-size:12px; display:flex; align-items:center; gap:8px; margin-bottom:14px;">
+                <input type="checkbox" id="migrate-force"> Force (ignore unmet dependencies)
+            </label>
+            <div id="migrate-status" style="font-size:12px; min-height:34px; margin-bottom:12px; line-height:1.5;"></div>
+            <div style="display:flex; gap:10px; justify-content:flex-end;">
+                <button onclick="closeMigrateModal()" style="background:#222; color:#ccc; border:1px solid #444; padding:8px 18px; font-family:inherit; cursor:pointer;">CANCEL</button>
+                <button id="migrate-confirm-btn" onclick="confirmMigrate()" style="background:var(--neon-green); color:#000; border:none; padding:8px 18px; font-family:inherit; font-weight:bold; cursor:pointer;">MIGRATE</button>
+            </div>
+        </div>
+    </div>
+
     <div id="toggle-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:20000; justify-content:center; align-items:center;">
         <div class="modal-box">
             <h3 id="toggle-modal-title">CONFIRM ACTION</h3>
@@ -1716,7 +1736,11 @@
             tbodyVMs.innerHTML = '';
             tbodyServerless.innerHTML = '';
 
-            const services = Object.values(registryData.services || {});
+            window._lastRegistry = registryData;
+            // Keep each service's registry key — /api/migrations identifies a
+            // service by that key, and Object.values() would discard it.
+            const services = Object.entries(registryData.services || {})
+                .map(([id, s]) => ({ ...s, id }));
             const hostColor = (h) => {
                 const st = registryData.nodes && registryData.nodes[h] && registryData.nodes[h].status;
                 return (st && st !== 'ONLINE') ? OFFLINE_COLOR : nodeColor(h);
@@ -1854,6 +1878,16 @@
 
                 tr.appendChild(createMetaBadges(item.metadata));
                 tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never'}</td>`;
+                const migTd = document.createElement('td');
+                const safeId = (item.id || '').replace(/'/g, "\\'");
+                const safeHost = (item.host || '').replace(/'/g, "\\'");
+                migTd.innerHTML = `
+                    <button class="status-toggle-btn"
+                            title="Queue a migration to another node"
+                            onclick="event.stopPropagation(); openMigrateModal('${safeId}','${safeName}','${safeHost}')">
+                        Migrate
+                    </button>`;
+                tr.appendChild(migTd);
                 tr.addEventListener('click', () => openDeviceModal(item));
                 tbodyDocker.appendChild(tr);
             });
@@ -2250,6 +2284,83 @@
 
         // ── CONTAINER TOGGLE LOGIC ──
         let _togglePending = { name: null, action: null };
+
+        // --- Migrate (tactical grid) -------------------------------------
+        // Thin client over POST /api/migrations. The server owns every rule
+        // (pinned services, dependency order, target reachability); this only
+        // has to report back what it says.
+        let _migratePending = { svcId: null, name: null, from: null };
+
+        function openMigrateModal(svcId, name, fromHost) {
+            _migratePending = { svcId: svcId, name: name, from: fromHost };
+
+            const sel = document.getElementById('migrate-target');
+            sel.innerHTML = '';
+            const nodes = (window._lastRegistry && window._lastRegistry.nodes) || {};
+            Object.entries(nodes)
+                .filter(([id, n]) => n.status === 'ONLINE' && id !== fromHost)
+                .forEach(([id]) => {
+                    const o = document.createElement('option');
+                    o.value = id;
+                    o.textContent = id;
+                    sel.appendChild(o);
+                });
+            const none = sel.options.length === 0;
+            if (none) sel.innerHTML = '<option value="">-- no other ONLINE node --</option>';
+            document.getElementById('migrate-confirm-btn').disabled = none;
+
+            document.getElementById('migrate-modal-title').innerText = 'MIGRATE ' + (name || '').toUpperCase();
+            document.getElementById('migrate-modal-from').innerText = fromHost || 'unknown';
+            document.getElementById('migrate-status').innerText = '';
+            document.getElementById('migrate-force').checked = false;
+            document.getElementById('migrate-modal').style.display = 'flex';
+        }
+
+        function closeMigrateModal() {
+            document.getElementById('migrate-modal').style.display = 'none';
+        }
+
+        async function confirmMigrate() {
+            const to = document.getElementById('migrate-target').value;
+            const el = document.getElementById('migrate-status');
+            if (!to) { el.style.color = 'var(--danger)'; el.innerText = 'No target node selected.'; return; }
+
+            const btn = document.getElementById('migrate-confirm-btn');
+            btn.disabled = true;
+            el.style.color = 'var(--neon-green)';
+            el.innerText = 'Queueing migration...';
+
+            try {
+                const res = await fetch('/api/migrations', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        service: _migratePending.svcId,
+                        to_node: to,
+                        force: document.getElementById('migrate-force').checked
+                    })
+                });
+                const data = await res.json().catch(() => ({}));
+
+                if (res.ok) {
+                    el.style.color = 'var(--neon-green)';
+                    el.innerText = 'Queued' + (data.id ? ' (' + data.id + ')' : '') + ' -> ' + to;
+                    setTimeout(closeMigrateModal, 1800);
+                } else if (res.status === 409 && Array.isArray(data.missing)) {
+                    el.style.color = '#ff8800';
+                    el.innerText = 'Unmet dependencies: ' + data.missing.join(', ') +
+                                   ' -- tick Force to migrate anyway.';
+                } else {
+                    el.style.color = 'var(--danger)';
+                    el.innerText = data.error || ('HTTP ' + res.status);
+                }
+            } catch (e) {
+                el.style.color = 'var(--danger)';
+                el.innerText = 'Request failed: ' + (e && e.message ? e.message : e);
+            } finally {
+                btn.disabled = false;
+            }
+        }
 
         function openToggleModal(containerName, currentStatus) {
             _togglePending.name   = containerName;
