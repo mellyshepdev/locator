@@ -28,6 +28,7 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - LOCATOR_CANONICAL_URL=https://locator.theofficialblacksheepco.online
       - TRACCAR_PASS=${TRACCAR_PASS}
+      - LOCATOR_ADMIN_KEY=${LOCATOR_ADMIN_KEY:-}
     labels:
       - "traefik.enable=true"
       # UI router — protected by Keycloak (catch-all, lower priority)
