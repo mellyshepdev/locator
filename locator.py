@@ -805,6 +805,23 @@ def get_service(name):
     return jsonify({"error": f"Service '{name}' not found"}), 404
 
 
+def _is_multi_unit_service(name):
+    """True when locator.yml assigns this service to more than one unit.
+
+    Such a service is a per-unit agent — a log shipper, a host agent — not a
+    duplicate. _PINNED_NAMES is the hardcoded version of this idea (it is why
+    lokey survives running fleet-wide), but a name has to be added by hand,
+    and anything missing from it gets torn down: enforce_unit_placement deploys
+    the service onto every assigned unit and _enforce_dedup evicts it straight
+    back off, the two workers undoing each other indefinitely. Reading the same
+    'units:' field that drives placement keeps them from disagreeing.
+    """
+    spec = (_policy_for(name).get("units") or "").strip().lower()
+    if spec == "all":
+        return True
+    return len(_expand_unit_spec(spec, [])) > 1
+
+
 def _enforce_dedup(new_name, new_host):
     """
     Cross-node dedup: when a new instance of a non-pinned container registers,
@@ -814,6 +831,8 @@ def _enforce_dedup(new_name, new_host):
     """
     if any(p in new_name.lower() for p in _PINNED_NAMES):
         return  # infrastructure — allowed on multiple nodes
+    if _is_multi_unit_service(new_name):
+        return  # per-unit agent — locator.yml says it belongs on several units
 
     with lock:
         instances = [
@@ -3071,13 +3090,19 @@ def enforce_unit_placement():
                 ]
                 services = list(registry.get("services", {}).items())
 
-            running = {}
+            # Only ONLINE instances count as covered. Counting every registry
+            # entry meant a service that had been stopped — or evicted — left
+            # an OFFLINE row behind that read as "already there", so placement
+            # never redeployed it and the unit stayed empty indefinitely.
+            running, known = {}, set()
             for _svc_id, svc in services:
                 nm = (svc.get("name") or "").lower()
-                running.setdefault(nm, set()).add(svc.get("host"))
+                known.add(nm)
+                if svc.get("status") == "ONLINE" and svc.get("host"):
+                    running.setdefault(nm, set()).add(svc.get("host"))
 
             now = time.time()
-            for name in sorted(running):
+            for name in sorted(known):
                 pol = _policy_for(name)
                 # Opt-in only. Placement predates this enforcement, so most
                 # entries in locator.yml were written when 'units:' did
