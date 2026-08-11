@@ -15,7 +15,7 @@ unit's agent picks up and runs; dns sync only confirms ns1 sent a NOTIFY, not
 that a secondary applied it.
 
 Usage:
-    export LOCATOR_URL="https://tobsco-locator.fly.dev"   # default shown
+    export LOCATOR_URL="https://locator.theofficialblacksheepco.online"   # default shown
     locatorctl.py start <container-name>
     locatorctl.py stop  <container-name>
     locatorctl.py status <container-name>
@@ -30,7 +30,7 @@ import sys
 
 import requests
 
-LOCATOR_URL = os.environ.get("LOCATOR_URL", "https://tobsco-locator.fly.dev")
+LOCATOR_URL = os.environ.get("LOCATOR_URL", "https://locator.theofficialblacksheepco.online")
 
 
 def toggle(name, action):
@@ -112,7 +112,7 @@ COMMANDS = {
 
 EPILOG = """\
 Environment:
-  LOCATOR_URL  Registry URL (default: https://tobsco-locator.fly.dev)
+  LOCATOR_URL  Registry URL (default: https://locator.theofficialblacksheepco.online)
 
 start/stop only confirm the command was queued — Lokey executes it on the
 container's actual host. Use `status`/`registry ls` or the dashboard to see it land.

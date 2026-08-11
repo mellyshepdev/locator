@@ -6,8 +6,18 @@
 #                 stays behind.
 #                 mobile = may be rebalanced between units.
 # deployment_type: essential | optional  (informational)
-# units:          current_unit (default) | all | 8 | 7_8_9
+# units:          current_unit (default) | all | 8 | "7_8_9"
+#                 ALWAYS QUOTE the underscore form — YAML 1.1 treats
+#                 underscores as digit separators, so a bare 7_8_9 parses as
+#                 the integer 789 and the policy silently matches nothing.
 # instances:      how many per unit (default 1)
+# project_dir /
+# git_remote:     opt in to placement enforcement. Without one of these the
+#                 locator will NOT fan a service out, because a queued deploy
+#                 carries only a container name and the target would have
+#                 nothing to check out.
+# env:            .env values for the target ('common' + per-unit override).
+#                 lokey merges them and never overwrites an existing key.
 
 Service:
   # ── Stationary: hold data on local disk ────────────────────────────────
@@ -69,7 +79,7 @@ Service:
   pdns:
     deployment_type: essential
     location_type: stationary
-    units: 8_9
+    units: "8_9"   # quoted: YAML reads 8_9 as int 89
     instances: 1
 
   lokey:
@@ -78,9 +88,36 @@ Service:
     units: all
     instances: 1
 
+  # filebeat was replaced by fluent-bit (see live-logger). Kept only so the
+  # name resolves if a stale agent ever reports it; it deploys nowhere.
   filebeat:
+    deployment_type: optional
+    location_type: stationary
+    units: current_unit
+    instances: 1
+
+  fluent-bit:
     deployment_type: essential
     location_type: stationary
     inactivity_timeout_minutes: "0"
-    units: all
+    units: "4_7_8_9"
     instances: 1
+    project_dir: /home/swoopg111/projects/live-logger
+    git_remote: https://gitlab.com/gbonds1/live-logger.git
+    env:
+      common:
+        # live-logger-api is published on unit8's TAILNET address only — it
+        # has no auth of its own and unit8 has a public IP with ufw inactive.
+        INGEST_HOST: 100.94.36.111
+        INGEST_PORT: "8080"
+      unit8:
+        INPUT_PROFILE: hub
+        INGEST_HOST: live-logger-api   # same docker network, no tailnet hop
+        INGEST_BIND: 100.94.36.111
+        COMPOSE_PROFILES: hub          # only the hub runs the UI + API
+      unit7:
+        INPUT_PROFILE: journald        # Debian 13, journald-only
+      unit9:
+        INPUT_PROFILE: journald        # Debian 13, journald-only
+      unit4:
+        INPUT_PROFILE: syslog          # Ubuntu 22.04, rsyslog active

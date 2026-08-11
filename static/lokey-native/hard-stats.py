@@ -2,25 +2,33 @@ import psutil
 import time
 import os
 import re
+import shutil
+import sys
+import signal
 import subprocess
+import socket
+import threading
 import requests
 import urllib3
+import json
 from datetime import datetime, timezone
-
-try:
-    from migrate_native import execute_native_migration
-except ImportError:
-    execute_native_migration = None
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-LOCATOR_URL = os.getenv("LOCATOR_URL", "https://tobsco-locator.fly.dev")
+# Default to the live locator. This fallback used to name a decommissioned
+# Fly app, so any native install without an explicit LOCATOR_URL reported into
+# the void even while running current code — unit6 did exactly that for ~65
+# days. Only docker-compose.yml carried the correct value.
+LOCATOR_URL = os.getenv("LOCATOR_URL", "https://locator.theofficialblacksheepco.online")
 LOCATOR_HOST_HEADER = os.getenv("LOCATOR_HOST_HEADER", "locator.theofficialblacksheepco.online")
 UNIT_NAME   = os.getenv("UNIT_NAME", "unknown_unit")
 TICK_RATE   = int(os.getenv("TICK_RATE", "60"))
 UNIT_HOST   = os.getenv("UNIT_HOST", "")   # hostname/domain that other units use to SSH here
 REMOTE_USER = os.getenv("REMOTE_USER", "swoopg111")
 LOKEY_PROJECT_DIR = os.getenv("LOKEY_PROJECT_DIR", f"/home/{REMOTE_USER}/projects/lokey")
+# Docker-mode lokey bind-mounts the host root at /host; native installs see the
+# real root. Probing for /host/proc keeps this correct either way.
+HOST_PREFIX = "/host" if os.path.isdir("/host/proc") else ""
 
 # ── Locator failover ─────────────────────────────────────────────────────────
 # Opt-in per unit (only units that keep a standby locator checkout should set
@@ -58,6 +66,106 @@ try:
 except Exception:
     _docker_client = None
 
+# Filesystems worth reporting. Everything else on a modern box is a pseudo or
+# virtual filesystem (proc, sysfs, cgroup, tmpfs, squashfs snaps, overlay layers)
+# and would bury the real storage in noise.
+_REAL_FSTYPES = {
+    "ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "f2fs", "jfs", "reiserfs",
+    "vfat", "exfat", "ntfs", "ntfs3", "hfsplus", "apfs", "ufs",
+}
+# Container-internal and system paths that are not user-visible storage.
+_SKIP_MOUNT_PREFIXES = ("/proc", "/sys", "/dev", "/run", "/snap", "/var/lib/docker")
+
+
+def get_mounts():
+    """Every real mounted filesystem on this host, with capacity.
+
+    get_system_stats() only ever measured '/', so attached storage was
+    invisible — a 100GB volume or a plugged-in SD card never showed up
+    anywhere in the registry.
+
+    Reads the HOST's mount table (/host/proc/mounts under Docker). The /host
+    bind mount is a slave (master:N in mountinfo), so mounts appearing after
+    the container started propagate in and hot-plugged media is picked up
+    without restarting anything.
+
+    Deduplicated by source device: bind mounts list the same filesystem several
+    times, which would otherwise report '/' repeatedly as separate disks.
+    """
+    mounts_file = f"{HOST_PREFIX}/proc/mounts" if HOST_PREFIX else "/proc/mounts"
+    seen_devices, results = set(), []
+    try:
+        with open(mounts_file) as fh:
+            entries = fh.read().splitlines()
+    except Exception:
+        return results
+
+    for line in entries:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        device, mountpoint, fstype = parts[0], parts[1], parts[2]
+        if fstype not in _REAL_FSTYPES:
+            continue
+
+        # Mountpoints in this file are already expressed in OUR namespace: under
+        # Docker the host's "/" appears as "/host" and "/boot/efi" as
+        # "/host/boot/efi". So statvfs the path as-is and strip the prefix only
+        # for reporting — prefixing again yields "/host/host" and every lookup
+        # fails, which silently produced an empty list.
+        probe = mountpoint
+        if HOST_PREFIX:
+            if not (mountpoint == HOST_PREFIX or mountpoint.startswith(HOST_PREFIX + "/")):
+                continue  # container-internal mount, not host storage
+            mountpoint = mountpoint[len(HOST_PREFIX):] or "/"
+
+        if mountpoint.startswith(_SKIP_MOUNT_PREFIXES):
+            continue
+        if device in seen_devices:
+            continue  # bind mount of a filesystem already counted
+        seen_devices.add(device)
+
+        try:
+            st = os.statvfs(probe)
+        except Exception:
+            continue
+        total = st.f_blocks * st.f_frsize
+        free = st.f_bavail * st.f_frsize
+        if total <= 0:
+            continue
+        used = total - (st.f_bfree * st.f_frsize)
+        results.append({
+            "device": device,
+            "mountpoint": mountpoint,
+            "fstype": fstype,
+            "total_gb": round(total / (1024**3), 2),
+            "used_gb": round(used / (1024**3), 2),
+            "free_gb": round(free / (1024**3), 2),
+            "percent": round(used / total * 100, 1),
+            "removable": _is_removable(device),
+        })
+    results.sort(key=lambda d: d["mountpoint"])
+    return results
+
+
+def _is_removable(device):
+    """True for USB sticks, SD cards and the like.
+
+    Reads the kernel's own 'removable' flag for the parent block device, so an
+    SD card reads as removable while a fixed disk does not.
+    """
+    name = os.path.basename(device)
+    if not name.startswith(("sd", "mmcblk", "nvme")):
+        return False
+    # sda1 -> sda ; mmcblk0p1 -> mmcblk0 ; nvme0n1p1 -> nvme0n1
+    base = re.sub(r"(p?\d+)$", "", name) if name.startswith(("mmcblk", "nvme")) else name.rstrip("0123456789")
+    try:
+        with open(f"{HOST_PREFIX}/sys/block/{base}/removable") as fh:
+            return fh.read().strip() == "1"
+    except Exception:
+        return False
+
+
 def get_system_stats():
     cpu_usage = psutil.cpu_percent(interval=1)
 
@@ -76,18 +184,25 @@ def get_system_stats():
         disk = psutil.disk_usage('/')
         disk_total = round(disk.total / (1024**3), 2)
         disk_used = round(disk.used / (1024**3), 2)
+        disk_free = round(disk.free / (1024**3), 2)
         disk_percent = disk.percent
     except Exception:
-        disk_total = disk_used = disk_percent = 0
+        disk_total = disk_used = disk_free = disk_percent = 0
 
     return {
         "cpu_usage_percent": cpu_usage,
         "cpu_temp_c": cpu_temp,
         "mem_total_gb": round(mem.total / (1024**3), 2),
         "mem_used_gb": round(mem.used / (1024**3), 2),
+        # psutil's "available" — not total-minus-used. It accounts for
+        # reclaimable cache/buffers, so it reflects what a new process could
+        # actually get, which is the figure placement decisions need.
+        "mem_available_mb": round(mem.available / (1024**2), 1),
+        "mem_total_mb": round(mem.total / (1024**2), 1),
         "mem_percent": mem.percent,
         "disk_total_gb": disk_total,
         "disk_used_gb": disk_used,
+        "disk_free_gb": disk_free,
         "disk_percent": disk_percent,
     }
 
@@ -170,6 +285,31 @@ def get_tailscale_ip():
     except Exception:
         pass
 
+    # Docker-mode: run the HOST's tailscale binary against the HOST's socket.
+    # This is the only path that actually works in our containers — the CLI is
+    # not installed in the image, nsenter needs `pid: host` (the compose grants
+    # privileged but not that), and tailscale0 lives in the host's network
+    # namespace so `ip addr` cannot see it either. All three fell through, which
+    # is why every containerised unit reported tailscale_ip=None while unit7's
+    # native agent reported correctly.
+    #
+    # Note the socket path is /host/run, NOT /host/var/run: /var/run is a
+    # symlink to /run, and through the bind mount it resolves to the
+    # CONTAINER's /run rather than the host's. The binary is static Go, so it
+    # executes fine from the host filesystem.
+    try:
+        result = subprocess.run(
+            ["/host/usr/bin/tailscale",
+             "--socket=/host/run/tailscale/tailscaled.sock", "ip", "-4"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            ip = result.stdout.strip().splitlines()[0].strip()
+            if ip:
+                return ip
+    except Exception:
+        pass
+
     try:
         result = subprocess.run(
             ["nsenter", "-t", "1", "-n", "ip", "-4", "addr", "show", "tailscale0"],
@@ -197,6 +337,92 @@ def get_tailscale_ip():
         pass
 
     return None
+
+
+# ── IP COLLECTION ────────────────────────────────────────────────────────────
+# Global IP variables, populated on startup and kept current during heartbeats.
+_private_ip = None
+_public_ip = None
+_tailscale_ip_cached = None
+
+
+def get_private_ip():
+    """Return the host's private IP using socket.
+
+    Opens a socket to a public DNS server to determine the primary outgoing
+    interface's IP address (works without root and doesn't actually send packets).
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return None
+
+
+def _fetch_public_ip():
+    """Fetch public IP via curl with 5s timeout.
+
+    Uses curl directly (as specified) and stores result globally.
+    Called from a background thread to avoid blocking the first heartbeat.
+    """
+    global _public_ip
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "--connect-timeout", "5", "https://ifconfig.me"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            ip = result.stdout.strip()
+            if ip and "." in ip:
+                _public_ip = ip
+                return
+    except Exception:
+        pass
+    _public_ip = None
+
+
+def _start_public_ip_background_fetch():
+    """Launch a daemon thread to fetch public IP without blocking startup."""
+    thread = threading.Thread(target=_fetch_public_ip, daemon=True)
+    thread.start()
+
+
+# ── GEOLOCATION ──────────────────────────────────────────────────────────────
+# IP-based geolocation for devices without GPS (laptops, desktops).
+# Cached globally; updated every heartbeat in background to avoid blocking.
+_geolocation = None  # {"lat": float, "lon": float} or None
+
+
+def _fetch_geolocation_background():
+    """Fetch approximate lat/lon from public IP via ip-api.com free tier.
+
+    Runs in background; stores result globally. Works for laptops/desktops
+    without GPS hardware.
+    """
+    global _geolocation, _public_ip
+    if not _public_ip:
+        return
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "--connect-timeout", "5", f"http://ip-api.com/json/{_public_ip}"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            if data.get("status") == "success":
+                _geolocation = {
+                    "lat": data.get("lat"),
+                    "lon": data.get("lon"),
+                    "city": data.get("city"),
+                    "country": data.get("country"),
+                }
+                return
+    except Exception:
+        pass
+    _geolocation = None
 
 
 def get_os_info():
@@ -265,15 +491,27 @@ def push_node_metrics(stats):
     are preserved on older locators that only have POST /nodes.
     """
     headers = {"Host": LOCATOR_HOST_HEADER}
+    # Absolute totals matter as much as percentages: the units range from 1.8GB
+    # to 16GB, so "20% free" means ~370MB on one and ~3.2GB on another. Without
+    # totals the locator cannot tell whether a node can actually host what it is
+    # about to migrate there, and its election has nothing real to rank on.
     metrics = {
-        "cpu_percent":   stats["cpu_usage_percent"],
-        "mem_percent":   stats["mem_percent"],
-        "disk_percent":  stats["disk_percent"],
-        "disk_total_gb": stats["disk_total_gb"],
-        "disk_used_gb":  stats["disk_used_gb"],
-        "os":            _OS_INFO,
-        "status":        "ONLINE",
-        "last_seen":     datetime.now(timezone.utc).isoformat(),
+        "cpu_percent":       stats["cpu_usage_percent"],
+        "mem_percent":       stats["mem_percent"],
+        "mem_total_mb":      stats["mem_total_mb"],
+        "mem_available_mb":  stats["mem_available_mb"],
+        "mem_total_gb":      stats["mem_total_gb"],
+        "mem_used_gb":       stats["mem_used_gb"],
+        "disk_percent":      stats["disk_percent"],
+        "disk_total_gb":     stats["disk_total_gb"],
+        "disk_used_gb":      stats["disk_used_gb"],
+        "disk_free_gb":      stats["disk_free_gb"],
+        # Every real mounted filesystem, not just '/'. Attached volumes and
+        # removable media (SD cards, USB) show up here.
+        "mounts":            get_mounts(),
+        "os":                _OS_INFO,
+        "status":            "ONLINE",
+        "last_seen":         datetime.now(timezone.utc).isoformat(),
     }
     ts_ip = get_tailscale_ip()
     if ts_ip:
@@ -306,6 +544,8 @@ def push_node_metrics(stats):
         print(f"[{UNIT_NAME}] Failed to push node metrics: {e}")
 
 def register_stats():
+    _fetch_geolocation_background()  # Update geolocation in background each heartbeat
+
     stats = get_system_stats()
     containers = get_docker_containers()
     running = containers.get("running", [])
@@ -322,12 +562,25 @@ def register_stats():
         "ram": containers_ram,
     }
 
+    metadata = {
+        **stats,
+        "os": _OS_INFO,
+        "containers": containers_summary,
+        "private_ip": _private_ip,
+        "public_ip": _public_ip,
+        "tailscale_ip": _tailscale_ip_cached,
+    }
+
+    # Add geolocation data if available (for laptops/desktops without GPS)
+    if _geolocation:
+        metadata.update(_geolocation)
+
     payload = {
         "name": "lokey-client",
         "host": UNIT_NAME,
         "type": "container",
         "status": "ONLINE",
-        "metadata": {**stats, "os": _OS_INFO, "containers": containers_summary},
+        "metadata": metadata,
     }
 
     headers = {"Host": LOCATOR_HOST_HEADER}
@@ -425,6 +678,70 @@ def _ssh(ip, cmd, timeout=120):
     result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=timeout)
     return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
 
+# ── COMPOSE STACKS MONOREPO ──────────────────────────────────────────────────
+# One repo holding every container's compose file, rather than expecting each
+# container's own project directory to be a git repo with a push remote. Most
+# were not — phpmyadmin's lives under server/databases/maria/11.4, a plain
+# directory — so every migration died at "No configured push destination".
+
+COMPOSE_STACKS_DIR = os.getenv(
+    "COMPOSE_STACKS_DIR", f"/home/{REMOTE_USER}/projects/compose-stacks")
+COMPOSE_STACKS_REMOTE = os.getenv(
+    "COMPOSE_STACKS_REMOTE",
+    "https://gitlab.com/blackshepherddeveloper/compose-stacks.git")
+
+
+def _ensure_stacks_repo():
+    """Clone or refresh the compose-stacks checkout. Returns its path or None.
+
+    Cloning here is what lets a container move to a unit that has never hosted
+    it. The old pull_and_start had a clone branch, but it sat behind a
+    `not isdir(host)` check that had already returned on the same condition —
+    so it was unreachable and migrating to a fresh node always failed.
+    """
+    host = _host_dir(COMPOSE_STACKS_DIR)
+    if os.path.isdir(os.path.join(host, ".git")):
+        pull = _git(host, "pull", "--ff-only")
+        if pull.returncode != 0:
+            print(f"[{UNIT_NAME}] ⚠️  stacks pull failed: {pull.stderr.strip()[:140]}")
+        return host
+
+    os.makedirs(os.path.dirname(host), exist_ok=True)
+    token = _git_token()
+    remote = COMPOSE_STACKS_REMOTE
+    if token and remote.startswith("https://") and "@" not in remote:
+        remote = remote.replace("https://", f"https://oauth2:{token}@", 1)
+    clone = subprocess.run(
+        ["git", "clone", remote, host],
+        capture_output=True, text=True, timeout=180,
+    )
+    if clone.returncode != 0:
+        print(f"[{UNIT_NAME}] ❌ stacks clone failed: {clone.stderr.strip()[:160]}")
+        return None
+    print(f"[{UNIT_NAME}] 📥 cloned compose-stacks → {host}")
+    return host
+
+
+def _stack_file(stacks_host, name):
+    """Path to a container's compose file inside the stacks repo, if present."""
+    for ext in (".yml", ".yaml"):
+        candidate = os.path.join(stacks_host, f"{name}{ext}")
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _find_local_compose_file(project_dir):
+    """The compose file inside a container's own project directory."""
+    host = _host_dir(project_dir)
+    for fname in ("docker-compose.yml", "docker-compose.yaml",
+                  "compose.yml", "compose.yaml"):
+        candidate = os.path.join(host, fname)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def _get_compose_dir(container_name):
     """Return the docker-compose project directory for a container."""
     if not _docker_client:
@@ -438,16 +755,17 @@ def _get_compose_dir(container_name):
 def execute_migration(mig):
     """
     Dispatch a migration based on its type.
+      kind == "native"   — non-container migration, see _execute_native_migration.
       git_push_and_stop  — commit + push this container's project, then stop it here.
       git_pull_and_start — pull (or clone) the project on this node, docker compose up -d.
       git_pull_only      — pull (or clone) to sync state; container already running here.
-      native_stop_and_sync / native_prereq_and_start — non-Docker/systemd services,
-        see migrate_native.py (only relevant if this host also has native services
-        registered on it, not just containers).
       (default/legacy)   — rsync project to target, compose up there, compose down here.
     Returns (success: bool, extra: dict) where extra carries data for the locator
     completion report (e.g. project_dir so locator can create the follow-on pull task).
     """
+    if mig.get("kind", "container") == "native":
+        return _execute_native_migration(mig), {}
+
     mig_type = mig.get("type", "rsync")
     if mig_type == "git_push_and_stop":
         return _execute_git_push_and_stop(mig)
@@ -455,11 +773,6 @@ def execute_migration(mig):
         return _execute_git_pull_and_start(mig)
     if mig_type == "git_pull_only":
         return _execute_git_pull_only(mig)
-    if mig_type in ("native_stop_and_sync", "native_prereq_and_start"):
-        if execute_native_migration is None:
-            print(f"[{UNIT_NAME}] FAILED {mig.get('id')}: migrate_native.py not available on this host")
-            return False, {}
-        return execute_native_migration(mig)
     return _execute_rsync_migration(mig), {}
 
 
@@ -486,20 +799,29 @@ def _execute_git_push_and_stop(mig):
         print(f"[{UNIT_NAME}] ❌ {mig_id}: no compose dir for {name}")
         return False, {}
 
-    host = _host_dir(project_dir)
-    git_env = {**os.environ, "GIT_SSH_COMMAND": "ssh -o StrictHostKeyChecking=no -o BatchMode=yes"}
+    # Publish into the shared compose-stacks repo rather than pushing the
+    # container's own directory. Those directories are mostly plain folders
+    # with no remote, which is why every migration failed here.
+    local_compose = _find_local_compose_file(project_dir)
+    if not local_compose:
+        print(f"[{UNIT_NAME}] ❌ {mig_id}: no compose file under {project_dir}")
+        return False, {}
 
-    # Stage and commit (may be a no-op if nothing changed — that's fine)
-    subprocess.run(["git", "-C", host, "add", "-A"], timeout=30, env=git_env)
-    subprocess.run(
-        ["git", "-C", host, "commit", "-m", f"[lokey-migrate] export {name}"],
-        timeout=30, env=git_env, capture_output=True,
-    )
+    stacks_host = _ensure_stacks_repo()
+    if not stacks_host:
+        print(f"[{UNIT_NAME}] ❌ {mig_id}: compose-stacks unavailable")
+        return False, {}
 
-    push = subprocess.run(
-        ["git", "-C", host, "push"],
-        capture_output=True, text=True, timeout=60, env=git_env,
-    )
+    try:
+        shutil.copyfile(local_compose, os.path.join(stacks_host, f"{name}.yml"))
+    except Exception as e:
+        print(f"[{UNIT_NAME}] ❌ {mig_id}: could not stage {name}.yml: {e}")
+        return False, {}
+
+    host = stacks_host
+    _git(host, "add", "-A")
+    _git(host, "commit", "-m", f"[lokey-migrate] {name} leaving {UNIT_NAME} for {to_node}")
+    push = _git(host, "push")
     is_dedup = mig.get("dedup", False)
     if push.returncode != 0:
         msg = push.stderr.strip()[:200]
@@ -542,6 +864,25 @@ def _execute_git_pull_and_start(mig):
     project_dir = mig.get("project_dir", "")
 
     print(f"[{UNIT_NAME}] 📥 git_pull_and_start {mig_id}: {name} (dir: {project_dir})")
+
+    # Take the container's compose from the shared stacks repo, cloning it if
+    # this unit has never had it. Previously a missing project_dir returned
+    # immediately, so a container could only ever move to a node that already
+    # hosted it — which is precisely the case a migration is meant to solve.
+    stacks_host = _ensure_stacks_repo()
+    if stacks_host:
+        stack_file = _stack_file(stacks_host, name)
+        if stack_file:
+            up = subprocess.run(
+                ["docker", "compose", "-f", stack_file, "-p", name, "up", "-d"],
+                capture_output=True, text=True, timeout=300,
+            )
+            if up.returncode != 0:
+                print(f"[{UNIT_NAME}] ❌ {mig_id}: compose up failed: {up.stderr.strip()[:200]}")
+                return False, {}
+            print(f"[{UNIT_NAME}] ✅ {mig_id}: started {name} from compose-stacks")
+            return True, {"project_dir": COMPOSE_STACKS_DIR, "stack_file": stack_file}
+        print(f"[{UNIT_NAME}] ⚠️  {mig_id}: {name} not in compose-stacks — falling back to project dir")
 
     if not project_dir:
         print(f"[{UNIT_NAME}] ❌ {mig_id}: no project_dir provided")
@@ -691,6 +1032,254 @@ def _execute_rsync_migration(mig):
     print(f"[{UNIT_NAME}] ✅ Migration {mig_id}: complete — {name} moved to {to_node}")
     return True
 
+
+# ── NATIVE (non-container) MIGRATION ────────────────────────────────────────
+# Moves a systemd-managed service or a bare background process — as opposed
+# to a Docker container — to another unit. Which of the two it is gets
+# detected live against the actual host state, not assumed from the registry.
+
+def _detect_native_kind(name, metadata):
+    """
+    Check this host's real state for the named service to decide how to
+    migrate it:
+      "systemd" — a real, loaded systemd unit with a unit file on disk
+                  ("standard app" — properly installed, config-driven).
+      "process" — no systemd unit, but a process is actually running
+                  ("native background process" — ad hoc, no config file).
+      None      — nothing found here to migrate.
+    Returns (kind, detail): detail is (unit_name, unit_path) for "systemd",
+    or a pid (int) for "process".
+    """
+    unit_name = metadata.get("systemd_unit") or f"{name}.service"
+
+    if shutil.which("systemctl"):
+        show = subprocess.run(
+            ["systemctl", "show", unit_name,
+             "--property=LoadState,ActiveState,FragmentPath", "--no-pager"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if show.returncode == 0:
+            props = dict(
+                line.split("=", 1) for line in show.stdout.strip().splitlines() if "=" in line
+            )
+            if props.get("LoadState") == "loaded" and props.get("FragmentPath"):
+                return "systemd", (unit_name, props["FragmentPath"])
+
+    pid_file = metadata.get("pid_file")
+    if pid_file and os.path.isfile(pid_file):
+        try:
+            pid = int(open(pid_file).read().strip())
+            os.kill(pid, 0)  # existence check only, no signal sent
+            return "process", pid
+        except (ValueError, ProcessLookupError, PermissionError, OSError):
+            pass
+
+    pgrep = subprocess.run(["pgrep", "-f", name], capture_output=True, text=True, timeout=10)
+    if pgrep.returncode == 0:
+        # Exclude our own pid — "-f" matches substrings anywhere in the full
+        # command line, so a service name that happens to appear in this
+        # process's own args (env vars, paths, etc.) would otherwise self-match.
+        candidates = [int(p) for p in pgrep.stdout.split() if int(p) != os.getpid()]
+        if candidates:
+            return "process", candidates[0]
+
+    return None, None
+
+
+def _parse_unit_file(path):
+    """Extract WorkingDirectory= and ExecStart= from a systemd unit file."""
+    working_dir, exec_start = None, None
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("WorkingDirectory="):
+                    working_dir = line.split("=", 1)[1].strip()
+                elif line.startswith("ExecStart="):
+                    exec_start = line.split("=", 1)[1].strip()
+    except Exception:
+        pass
+    return working_dir, exec_start
+
+
+def _guess_venv_from_exec(exec_start):
+    """If ExecStart runs a <venv>/bin/python[3], return the venv dir."""
+    if not exec_start:
+        return None
+    interpreter = exec_start.split()[0]
+    if interpreter.endswith("/bin/python") or interpreter.endswith("/bin/python3"):
+        return os.path.dirname(os.path.dirname(interpreter))
+    return None
+
+
+def _rebuild_remote_venv(to_ip, working_dir, venv_path):
+    """
+    Ship code without the venv (already excluded from rsync by the caller)
+    and rebuild it from requirements.txt on the target — safer than copying
+    a venv directory across possibly different OS/arch/Python versions.
+    """
+    if not venv_path:
+        return True  # no venv involved
+    req_file = os.path.join(working_dir, "requirements.txt")
+    if not os.path.isfile(req_file):
+        print(f"  ⚠️  no requirements.txt in {working_dir} — target must already have a usable venv")
+        return True
+    ok, _, err = _ssh(
+        to_ip,
+        f"python3 -m venv {venv_path} && "
+        f"{venv_path}/bin/pip install --quiet -r {working_dir}/requirements.txt",
+        timeout=180,
+    )
+    if not ok:
+        print(f"  ❌ remote venv rebuild failed: {err[:200]}")
+    return ok
+
+
+def _rsync_native_project(working_dir, to_ip, venv_path):
+    ok, _, err = _ssh(to_ip, f"mkdir -p {working_dir}")
+    if not ok:
+        print(f"  ❌ mkdir failed on target: {err}")
+        return False
+    exclude = []
+    if venv_path and os.path.dirname(venv_path) == working_dir:
+        exclude = ["--exclude", os.path.basename(venv_path)]
+    rsync = subprocess.run(
+        ["rsync", "-avz", "--delete", *exclude,
+         f"{working_dir}/", f"{REMOTE_USER}@{to_ip}:{working_dir}/"],
+        capture_output=True, text=True, timeout=300,
+    )
+    if rsync.returncode != 0:
+        print(f"  ❌ rsync failed: {rsync.stderr[:200]}")
+        return False
+    return True
+
+
+def _migrate_systemd_service(mig, unit_name, unit_path, metadata):
+    """A "standard app": stop it, ship its working dir + rebuilt venv + unit
+    file, install and start it on the target via systemctl."""
+    mig_id, to_ip, to_node = mig["id"], mig["to_ip"], mig["to_node"]
+    print(f"[{UNIT_NAME}] 🧩 native(systemd) migration {mig_id}: {unit_name} → {to_node} ({to_ip})")
+
+    working_dir, exec_start = _parse_unit_file(unit_path)
+    working_dir = metadata.get("working_dir") or working_dir
+    venv_path   = metadata.get("venv_path") or _guess_venv_from_exec(exec_start)
+
+    if not working_dir:
+        print(f"[{UNIT_NAME}] ❌ {mig_id}: no WorkingDirectory in unit and no metadata.working_dir override")
+        return False
+
+    stop = subprocess.run(
+        ["sudo", "-n", "systemctl", "stop", unit_name],
+        capture_output=True, text=True, timeout=30,
+    )
+    if stop.returncode != 0:
+        print(f"[{UNIT_NAME}] ❌ {mig_id}: systemctl stop failed (passwordless sudo set up?): {stop.stderr.strip()[:200]}")
+        return False
+
+    if not _rsync_native_project(working_dir, to_ip, venv_path):
+        return False
+
+    if not _rebuild_remote_venv(to_ip, working_dir, venv_path):
+        return False
+
+    scp = subprocess.run(
+        ["scp", unit_path, f"{REMOTE_USER}@{to_ip}:/tmp/{unit_name}"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if scp.returncode != 0:
+        print(f"[{UNIT_NAME}] ❌ {mig_id}: unit file scp failed: {scp.stderr.strip()[:200]}")
+        return False
+
+    ok, _, err = _ssh(
+        to_ip,
+        f"sudo -n cp /tmp/{unit_name} /etc/systemd/system/{unit_name} && "
+        f"sudo -n systemctl daemon-reload && sudo -n systemctl enable --now {unit_name}",
+        timeout=60,
+    )
+    if not ok:
+        print(f"[{UNIT_NAME}] ❌ {mig_id}: remote systemctl enable failed (passwordless sudo set up on {to_node}?): {err}")
+        return False
+
+    ok, out, _ = _ssh(to_ip, f"systemctl is-active {unit_name}", timeout=10)
+    if not ok or out.strip() != "active":
+        print(f"[{UNIT_NAME}] ⚠️  {mig_id}: started but not reporting active on {to_node} ({out!r})")
+        return False
+
+    print(f"[{UNIT_NAME}] ✅ {mig_id}: {unit_name} now active on {to_node}")
+    return True
+
+
+def _migrate_native_process(mig, pid, metadata):
+    """A "native background process": no unit file, so working_dir and
+    start_cmd must come from registry metadata. Stop, ship, restart via
+    nohup on the target."""
+    mig_id, to_ip, to_node = mig["id"], mig["to_ip"], mig["to_node"]
+    name = mig["container"]
+    print(f"[{UNIT_NAME}] 🧩 native(process) migration {mig_id}: {name} (pid {pid}) → {to_node} ({to_ip})")
+
+    working_dir = metadata.get("working_dir")
+    start_cmd   = metadata.get("start_cmd")
+    venv_path   = metadata.get("venv_path")
+    if not working_dir or not start_cmd:
+        print(f"[{UNIT_NAME}] ❌ {mig_id}: bare process migration needs metadata.working_dir and metadata.start_cmd")
+        return False
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(10):
+            time.sleep(1)
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except Exception as e:
+        print(f"[{UNIT_NAME}] ⚠️  {mig_id}: stop warning: {e}")
+
+    if not _rsync_native_project(working_dir, to_ip, venv_path):
+        return False
+
+    if not _rebuild_remote_venv(to_ip, working_dir, venv_path):
+        return False
+
+    pid_file = metadata.get("pid_file") or f"{working_dir}/.lokey_native.pid"
+    ok, _, err = _ssh(
+        to_ip,
+        f"cd {working_dir} && nohup {start_cmd} > native.log 2>&1 & echo $! > {pid_file}",
+        timeout=30,
+    )
+    if not ok:
+        print(f"[{UNIT_NAME}] ❌ {mig_id}: remote start failed on {to_node}: {err}")
+        return False
+
+    print(f"[{UNIT_NAME}] ✅ {mig_id}: {name} started on {to_node}")
+    return True
+
+
+def _execute_native_migration(mig):
+    """
+    Entry point for kind="native" migrations. Checks whether the named
+    service is a real systemd unit ("standard app") or a bare running
+    process ("native background process") and migrates it accordingly.
+    """
+    mig_id   = mig["id"]
+    name     = mig["container"]
+    metadata = mig.get("metadata") or {}
+
+    kind, detail = _detect_native_kind(name, metadata)
+    if kind == "systemd":
+        unit_name, unit_path = detail
+        return _migrate_systemd_service(mig, unit_name, unit_path, metadata)
+    if kind == "process":
+        return _migrate_native_process(mig, detail, metadata)
+
+    print(f"[{UNIT_NAME}] ❌ {mig_id}: '{name}' is neither a loaded systemd unit nor a running process here")
+    return False
+
+
 def check_pending_migrations():
     """Poll the locator for migrations queued from this node and execute them."""
     headers = {"Host": LOCATOR_HOST_HEADER}
@@ -746,12 +1335,51 @@ _local_locator_started = False
 
 
 def _local_locator_running():
-    if not _docker_client:
-        return False
+    """Mechanism-agnostic: true whether the standby is a docker container or
+    a bare native process, since either way it ends up serving :5000."""
     try:
-        return _docker_client.containers.get("locator").status == "running"
+        r = requests.get("http://localhost:5000/health", timeout=3)
+        return r.status_code == 200
     except Exception:
         return False
+
+
+def _start_local_locator_docker(host_dir):
+    result = subprocess.run(
+        ["docker", "compose", "-f", "docker-compose.standby.yml", "up", "-d"],
+        cwd=host_dir, capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0:
+        print(f"[{UNIT_NAME}] ❌ failover: compose up failed: {result.stderr.strip()[:200]}")
+        return False
+    return True
+
+
+def _start_local_locator_native(host_dir):
+    """No Docker on this unit — run locator directly with the same gunicorn
+    command the Dockerfile uses. Needs `pip install -r requirements.txt` done
+    ahead of time in *this same interpreter* (sys.executable) — invoking via
+    `-m gunicorn` instead of the bare `gunicorn` command means it resolves
+    through whatever Python is actually running this script, regardless of
+    PATH in whatever launched hard-stats.py (LaunchDaemon, systemd, etc)."""
+    log_path = os.path.join(host_dir, "locator_standby.log")
+    try:
+        log_file = open(log_path, "a")
+        env = dict(os.environ, UNIT_NAME=UNIT_NAME, LOCATOR_IS_PRIMARY="false",
+                   SELF_CONTAINER_NAME="locator",
+                   LOCATOR_CANONICAL_URL=LOCATOR_URL)
+        subprocess.Popen(
+            [sys.executable, "-m", "gunicorn",
+             "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "8",
+             "--worker-class", "gthread", "--timeout", "300", "--keep-alive", "5",
+             "--access-logfile", "-", "--error-logfile", "-", "locator:app"],
+            cwd=host_dir, env=env, stdout=log_file, stderr=log_file,
+            start_new_session=True,
+        )
+    except Exception as e:
+        print(f"[{UNIT_NAME}] ❌ failover: native locator start failed: {e}")
+        return False
+    return True
 
 
 def _start_local_locator():
@@ -765,15 +1393,12 @@ def _start_local_locator():
         return
     host_dir = _host_dir(LOCATOR_COMPOSE_DIR)
     if not os.path.isdir(host_dir):
-        print(f"[{UNIT_NAME}] ❌ failover: locator compose dir not found: {host_dir}")
+        print(f"[{UNIT_NAME}] ❌ failover: locator project dir not found: {host_dir}")
         return
     print(f"[{UNIT_NAME}] 🆘 locator unreachable {LOCATOR_MISS_THRESHOLD}+ ticks — starting local standby")
-    result = subprocess.run(
-        ["docker", "compose", "up", "-d"],
-        cwd=host_dir, capture_output=True, text=True, timeout=120,
-    )
-    if result.returncode != 0:
-        print(f"[{UNIT_NAME}] ❌ failover: compose up failed: {result.stderr.strip()[:200]}")
+    started = (_start_local_locator_docker(host_dir) if shutil.which("docker")
+               else _start_local_locator_native(host_dir))
+    if not started:
         return
     _local_locator_started = True
     print(f"[{UNIT_NAME}] ✅ failover: local locator started on {UNIT_NAME}")
@@ -954,34 +1579,85 @@ def report_idle_stats():
         print(f"[{UNIT_NAME}] idle report failed: {e}")
 
 
+EXEC_TIMEOUT = int(os.environ.get("LOKEY_EXEC_TIMEOUT", 300))
+EXEC_OUTPUT_CAP = 20000  # chars kept per stdout/stderr before sending to locator
+
+# Where an 'exec' script actually runs. A bare subprocess here executes INSIDE
+# the lokey container — wrong filesystem, wrong user, and almost none of the
+# tooling a fleet script needs (the first smoke test returned the container ID
+# for `hostname`, `root` for `id -un`, and "uptime: command not found").
+# Docker-mode lokey bind-mounts the host root at /host, so re-enter it with
+# chroot and drop to the owning user: scripts like `refresh` depend on that
+# user's $HOME, ~/.local/bin and crontab, none of which exist for container root.
+# Native installs already run on the host as the right user, so they pass through.
+EXEC_HOST_USER = os.environ.get("LOKEY_EXEC_USER", "swoopg111")
+
+
+def _exec_argv(script):
+    """Build the argv that runs `script` in the right place for this install mode."""
+    if os.path.isdir("/host/proc"):
+        return ["chroot", "/host", "/bin/su", "-", EXEC_HOST_USER, "-c", script]
+    return ["/bin/bash", "-c", script]
+
+
 def execute_command(cmd):
-    """Run a locator-issued container command (stop / start) on this unit."""
+    """Run a locator-issued command on this unit. Returns a result dict —
+    {success, stdout, stderr, exit_code} — uniformly for every action.
+
+    'exec' runs an arbitrary shell command/script: the locator is the only
+    decision-maker about what runs, this just executes whatever it queues
+    and reports back. 'stop'/'start' are the older container-toggle actions."""
     action = cmd.get("action")
-    name   = cmd.get("container")
+    result = {"success": False, "stdout": "", "stderr": "", "exit_code": None}
+
+    if action == "exec":
+        script = cmd.get("script") or ""
+        try:
+            proc = subprocess.run(
+                _exec_argv(script),
+                capture_output=True, text=True, timeout=EXEC_TIMEOUT,
+            )
+            result["stdout"] = proc.stdout[-EXEC_OUTPUT_CAP:]
+            result["stderr"] = proc.stderr[-EXEC_OUTPUT_CAP:]
+            result["exit_code"] = proc.returncode
+            result["success"] = proc.returncode == 0
+            print(f"[{UNIT_NAME}] 🏃 exec '{script[:80]}' → exit {proc.returncode} (locator command)")
+        except subprocess.TimeoutExpired:
+            result["stderr"] = f"timed out after {EXEC_TIMEOUT}s"
+            print(f"[{UNIT_NAME}] exec '{script[:80]}' timed out after {EXEC_TIMEOUT}s")
+        except Exception as e:
+            result["stderr"] = str(e)
+            print(f"[{UNIT_NAME}] exec '{script[:80]}' failed: {e}")
+        return result
+
+    name = cmd.get("container")
     if not _docker_client or not name:
-        return False
+        return result
     try:
         c = _docker_client.containers.get(name)
         if action == "stop":
             if _is_protected(c):
                 print(f"[{UNIT_NAME}] 🛡️  refusing to stop protected container '{name}'")
-                return False
+                return result
             c.stop(timeout=30)
             print(f"[{UNIT_NAME}] 💤 stopped '{name}' (locator command)")
-            return True
+            result["success"] = True
+            return result
         if action == "start":
             c.start()
             print(f"[{UNIT_NAME}] 🟢 started '{name}' (locator command)")
-            return True
+            result["success"] = True
+            return result
         print(f"[{UNIT_NAME}] unknown command action: {action}")
-        return False
+        return result
     except Exception as e:
         print(f"[{UNIT_NAME}] command {action} '{name}' failed: {e}")
-        return False
+        result["stderr"] = str(e)
+        return result
 
 
 def check_pending_commands():
-    """Poll the locator for container commands aimed at this unit and run them."""
+    """Poll the locator for commands aimed at this unit and run them."""
     headers = {"Host": LOCATOR_HOST_HEADER}
     try:
         resp = requests.get(
@@ -999,11 +1675,11 @@ def check_pending_commands():
     for cmd in commands:
         if not cmd.get("id"):
             continue
-        success = execute_command(cmd)
+        result = execute_command(cmd)
         try:
             requests.post(
                 f"{LOCATOR_URL}/api/commands/complete",
-                json={"id": cmd["id"], "success": success},
+                json={"id": cmd["id"], **result},
                 headers=headers, timeout=5, verify=False,
             )
         except Exception:
@@ -1083,6 +1759,178 @@ def ddns_ip_watcher():
         print(f"[{UNIT_NAME}] DDNS: could not save IP state: {e}")
 
 
+# ── REPO SYNC ────────────────────────────────────────────────────────────────
+# Fleet-wide repo propagation, taking over the sync half of the standalone
+# `refresh` script. That script was installed on unit3 alone and could not fan
+# out from there because the host has no jq, so its fan-out hit a silent `skip`
+# on every run and nothing ever propagated. lokey already runs on every unit,
+# every ~5 minutes, with working git credentials and /host access — so the work
+# belongs here, where a failure is also visible instead of silent.
+
+SYNC_REPOS_ENABLED = os.getenv("SYNC_REPOS_ENABLED", "true").lower() == "true"
+SYNC_REPOS_ROOT    = os.getenv("SYNC_REPOS_ROOT", "/home/swoopg111/projects")
+# Pull-only by default. Pushing would `add -A` and commit whatever happens to
+# be dirty in every checkout on every unit — stray .bak files, editor litter,
+# half-finished work — and push it. Propagation is the valuable half; enable
+# this per-unit once you trust what is sitting in those working trees.
+SYNC_REPOS_PUSH    = os.getenv("SYNC_REPOS_PUSH", "false").lower() == "true"
+SYNC_REPOS_SKIP    = {s.strip() for s in os.getenv("SYNC_REPOS_SKIP", "").split(",") if s.strip()}
+
+
+def report_event(kind, message):
+    """Surface an event on the locator's dashboard EVENT LOG. Best-effort."""
+    try:
+        requests.post(
+            f"{LOCATOR_URL}/api/events",
+            json={"type": kind, "message": message, "unit": UNIT_NAME},
+            headers={"Host": LOCATOR_HOST_HEADER}, timeout=5, verify=False,
+        )
+    except Exception:
+        pass
+
+
+_git_token_cache = None
+
+
+def _git_token():
+    """Reuse the token already embedded in lokey's own remote URL.
+
+    Most checkouts on these units have credential-less https remotes, so every
+    pull dies with "could not read Username". Rather than writing a token into
+    each repo's config on each unit — scattering the same secret across dozens
+    of .git/config files — lift the one lokey already has and hand it to git
+    transiently.
+    """
+    global _git_token_cache
+    if _git_token_cache is None:
+        _git_token_cache = os.getenv("GIT_TOKEN", "")
+        if not _git_token_cache:
+            try:
+                url = subprocess.run(
+                    ["git", "-C", _host_dir(LOKEY_PROJECT_DIR), "remote", "get-url", "origin"],
+                    capture_output=True, text=True, timeout=15,
+                ).stdout
+                match = re.search(r"://[^:/]+:([^@]+)@", url)
+                _git_token_cache = match.group(1) if match else ""
+            except Exception:
+                _git_token_cache = ""
+    return _git_token_cache
+
+
+def _git(cwd, *args, timeout=90):
+    """Run git against a host checkout.
+
+    safe.directory is forced because the container runs as root while the
+    checkouts are owned by the login user; without it git refuses with
+    "dubious ownership" and every sync would fail.
+    """
+    cmd = ["git", "-c", "safe.directory=*"]
+    env = dict(os.environ)
+    token = _git_token()
+    if token:
+        # The helper reads $GIT_TOKEN at run time, so the secret is passed via
+        # the environment and never appears in argv (where `ps` would show it).
+        cmd += ["-c", "credential.helper=!f(){ echo username=oauth2; echo password=$GIT_TOKEN; }; f"]
+        env["GIT_TOKEN"] = token
+    cmd += ["-C", cwd, *args]
+
+    # Run as the checkout's owner rather than root. The container is root, so
+    # any object it writes lands root-owned inside a user-owned .git — after
+    # which the login user (and the autosave cron) fails with "insufficient
+    # permission for adding an object to repository database". Syncing a repo
+    # should never make it unusable for its owner.
+    preexec = _drop_to_owner(cwd)
+    if preexec:
+        env["HOME"] = "/tmp"  # dropped user may not have a home in this image
+
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                          env=env, preexec_fn=preexec)
+
+
+def _drop_to_owner(path):
+    """preexec_fn that becomes the path's owner, or None if not applicable."""
+    try:
+        if os.geteuid() != 0:
+            return None
+        st = os.stat(path)
+        if st.st_uid == 0:
+            return None
+        uid, gid = st.st_uid, st.st_gid
+    except Exception:
+        return None
+
+    def _switch():
+        os.setgid(gid)
+        os.setuid(uid)
+
+    return _switch
+
+
+def _sync_one_repo(path, label):
+    """Push local commits, then fast-forward. Returns (changed, error)."""
+    if _git(path, "remote", "get-url", "origin").returncode != 0:
+        return False, None  # no remote — nothing to sync against, not an error
+
+    before = _git(path, "rev-parse", "HEAD").stdout.strip()
+
+    if SYNC_REPOS_PUSH:
+        if _git(path, "status", "--porcelain").stdout.strip():
+            _git(path, "add", "-A")
+            _git(path, "commit", "-m",
+                 f"auto: {UNIT_NAME} {datetime.now(timezone.utc):%Y-%m-%d %H:%M}",
+                 "--no-verify")
+        # Push before pulling so local work is backed up before any fast-forward.
+        ahead = _git(path, "rev-list", "--count", "@{u}..HEAD").stdout.strip()
+        if ahead.isdigit() and int(ahead) > 0:
+            push = _git(path, "push", "origin", "HEAD")
+            if push.returncode != 0:
+                return False, f"push failed: {push.stderr.strip()[:120]}"
+
+    pull = _git(path, "pull", "--ff-only")
+    if pull.returncode != 0:
+        return False, f"pull failed: {pull.stderr.strip()[:120]}"
+
+    after = _git(path, "rev-parse", "HEAD").stdout.strip()
+    return (before != after), None
+
+
+def sync_repos():
+    """Sync every git checkout under SYNC_REPOS_ROOT on this unit."""
+    if not SYNC_REPOS_ENABLED:
+        return
+    root = _host_dir(SYNC_REPOS_ROOT)
+    if not os.path.isdir(root):
+        print(f"[{UNIT_NAME}] repo-sync: root not found ({SYNC_REPOS_ROOT})")
+        return
+
+    # lokey's own checkout is left to self_update(), which also rebuilds the
+    # container when the code changes; syncing it here too would race that.
+    skip = SYNC_REPOS_SKIP | {os.path.basename(LOKEY_PROJECT_DIR.rstrip("/"))}
+
+    changed, failed = [], []
+    for name in sorted(os.listdir(root)):
+        if name in skip:
+            continue
+        path = os.path.join(root, name)
+        if not os.path.isdir(os.path.join(path, ".git")):
+            continue
+        try:
+            did_change, error = _sync_one_repo(path, name)
+        except Exception as e:
+            did_change, error = False, f"{type(e).__name__}: {e}"
+        if error:
+            failed.append(f"{name} ({error})")
+            print(f"[{UNIT_NAME}] repo-sync ❌ {name}: {error}")
+        elif did_change:
+            changed.append(name)
+            print(f"[{UNIT_NAME}] repo-sync ⬇️  {name}: updated")
+
+    if changed:
+        report_event("repo-sync", f"{UNIT_NAME}: updated {', '.join(changed)}")
+    if failed:
+        report_event("repo-sync-failed", f"{UNIT_NAME}: {'; '.join(failed)}")
+
+
 def self_update():
     """git pull lokey; if new code detected, rebuild (Docker) or restart (native)."""
     # Docker containers mount the host root at /host; native installs use the path directly.
@@ -1133,6 +1981,17 @@ def self_update():
 
 if __name__ == "__main__":
     print(f"🚀 Lokey-Client starting on {UNIT_NAME}...")
+
+    # Collect and cache IPs on startup
+    _private_ip = get_private_ip()
+    _tailscale_ip_cached = get_tailscale_ip()
+    _start_public_ip_background_fetch()  # Non-blocking fetch, result cached globally
+
+    # Log IPs for startup diagnostics
+    print(f"[{UNIT_NAME}] private_ip: {_private_ip or 'unavailable'}")
+    print(f"[{UNIT_NAME}] tailscale_ip: {_tailscale_ip_cached or 'unavailable'}")
+    print(f"[{UNIT_NAME}] public_ip: fetching (non-blocking)...")
+
     _dns_tick = 0
     _update_tick = 0
     _cert_tick = 0
@@ -1154,10 +2013,20 @@ if __name__ == "__main__":
                     dns_sync()
                 except Exception as e:
                     print(f"[{UNIT_NAME}] dns-sync error: {e}")
+        if UNIT_NAME == "unit8":
+            _dns_tick += 1
+            if _dns_tick >= 5:
+                _dns_tick = 0
+                try:
+                    from sync_dns_pdns import sync as pdns_sync
+                    pdns_sync(target_ip=_public_ip)
+                except Exception as e:
+                    print(f"[{UNIT_NAME}] dns-sync error: {e}")
         if UNIT_NAME == "unit1":
             ddns_ip_watcher()
         _update_tick += 1
         if _update_tick >= 5:
             _update_tick = 0
             self_update()
+            sync_repos()
         time.sleep(TICK_RATE)

@@ -30,7 +30,7 @@ Server environment:
   BALANCE_ENABLED, IDLE_ENABLED, GIT_AUTO_PUSH
 
 Client environment:
-  LOCATOR_URL      Registry URL (default: https://tobsco-locator.fly.dev)
+  LOCATOR_URL      Registry URL (default: https://locator.theofficialblacksheepco.online)
 """
 
 # Handle -h/--help before the heavy imports so help works without deps installed
@@ -2503,6 +2503,15 @@ def load_policy():
                     cfg.get("deployment_type", cfg.get("deployement_type", ""))).lower(),
                 "units": str(cfg.get("units", cfg.get("Unit", "current_unit"))).lower(),
                 "instances": cfg.get("instances", 1),
+                # Needed to deploy onto a unit that has never hosted the
+                # service — a queued command carries only a container name,
+                # so without these there is nothing to check out there.
+                "project_dir": str(cfg.get("project_dir", "")),
+                "git_remote": str(cfg.get("git_remote", "")),
+                # {"common": {...}, "unit9": {...}} — compose .env values the
+                # target needs. Gitignored on nearly every project, so a fresh
+                # clone has none and every ${VAR} resolves empty.
+                "env": cfg.get("env") if isinstance(cfg.get("env"), dict) else {},
             }
     _policy_cache.update({"mtime": mtime, "data": parsed})
     print(f"📄 locator.yml loaded — {len(parsed)} service policies")
@@ -3007,23 +3016,113 @@ COMMAND_RETRY_SECONDS = 180   # re-serve DISPATCHED commands the lokey never com
 COMMAND_RETENTION     = 100   # completed commands kept for history
 
 
-def enforce_units_all():
-    """Background: scan registry for services with 'units: all' and queue deploy commands."""
+PLACEMENT_FAIL_BACKOFF = 1800   # don't retry a failed deploy for 30 minutes
+
+
+def _expand_unit_spec(spec, online_units):
+    """locator.yml's 'units:' value → the set of unit names it names.
+
+    Accepts 'all', a single unit ('8' or 'unit8'), or the underscore-separated
+    list the file actually uses ('4_7_8_9'). Bare numbers get the 'unit'
+    prefix because that is how every entry has always been written.
+    'current_unit' — the default when the key is absent — means "wherever it
+    already runs", i.e. no fan-out.
+    """
+    spec = (spec or "").strip().lower()
+    if not spec or spec == "current_unit":
+        return set()
+    if spec == "all":
+        return set(online_units)
+    # YAML 1.1 treats underscores as digit separators, so an UNQUOTED
+    # `units: 4_7_8_9` arrives here as the integer 4789 and would silently
+    # expand to one nonexistent "unit4789". Refuse it loudly instead.
+    if spec.isdigit() and len(spec) > 2:
+        print(f"⚠️  locator.yml: units '{spec}' looks like an unquoted "
+              f"underscore list (YAML read 4_7_8_9 as 4789) — quote it")
+        return set()
+    names = set()
+    for part in re.split(r"[_,\s]+", spec):
+        if part:
+            names.add(part if part.startswith("unit") else f"unit{part}")
+    return names
+
+
+def enforce_unit_placement():
+    """Background: queue deploy commands so each service runs on every unit
+    locator.yml assigns it to.
+
+    This previously matched only the literal string 'all', and read it from
+    svc['metadata']['units'] — a key lokey never sets — so it fired for
+    nothing and locator.yml's 'units:' field was decorative. It now reads the
+    policy file itself and understands the '4_7_8_9' form used there.
+
+    Only queues for units where the service is NOT already registered, so a
+    satisfied policy goes quiet instead of re-queueing every 60s, and backs
+    off after a failure rather than hot-looping the way the matomo migration
+    did.
+    """
     time.sleep(30)  # let registry initialize
     while True:
         try:
-            online_units = [
-                unit_id for unit_id, info in registry.get("nodes", {}).items()
-                if info.get("status") == "ONLINE"
-            ]
-            for svc_id, svc in registry.get("services", {}).items():
-                units_spec = (svc.get("metadata") or {}).get("units", "")
-                if units_spec == "all" and online_units:
-                    for unit in online_units:
-                        _queue_command(unit, svc_id, "deploy", source="units_all_enforcement")
+            with lock:
+                online_units = [
+                    unit_id for unit_id, info in registry.get("nodes", {}).items()
+                    if info.get("status") == "ONLINE"
+                ]
+                services = list(registry.get("services", {}).items())
+
+            running = {}
+            for _svc_id, svc in services:
+                nm = (svc.get("name") or "").lower()
+                running.setdefault(nm, set()).add(svc.get("host"))
+
+            now = time.time()
+            for name in sorted(running):
+                pol = _policy_for(name)
+                # Opt-in only. Placement predates this enforcement, so most
+                # entries in locator.yml were written when 'units:' did
+                # nothing — switching it on for all of them at once would
+                # start deploying services nobody asked to be fanned out.
+                # A policy has to say HOW to deploy before it is acted on,
+                # and a command without these fails on the target anyway.
+                if not (pol.get("project_dir") or pol.get("git_remote")):
+                    continue
+                wanted = _expand_unit_spec(pol.get("units"), online_units)
+                if not wanted:
+                    continue
+                missing = (wanted & set(online_units)) - running.get(name, set())
+                for unit in sorted(missing):
+                    if _recent_placement_failure(unit, name, now):
+                        continue
+                    env_cfg = pol.get("env") or {}
+                    env_map = {**(env_cfg.get("common") or {}),
+                               **(env_cfg.get(unit) or {})}
+                    _queue_command(
+                        unit, name, "deploy", source="unit_placement",
+                        extra={
+                            "project_dir": pol.get("project_dir", ""),
+                            "git_remote": pol.get("git_remote", ""),
+                            "env": {str(k): str(v) for k, v in env_map.items()},
+                        },
+                    )
         except Exception as e:
-            print(f"⚠️  enforce_units_all error: {e}")
+            print(f"⚠️  enforce_unit_placement error: {e}")
         time.sleep(60)
+
+
+def _recent_placement_failure(unit, container, now):
+    """True if this unit+container deploy failed inside the backoff window."""
+    with command_lock:
+        for cmd in command_queue.values():
+            if (cmd.get("unit") == unit and cmd.get("container") == container
+                    and cmd.get("action") == "deploy" and cmd.get("status") == "FAILED"):
+                try:
+                    ts = datetime.fromisoformat(cmd.get("completed_at") or "").timestamp()
+                except (ValueError, TypeError):
+                    continue
+                if now - ts < PLACEMENT_FAIL_BACKOFF:
+                    return True
+    return False
 
 
 def _parse_duration(value, default):
@@ -3041,8 +3140,13 @@ def _parse_duration(value, default):
         return default
 
 
-def _queue_command(unit, container, action, source="idle"):
-    """Queue a container command for a unit's lokey. Deduped on unit+container+action."""
+def _queue_command(unit, container, action, source="idle", extra=None):
+    """Queue a container command for a unit's lokey. Deduped on unit+container+action.
+
+    `extra` carries action-specific fields through to lokey — 'deploy' needs
+    project_dir/git_remote, since a unit that has never hosted the service has
+    nothing to bring up from a container name alone.
+    """
     with command_lock:
         for cmd in command_queue.values():
             if (cmd["unit"] == unit and cmd["container"] == container
@@ -3055,6 +3159,7 @@ def _queue_command(unit, container, action, source="idle"):
             "queued_at": datetime.now(timezone.utc).isoformat(),
             "dispatched_at": None, "completed_at": None, "success": None,
         }
+        cmd.update(extra or {})
         command_queue[cmd_id] = cmd
         done = [c for c in command_queue.values() if c["status"] in ("DONE", "FAILED")]
         if len(done) > COMMAND_RETENTION:
@@ -3853,6 +3958,57 @@ def critical_service_watchdog():
 
 # ── STARTUP ─────────────────────────────────────────────────────────────────
 
+_workers_lock = threading.Lock()
+_workers_started = False
+
+
+def start_background_workers():
+    """Start every background thread, exactly once.
+
+    There used to be two hand-maintained copies of this list — one in main()
+    (the `python locator.py` path) and one in the `else:` branch taken when a
+    WSGI server imports the module. Production runs
+    `gunicorn ... locator:app`, so only the second ever executed, and any
+    worker added to main() alone silently never ran. That is precisely how
+    enforce_unit_placement came to be started but dead, and the same drift had
+    already cost this file its Postgres schema creation once before (see the
+    init_schema note below). One list, called from both paths.
+
+    Safe at import time because the container runs --workers 1; with several
+    worker processes each would start its own copy of every thread.
+    """
+    global _workers_started
+    with _workers_lock:
+        if _workers_started:
+            return
+        _workers_started = True
+
+    workers = [
+        _log_forwarder,             # forward logs to beast-telemetry / live-logger
+        heartbeat_reaper,
+        local_docker_scanner,
+        duplicate_killer,
+        active_discovery_scanner,
+        website_pinger,
+        url_status_checker,         # websites + serverless, no Docker needed
+        _self_election,             # secondaries stop themselves if primary is up
+        enforce_unit_placement,     # locator.yml "units:" placement
+        critical_service_watchdog,  # restarts apache/lokey/locator if OFFLINE
+        traccar_feeder,             # lokey's GPS fixes into Traccar
+        script_scheduler,           # recurring exec jobs from /api/schedule
+    ]
+    if BALANCE_ENABLED:
+        workers.append(load_balancer)
+    if IDLE_ENABLED:
+        workers.append(idle_reaper)
+    if GIT_AUTO_PUSH:
+        workers.append(_git_push_worker)
+
+    for fn in workers:
+        threading.Thread(target=fn, daemon=True, name=fn.__name__).start()
+    print(f"🧵 background workers started: {', '.join(f.__name__ for f in workers)}")
+
+
 def main():
     print("=" * 55)
     print("  🔦 THE LOCATOR — Universal Service Registry")
@@ -3877,59 +4033,7 @@ def main():
     persist_registry()
     load_schedule()
 
-    # Forward logs to beast-telemetry / live-logger
-    threading.Thread(target=_log_forwarder, daemon=True).start()
-
-    # Start the heartbeat reaper in the background
-    reaper = threading.Thread(target=heartbeat_reaper, daemon=True)
-    reaper.start()
-
-    # Start the local Docker scanner
-    docker_scanner = threading.Thread(target=local_docker_scanner, daemon=True)
-    docker_scanner.start()
-
-    # Start the duplicate killer
-    killer = threading.Thread(target=duplicate_killer, daemon=True)
-    killer.start()
-
-    # Start the active discovery scanner
-    scanner = threading.Thread(target=active_discovery_scanner, daemon=True)
-    scanner.start()
-
-    # Start the website pinger
-    pinger = threading.Thread(target=website_pinger, daemon=True)
-    pinger.start()
-
-    # Start the URL status checker (websites + serverless, no Docker needed)
-    threading.Thread(target=url_status_checker, daemon=True).start()
-
-    # Start the load balancer
-    if BALANCE_ENABLED:
-        balancer = threading.Thread(target=load_balancer, daemon=True)
-        balancer.start()
-
-    # Start the idle auto-shutdown reaper
-    if IDLE_ENABLED:
-        threading.Thread(target=idle_reaper, daemon=True).start()
-
-    # Start the compose git-backup worker (single thread, event-driven)
-    if GIT_AUTO_PUSH:
-        threading.Thread(target=_git_push_worker, daemon=True).start()
-
-    # Self-election: secondaries stop themselves if the canonical primary is up
-    threading.Thread(target=_self_election, daemon=True).start()
-
-    # Enforce "units: all" deployments — queue deploy commands for all ONLINE units
-    threading.Thread(target=enforce_units_all, daemon=True).start()
-
-    # Critical service watchdog — immediately restarts apache, lokey, locator if OFFLINE
-    threading.Thread(target=critical_service_watchdog, daemon=True).start()
-
-    # Feed Lokey's already-collected GPS fixes into Traccar
-    threading.Thread(target=traccar_feeder, daemon=True).start()
-
-    # Fire recurring exec jobs registered via /api/schedule
-    threading.Thread(target=script_scheduler, daemon=True).start()
+    start_background_workers()
 
     beast_log("🔦 LOCATOR online — registry loaded, telemetry forwarder active")
     app.run(host="0.0.0.0", port=PORT, threaded=True)
@@ -3950,23 +4054,7 @@ else:
         load_seed()
         persist_registry()
         load_schedule()
-        # Start background threads
-        import threading
-        threading.Thread(target=heartbeat_reaper, daemon=True).start()
-        threading.Thread(target=local_docker_scanner, daemon=True).start()
-        threading.Thread(target=duplicate_killer, daemon=True).start()
-        threading.Thread(target=active_discovery_scanner, daemon=True).start()
-        threading.Thread(target=website_pinger, daemon=True).start()
-        if BALANCE_ENABLED:
-            threading.Thread(target=load_balancer, daemon=True).start()
-        if IDLE_ENABLED:
-            threading.Thread(target=idle_reaper, daemon=True).start()
-        if GIT_AUTO_PUSH:
-            threading.Thread(target=_git_push_worker, daemon=True).start()
-        threading.Thread(target=_self_election, daemon=True).start()
-        threading.Thread(target=critical_service_watchdog, daemon=True).start()
-        threading.Thread(target=traccar_feeder, daemon=True).start()
-        threading.Thread(target=script_scheduler, daemon=True).start()
+        start_background_workers()
         beast_log("🔦 LOCATOR online (Gunicorn) — registry loaded, telemetry forwarder active")
     except Exception as e:
         print(f"ERROR initializing LOCATOR in Gunicorn mode: {e}", file=sys.stderr)
