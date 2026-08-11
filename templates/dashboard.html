@@ -198,13 +198,19 @@
         .view-container {
             position: absolute;
             top: 0;
-            /* Offset by the event panel's collapsed spine. body padding cannot
-               do this: body is statically positioned, so an absolutely
-               positioned child at left:0 anchors to the viewport and ignores
-               it — which is why the sort headers stayed underneath the panel
-               and kept losing their clicks. */
-            left: 52px;
-            width: calc(100% - 52px);
+            left: 0;
+            width: 100%;
+            /* Clear the event panel's collapsed spine with padding rather than
+               a left offset. The offset worked, but it started the view's own
+               background 52px in, leaving a bare strip of body gradient down
+               the left edge; padding keeps the content clear of the spine
+               while the background still paints to the viewport edge.
+               Note this clearance cannot live on body: body is statically
+               positioned, so an absolutely positioned child at left:0 anchors
+               to the viewport and ignores it — which is why the sort headers
+               once sat underneath the panel and kept losing their clicks. */
+            box-sizing: border-box;
+            padding-left: 52px;
             height: 100%;
             display: none;
         }

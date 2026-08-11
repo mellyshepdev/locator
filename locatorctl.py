@@ -6,7 +6,7 @@ The Locator never touches Docker itself — start/stop goes through the same
 uses, which queues a command for the Lokey agent running on the container's
 actual host. Lokey picks it up, runs it locally, and reports back — so
 `start`/`stop` here only confirm the command was *queued*, not that it's
-done yet. Use `status`/`list` (or watch the dashboard) to see it land.
+done yet. Use `status`/`registry ls` (or watch the dashboard) to see it land.
 
 migrate/dns follow the same "queue it, agent executes it" philosophy: migrate
 queues a job in Locator's migration_queue (container or native, picked
@@ -19,7 +19,7 @@ Usage:
     locatorctl.py start <container-name>
     locatorctl.py stop  <container-name>
     locatorctl.py status <container-name>
-    locatorctl.py list
+    locatorctl.py registry ls
     locatorctl.py migrate <name@host> --to <unit> [--force]
     locatorctl.py dns status
     locatorctl.py dns sync <zone>
@@ -102,7 +102,7 @@ def dns_sync(zone):
 
 
 COMMANDS = {
-    "list":    "List every registered service with its current status",
+    "registry": "Inspect the service registry",
     "status":  "Show the current status of one service",
     "start":   "Queue a container start on its host (runs via Lokey)",
     "stop":    "Queue a container stop on its host (runs via Lokey)",
@@ -115,7 +115,7 @@ Environment:
   LOCATOR_URL  Registry URL (default: https://tobsco-locator.fly.dev)
 
 start/stop only confirm the command was queued — Lokey executes it on the
-container's actual host. Use `status`/`list` or the dashboard to see it land.
+container's actual host. Use `status`/`registry ls` or the dashboard to see it land.
 """
 
 
@@ -132,7 +132,12 @@ def main():
         p = sub.add_parser(cmd, help=COMMANDS[cmd], description=COMMANDS[cmd])
         p.add_argument("name", help="service/container name as registered in the Locator")
 
-    sub.add_parser("list", help=COMMANDS["list"], description=COMMANDS["list"])
+    reg_p = sub.add_parser("registry", help=COMMANDS["registry"], description=COMMANDS["registry"])
+    reg_sub = reg_p.add_subparsers(dest="registry_command", required=True, metavar="<registry-command>")
+    reg_sub.add_parser("ls", help="List every registered service with its current status")
+
+    # Legacy spelling of `registry ls`, kept working but hidden from help.
+    sub.add_parser("list")
 
     mig_p = sub.add_parser("migrate", help=COMMANDS["migrate"], description=COMMANDS["migrate"])
     mig_p.add_argument("name", help="service_id as shown by `list` (name@host)")
@@ -151,6 +156,9 @@ def main():
         toggle(args.name, args.command)
     elif args.command == "status":
         status(args.name)
+    elif args.command == "registry":
+        if args.registry_command == "ls":
+            list_services()
     elif args.command == "list":
         list_services()
     elif args.command == "migrate":
