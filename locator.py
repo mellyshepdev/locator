@@ -45,6 +45,7 @@ import http.client
 import threading
 import time
 import uuid
+import hmac
 import queue as _queue_module
 import requests
 import urllib3
@@ -53,7 +54,7 @@ import io
 import ipaddress
 import qrcode
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify, Response, render_template
 
 import notifier
@@ -99,6 +100,23 @@ if not SSH_KEY and os.environ.get("SSH_PRIVATE_KEY"):
 DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 SEED_FILE = os.environ.get("SEED_FILE", "/app/seed_registry.json")
 EXCEL_FILE = "registry.xlsx"
+
+# Admin key gating remote-exec / scheduling — these endpoints let the locator
+# tell a unit's lokey to run an arbitrary shell command, so unlike the rest of
+# the (deliberately open) API they require X-Locator-Admin-Key. Fails closed:
+# if the key isn't configured, the endpoints refuse everything rather than
+# silently running open.
+LOCATOR_ADMIN_KEY = os.environ.get("LOCATOR_ADMIN_KEY", "")
+
+
+def _require_admin_key():
+    """Return None if the request's X-Locator-Admin-Key is valid, else a Flask response to abort with."""
+    if not LOCATOR_ADMIN_KEY:
+        return jsonify({"error": "LOCATOR_ADMIN_KEY not configured on server"}), 503
+    supplied = request.headers.get("X-Locator-Admin-Key", "")
+    if not hmac.compare_digest(supplied, LOCATOR_ADMIN_KEY):
+        return jsonify({"error": "unauthorized"}), 401
+    return None
 
 # DNS zone status/sync (unit9 runs the PowerDNS primary with a sqlite3
 # backend, at ns2.theofficialblacksheepco.online — DNS delegation for the
@@ -3047,6 +3065,219 @@ def _queue_command(unit, container, action, source="idle"):
         return cmd
 
 
+EXEC_OUTPUT_RETENTION = 500   # completed exec commands kept for history (separate cap — output-bearing)
+
+
+def _queue_exec_command(unit, script, source="manual", label=None):
+    """Queue an arbitrary-shell-command job for a unit's lokey. Not deduped —
+    every call is its own job, unlike the container start/stop queue above.
+    Lokey is a pure executor here: it runs whatever is queued and reports
+    stdout/stderr/exit_code back, it never decides what's allowed to run."""
+    with command_lock:
+        cmd_id = str(uuid.uuid4())[:8]
+        cmd = {
+            "id": cmd_id, "unit": unit, "action": "exec", "script": script,
+            "label": label, "source": source, "status": "PENDING",
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+            "dispatched_at": None, "completed_at": None, "success": None,
+            "stdout": None, "stderr": None, "exit_code": None,
+        }
+        command_queue[cmd_id] = cmd
+        done = [c for c in command_queue.values() if c["status"] in ("DONE", "FAILED")]
+        if len(done) > EXEC_OUTPUT_RETENTION:
+            done.sort(key=lambda c: c["completed_at"] or "")
+            for old in done[: len(done) - EXEC_OUTPUT_RETENTION]:
+                command_queue.pop(old["id"], None)
+        print(f"📨 EXEC QUEUED: '{script[:80]}' on {unit} ({source})")
+        return cmd
+
+
+@app.route("/api/exec", methods=["POST"])
+def queue_exec():
+    """Queue a shell command/script to run on a unit's lokey. Requires admin key —
+    this is remote code execution across the fleet, gated accordingly."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    unit   = (data.get("unit") or "").strip()
+    script = data.get("script") or ""
+    label  = data.get("label")
+    if not unit or not script.strip():
+        return jsonify({"error": "Provide 'unit' and 'script'"}), 400
+    cmd = _queue_exec_command(unit, script, source="manual", label=label)
+    return jsonify({"result": "queued", "command": cmd})
+
+
+@app.route("/api/commands", methods=["GET"])
+def list_commands():
+    """List recent commands (container + exec), newest first. Requires admin key
+    since exec commands carry script text/output that may be sensitive."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    unit = request.args.get("unit")
+    with command_lock:
+        cmds = [dict(c) for c in command_queue.values() if not unit or c["unit"] == unit]
+    cmds.sort(key=lambda c: c["queued_at"], reverse=True)
+    return jsonify(cmds[:200])
+
+
+@app.route("/api/commands/<cmd_id>", methods=["GET"])
+def get_command(cmd_id):
+    """Fetch a single command's status/output — used to poll an exec job to completion."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    with command_lock:
+        cmd = command_queue.get(cmd_id)
+        if not cmd:
+            return jsonify({"error": "unknown command"}), 404
+        return jsonify(dict(cmd))
+
+
+# ── SCRIPT SCHEDULER ─────────────────────────────────────────────────────────
+# Recurring exec jobs: "run this script on this unit every N" registered once,
+# fired forever by script_scheduler() below via the same _queue_exec_command
+# path a one-off /api/exec call uses. Interval-based (reuses _parse_duration,
+# e.g. "24h" for daily), not full cron — good enough for "every day/hour/etc."
+# without a cron-expression parser.
+
+scheduled_jobs: dict = {}
+schedule_lock = threading.Lock()
+SCHEDULE_FILE = os.path.join(DATA_DIR, "scheduled_jobs.json")
+SCHEDULE_CHECK_INTERVAL = int(os.environ.get("SCHEDULE_CHECK_INTERVAL", 30))
+
+
+def persist_schedule():
+    """Write scheduled_jobs to disk so registrations survive a restart/redeploy."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with schedule_lock:
+            snapshot = json.dumps(list(scheduled_jobs.values()), indent=2)
+        with open(SCHEDULE_FILE, "w") as f:
+            f.write(snapshot)
+    except Exception as e:
+        print(f"⚠️  Failed to persist schedule: {e}")
+
+
+def load_schedule():
+    """Load scheduled_jobs from disk on startup, if present."""
+    if not os.path.exists(SCHEDULE_FILE):
+        return
+    try:
+        with open(SCHEDULE_FILE) as f:
+            jobs = json.load(f)
+        with schedule_lock:
+            for job in jobs:
+                scheduled_jobs[job["id"]] = job
+        print(f"📅 Loaded {len(jobs)} scheduled job(s) from disk")
+    except Exception as e:
+        print(f"⚠️  Failed to load schedule: {e}")
+
+
+def script_scheduler():
+    """Fires due scheduled exec jobs. Runs forever in a daemon thread."""
+    while True:
+        time.sleep(SCHEDULE_CHECK_INTERVAL)
+        now = datetime.now(timezone.utc)
+        try:
+            with schedule_lock:
+                due = [dict(j) for j in scheduled_jobs.values()
+                       if j.get("enabled", True) and j.get("next_run")
+                       and datetime.fromisoformat(j["next_run"]) <= now]
+            for job in due:
+                cmd = _queue_exec_command(job["unit"], job["script"], source="scheduled",
+                                           label=job.get("label"))
+                with schedule_lock:
+                    live = scheduled_jobs.get(job["id"])
+                    if live:
+                        live["last_run"] = now.isoformat()
+                        live["last_command_id"] = cmd["id"]
+                        live["next_run"] = (now + timedelta(
+                            seconds=live["interval_seconds"])).isoformat()
+                print(f"📅 SCHEDULED EXEC fired: job {job['id']} ('{job['script'][:60]}') on {job['unit']}")
+            if due:
+                persist_schedule()
+        except Exception as e:
+            print(f"⚠️ Error in script scheduler: {e}")
+
+
+@app.route("/api/schedule", methods=["POST"])
+def create_schedule():
+    """Register a recurring exec job. Body: {unit, script, interval, label?}.
+    'interval' accepts the same '3600'/'90m'/'2h'/'24h' shorthand as idle timeouts."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    unit     = (data.get("unit") or "").strip()
+    script   = data.get("script") or ""
+    interval = data.get("interval")
+    label    = data.get("label")
+    if not unit or not script.strip() or not interval:
+        return jsonify({"error": "Provide 'unit', 'script', and 'interval'"}), 400
+    interval_seconds = _parse_duration(interval, None)
+    if not interval_seconds or interval_seconds <= 0:
+        return jsonify({"error": f"Couldn't parse interval '{interval}'"}), 400
+    now = datetime.now(timezone.utc)
+    job_id = str(uuid.uuid4())[:8]
+    job = {
+        "id": job_id, "unit": unit, "script": script, "label": label,
+        "interval": interval, "interval_seconds": interval_seconds,
+        "enabled": True, "created_at": now.isoformat(),
+        "next_run": (now + timedelta(seconds=interval_seconds)).isoformat(),
+        "last_run": None, "last_command_id": None,
+    }
+    with schedule_lock:
+        scheduled_jobs[job_id] = job
+    persist_schedule()
+    print(f"📅 SCHEDULE CREATED: '{script[:60]}' on {unit} every {interval}")
+    return jsonify({"result": "scheduled", "job": job})
+
+
+@app.route("/api/schedule", methods=["GET"])
+def list_schedule():
+    """List all registered scheduled jobs."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    with schedule_lock:
+        jobs = sorted(scheduled_jobs.values(), key=lambda j: j["created_at"], reverse=True)
+        return jsonify(jobs)
+
+
+@app.route("/api/schedule/<job_id>", methods=["DELETE"])
+def delete_schedule(job_id):
+    """Remove a scheduled job."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    with schedule_lock:
+        job = scheduled_jobs.pop(job_id, None)
+    if not job:
+        return jsonify({"error": "unknown job"}), 404
+    persist_schedule()
+    return jsonify({"result": "deleted", "id": job_id})
+
+
+@app.route("/api/schedule/<job_id>/toggle", methods=["POST"])
+def toggle_schedule(job_id):
+    """Enable/disable a scheduled job without deleting it. Body: {enabled: bool}."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    with schedule_lock:
+        job = scheduled_jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "unknown job"}), 404
+        job["enabled"] = bool(data.get("enabled", True))
+        job = dict(job)
+    persist_schedule()
+    return jsonify({"result": "ok", "job": job})
+
+
 @app.route("/api/idle/report", methods=["POST"])
 def idle_report():
     """Lokey posts net-byte counters for its idle-watched containers each tick."""
@@ -3113,9 +3344,13 @@ def commands_pending():
     return jsonify(out)
 
 
+EXEC_OUTPUT_CAP = 20000   # chars kept per stdout/stderr field
+
+
 @app.route("/api/commands/complete", methods=["POST"])
 def commands_complete():
-    """Lokey reports command results; stop/start results update the registry."""
+    """Lokey reports command results; stop/start results update the registry,
+    exec results just carry stdout/stderr/exit_code for later retrieval."""
     data = request.get_json(silent=True) or {}
     cmd_id  = data.get("id")
     success = bool(data.get("success"))
@@ -3127,13 +3362,22 @@ def commands_complete():
         cmd["status"] = "DONE" if success else "FAILED"
         cmd["success"] = success
         cmd["completed_at"] = now.isoformat()
+        if cmd["action"] == "exec":
+            cmd["stdout"]    = str(data.get("stdout") or "")[:EXEC_OUTPUT_CAP]
+            cmd["stderr"]    = str(data.get("stderr") or "")[:EXEC_OUTPUT_CAP]
+            cmd["exit_code"] = data.get("exit_code")
         cmd = dict(cmd)
 
-    print(f"{'✅' if success else '❌'} COMMAND {cmd['action']} '{cmd['container']}' on {cmd['unit']}: {'ok' if success else 'failed'}")
+    if cmd["action"] == "exec":
+        print(f"{'✅' if success else '❌'} EXEC '{(cmd.get('script') or '')[:80]}' on {cmd['unit']}: "
+              f"{'ok' if success else 'failed'} (exit {cmd.get('exit_code')})")
+        return jsonify({"ok": True})
+
+    print(f"{'✅' if success else '❌'} COMMAND {cmd['action']} '{cmd.get('container')}' on {cmd['unit']}: {'ok' if success else 'failed'}")
 
     if success:
         with lock:
-            _, svc = _find_service_entry(cmd["container"])
+            _, svc = _find_service_entry(cmd.get("container"))
             if svc:
                 if cmd["action"] == "stop":
                     svc["status"] = "OFFLINE"
@@ -3147,7 +3391,7 @@ def commands_complete():
         persist_registry()
         if cmd["action"] == "stop" and cmd["source"] == "idle":
             with _idle_lock:
-                st = _idle_state.get((cmd["unit"], cmd["container"]))
+                st = _idle_state.get((cmd["unit"], cmd.get("container")))
                 if st:
                     st["stopped_count"] += 1
     return jsonify({"ok": True})
@@ -3631,6 +3875,7 @@ def main():
     db.init_schema()
     load_seed()
     persist_registry()
+    load_schedule()
 
     # Forward logs to beast-telemetry / live-logger
     threading.Thread(target=_log_forwarder, daemon=True).start()
@@ -3683,6 +3928,9 @@ def main():
     # Feed Lokey's already-collected GPS fixes into Traccar
     threading.Thread(target=traccar_feeder, daemon=True).start()
 
+    # Fire recurring exec jobs registered via /api/schedule
+    threading.Thread(target=script_scheduler, daemon=True).start()
+
     beast_log("🔦 LOCATOR online — registry loaded, telemetry forwarder active")
     app.run(host="0.0.0.0", port=PORT, threaded=True)
 
@@ -3701,6 +3949,7 @@ else:
         db.init_schema()
         load_seed()
         persist_registry()
+        load_schedule()
         # Start background threads
         import threading
         threading.Thread(target=heartbeat_reaper, daemon=True).start()
@@ -3717,6 +3966,7 @@ else:
         threading.Thread(target=_self_election, daemon=True).start()
         threading.Thread(target=critical_service_watchdog, daemon=True).start()
         threading.Thread(target=traccar_feeder, daemon=True).start()
+        threading.Thread(target=script_scheduler, daemon=True).start()
         beast_log("🔦 LOCATOR online (Gunicorn) — registry loaded, telemetry forwarder active")
     except Exception as e:
         print(f"ERROR initializing LOCATOR in Gunicorn mode: {e}", file=sys.stderr)
