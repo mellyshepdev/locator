@@ -790,6 +790,7 @@
         <button class="toggle-btn" onclick="switchView('3js')">3D Mesh</button>
         <button class="toggle-btn" onclick="switchView('traccar')">Traccar Map</button>
         <button class="toggle-btn" onclick="switchView('yamls')">YAMLs</button>
+        <button class="toggle-btn" onclick="switchView('exec')">Exec</button>
     </div>
 
     <!-- LIVE STATUS — shows the page is actually polling, and flags it loudly if it stops -->
@@ -1089,19 +1090,60 @@
         </div>
     </div>
 
+    <div id="view-exec" class="view-container" style="background:var(--grid-bg); background-image:linear-gradient(var(--neon-green-dim) 1px,transparent 1px),linear-gradient(90deg,var(--neon-green-dim) 1px,transparent 1px); background-size:30px 30px; overflow-y:auto; flex-direction:column;">
+        <div style="padding:16px 30px 8px; border-bottom:1px solid var(--neon-green); flex-shrink:0; display:flex; align-items:center; gap:20px; justify-content:space-between;">
+            <h2 style="margin:0; color:var(--neon-green); text-transform:uppercase; letter-spacing:4px; font-size:16px; text-shadow:0 0 10px var(--neon-green);">Remote Exec</h2>
+            <button onclick="promptExecKey()" style="background:none; border:1px solid var(--neon-green); color:var(--neon-green); padding:5px 14px; font-family:inherit; font-size:11px; letter-spacing:1px; cursor:pointer; border-radius:3px;">SET ADMIN KEY</button>
+        </div>
+        <div style="padding:20px 30px; display:flex; flex-direction:column; gap:28px; max-width:900px;">
+
+            <!-- Run once -->
+            <div>
+                <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Run Now</h3>
+                <div style="display:flex; gap:10px; margin-bottom:10px;">
+                    <select id="exec-unit-select" style="background:#000; color:var(--neon-green); border:1px solid var(--neon-green); padding:8px; font-family:inherit; font-size:12px;"></select>
+                    <button onclick="runExecScript()" style="background:var(--neon-green); color:#000; border:none; padding:8px 24px; font-family:inherit; font-size:12px; font-weight:bold; letter-spacing:2px; cursor:pointer; border-radius:3px;">RUN</button>
+                </div>
+                <textarea id="exec-script-input" spellcheck="false" placeholder="Shell command or script to run on the selected unit's lokey..." style="width:100%; height:90px; background:#000; color:var(--neon-green); font-family:'Courier New',monospace; font-size:13px; border:1px solid var(--neon-green); outline:none; resize:vertical; padding:10px; box-sizing:border-box;"></textarea>
+                <pre id="exec-output" style="margin-top:10px; min-height:60px; max-height:300px; overflow:auto; background:#000; color:#ccc; border:1px solid rgba(0,255,0,0.2); padding:10px; font-size:12px; white-space:pre-wrap;"></pre>
+            </div>
+
+            <!-- Scheduled jobs -->
+            <div>
+                <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Scheduled Jobs</h3>
+                <div style="display:flex; gap:10px; margin-bottom:10px; flex-wrap:wrap;">
+                    <select id="schedule-unit-select" style="background:#000; color:var(--neon-green); border:1px solid var(--neon-green); padding:8px; font-family:inherit; font-size:12px;"></select>
+                    <input id="schedule-interval-input" placeholder="interval e.g. 24h, 90m" style="background:#000; color:var(--neon-green); border:1px solid var(--neon-green); padding:8px; font-family:inherit; font-size:12px; width:150px;">
+                    <input id="schedule-script-input" placeholder="command / script" style="flex:1; min-width:200px; background:#000; color:var(--neon-green); border:1px solid var(--neon-green); padding:8px; font-family:inherit; font-size:12px;">
+                    <button onclick="addScheduleJob()" style="background:var(--neon-green); color:#000; border:none; padding:8px 20px; font-family:inherit; font-size:12px; font-weight:bold; letter-spacing:2px; cursor:pointer; border-radius:3px;">ADD</button>
+                </div>
+                <table style="width:100%; border-collapse:collapse; font-size:12px;">
+                    <thead>
+                        <tr style="border-bottom:1px solid var(--neon-green); text-align:left; color:var(--neon-green);">
+                            <th style="padding:6px;">UNIT</th><th style="padding:6px;">SCRIPT</th><th style="padding:6px;">EVERY</th>
+                            <th style="padding:6px;">NEXT RUN</th><th style="padding:6px;">LAST RUN</th><th style="padding:6px;">ON</th><th style="padding:6px;"></th>
+                        </tr>
+                    </thead>
+                    <tbody id="schedule-tbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
     <script>
         // ── UI TOGGLE LOGIC ──
         function switchView(viewName) {
             document.querySelectorAll('.toggle-btn').forEach(btn => btn.classList.remove('active'));
             document.querySelectorAll('.view-container').forEach(vc => vc.classList.remove('active'));
 
-            const viewMap = { map: [1, 'view-map'], grid: [2, 'view-grid'], '3js': [3, 'view-3js'], traccar: [4, 'view-traccar'], yamls: [5, 'view-yamls'] };
+            const viewMap = { map: [1, 'view-map'], grid: [2, 'view-grid'], '3js': [3, 'view-3js'], traccar: [4, 'view-traccar'], yamls: [5, 'view-yamls'], exec: [6, 'view-exec'] };
             const [btnIdx, viewId] = viewMap[viewName] || [1, 'view-map'];
             document.querySelector(`#ui-toggle button:nth-child(${btnIdx})`).classList.add('active');
             document.getElementById(viewId).classList.add('active');
 
             if (viewName === 'yamls') loadYamlList();
             if (viewName === 'traccar') initTraccarMap();
+            if (viewName === 'exec') loadScheduleList();
         }
 
         // Deep link: /?view=grid opens straight into the Tactical Grid
@@ -1675,6 +1717,18 @@
                 units.map(u => `<option value="${u}"${u === current ? ' selected' : ''}>${u.toUpperCase()}</option>`).join('');
         }
 
+        function updateExecUnitOptions(registryData) {
+            const units = Object.keys(registryData.nodes || {}).sort();
+            const opts = units.map(u => `<option value="${u}">${u.toUpperCase()}</option>`).join('');
+            ['exec-unit-select', 'schedule-unit-select'].forEach(id => {
+                const sel = document.getElementById(id);
+                if (!sel) return;
+                const current = sel.value;
+                sel.innerHTML = opts;
+                if (units.includes(current)) sel.value = current;
+            });
+        }
+
         // ── LIVE STATUS INDICATOR ──
         // The page polls every 10s (see the bottom of this script), but nothing
         // told you if that polling silently stopped working — you'd just be
@@ -1754,6 +1808,7 @@
             const allNodes = Object.entries(registryData.nodes || {}).map(([id, data]) => ({...data, id, category: 'devices'}));
 
             updateUnitFilterOptions(registryData);
+            updateExecUnitOptions(registryData);
             const nodes = applyColumnSort('devices', allNodes.filter(n => nodeMatchesFilter(n.id, n)));
 
             const dockerList = applyColumnSort('docker', services.filter(s => s.category === 'docker containers'));
@@ -2537,6 +2592,139 @@
         document.getElementById('device-modal').addEventListener('click', function(e) {
             if (e.target === this) closeDeviceModal();
         });
+
+        // ── REMOTE EXEC / SCHEDULER ──
+        // Locator never decides what runs — it just queues whatever script text
+        // is submitted here and the target unit's lokey executes it and reports
+        // stdout/stderr/exit_code back. Gated by X-Locator-Admin-Key (see
+        // _require_admin_key in locator.py); the key lives only in this
+        // browser's localStorage, never in the page source.
+        function getExecKey() {
+            return localStorage.getItem('locatorAdminKey') || '';
+        }
+
+        function promptExecKey() {
+            const current = getExecKey();
+            const next = window.prompt('Locator admin key (used for /api/exec and /api/schedule):', current);
+            if (next !== null) localStorage.setItem('locatorAdminKey', next.trim());
+        }
+
+        function execHeaders() {
+            return { 'Content-Type': 'application/json', 'X-Locator-Admin-Key': getExecKey() };
+        }
+
+        async function execFetch(url, opts) {
+            const r = await fetch(url, opts);
+            const data = await r.json().catch(() => ({}));
+            if (r.status === 401 || r.status === 503) {
+                promptExecKey();
+                throw new Error(data.error || `HTTP ${r.status}`);
+            }
+            if (!r.ok || data.error) throw new Error(data.error || `HTTP ${r.status}`);
+            return data;
+        }
+
+        async function runExecScript() {
+            const unit = document.getElementById('exec-unit-select').value;
+            const script = document.getElementById('exec-script-input').value;
+            const out = document.getElementById('exec-output');
+            if (!unit || !script.trim()) { notify('Pick a unit and enter a script', 'error'); return; }
+            if (!getExecKey()) promptExecKey();
+            out.textContent = `Queuing on ${unit}…`;
+            try {
+                const { command } = await execFetch('/api/exec', {
+                    method: 'POST', headers: execHeaders(),
+                    body: JSON.stringify({ unit, script })
+                });
+                out.textContent = `Queued (${command.id}) — waiting for ${unit}'s lokey…`;
+                pollExecResult(command.id, out);
+            } catch (err) {
+                out.textContent = `Error: ${err.message}`;
+                notify(`Exec failed: ${err.message}`, 'error');
+            }
+        }
+
+        async function pollExecResult(cmdId, out, attempt = 0) {
+            try {
+                const cmd = await execFetch(`/api/commands/${cmdId}`, { headers: execHeaders() });
+                if (cmd.status === 'DONE' || cmd.status === 'FAILED') {
+                    out.textContent =
+                        `exit ${cmd.exit_code} — ${cmd.status}\n\n` +
+                        `--- stdout ---\n${cmd.stdout || ''}\n` +
+                        `--- stderr ---\n${cmd.stderr || ''}`;
+                    notify(`${cmd.unit}: ${cmd.status.toLowerCase()} (exit ${cmd.exit_code})`,
+                           cmd.status === 'DONE' ? 'info' : 'error');
+                    return;
+                }
+            } catch (err) {
+                out.textContent = `Error: ${err.message}`;
+                return;
+            }
+            if (attempt > 60) { out.textContent += '\n\n(timed out waiting for result)'; return; }
+            setTimeout(() => pollExecResult(cmdId, out, attempt + 1), 3000);
+        }
+
+        async function loadScheduleList() {
+            const tbody = document.getElementById('schedule-tbody');
+            if (!getExecKey()) { tbody.innerHTML = '<tr><td colspan="7" style="padding:10px;color:#555;">Set admin key to view scheduled jobs.</td></tr>'; return; }
+            try {
+                const jobs = await execFetch('/api/schedule', { headers: execHeaders() });
+                if (!jobs.length) { tbody.innerHTML = '<tr><td colspan="7" style="padding:10px;color:#555;">No scheduled jobs.</td></tr>'; return; }
+                tbody.innerHTML = jobs.map(j => `
+                    <tr style="border-bottom:1px solid rgba(0,255,0,0.15);">
+                        <td style="padding:6px;">${j.unit.toUpperCase()}</td>
+                        <td style="padding:6px; font-family:monospace; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${(j.script || '').replace(/"/g,'&quot;')}">${j.script}</td>
+                        <td style="padding:6px;">${j.interval}</td>
+                        <td style="padding:6px;">${j.next_run ? timeSince(j.next_run) : '—'}</td>
+                        <td style="padding:6px;">${j.last_run ? timeSince(j.last_run) : 'never'}</td>
+                        <td style="padding:6px;"><input type="checkbox" ${j.enabled ? 'checked' : ''} onchange="toggleScheduleJob('${j.id}', this.checked)"></td>
+                        <td style="padding:6px;"><button onclick="deleteScheduleJob('${j.id}')" style="background:none; border:1px solid var(--danger); color:var(--danger); padding:3px 10px; font-family:inherit; font-size:11px; cursor:pointer; border-radius:3px;">DEL</button></td>
+                    </tr>
+                `).join('');
+            } catch (err) {
+                tbody.innerHTML = `<tr><td colspan="7" style="padding:10px;color:var(--danger);">${err.message}</td></tr>`;
+            }
+        }
+
+        async function addScheduleJob() {
+            const unit = document.getElementById('schedule-unit-select').value;
+            const interval = document.getElementById('schedule-interval-input').value.trim();
+            const script = document.getElementById('schedule-script-input').value;
+            if (!unit || !interval || !script.trim()) { notify('Fill unit, interval, and script', 'error'); return; }
+            if (!getExecKey()) promptExecKey();
+            try {
+                await execFetch('/api/schedule', {
+                    method: 'POST', headers: execHeaders(),
+                    body: JSON.stringify({ unit, script, interval })
+                });
+                document.getElementById('schedule-script-input').value = '';
+                document.getElementById('schedule-interval-input').value = '';
+                notify(`Scheduled on ${unit} every ${interval}`);
+                loadScheduleList();
+            } catch (err) {
+                notify(`Schedule failed: ${err.message}`, 'error');
+            }
+        }
+
+        async function deleteScheduleJob(id) {
+            try {
+                await execFetch(`/api/schedule/${id}`, { method: 'DELETE', headers: execHeaders() });
+                loadScheduleList();
+            } catch (err) {
+                notify(`Delete failed: ${err.message}`, 'error');
+            }
+        }
+
+        async function toggleScheduleJob(id, enabled) {
+            try {
+                await execFetch(`/api/schedule/${id}/toggle`, {
+                    method: 'POST', headers: execHeaders(), body: JSON.stringify({ enabled })
+                });
+            } catch (err) {
+                notify(`Toggle failed: ${err.message}`, 'error');
+                loadScheduleList();
+            }
+        }
 
     </script>
 </body>
