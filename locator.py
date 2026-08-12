@@ -52,6 +52,7 @@ import urllib3
 import re
 import io
 import ipaddress
+import tempfile
 import qrcode
 import pandas as pd
 from datetime import datetime, timezone, timedelta
@@ -389,6 +390,20 @@ def _list_compose_names():
     return [f[:-4] for f in os.listdir(COMPOSE_DIR) if f.endswith(".yml")]
 
 
+def _first_addr(value):
+    """First address out of a free-text node address field, or "".
+
+    Agents report these inconsistently — "10.0.0.236- sheep.client", a bare IP,
+    None, or "". The previous inline form was
+    `info.get("openvpn_ip", "").split("-")[0].strip().split()[0]`, which raises
+    IndexError on an empty string: .split() on "" returns [], so [0] blows up.
+    Any node with a blank openvpn_ip therefore 500'd the whole auto-select,
+    which is why deploying without pinning a node never worked.
+    """
+    parts = str(value or "").split("-")[0].strip().split()
+    return parts[0] if parts else ""
+
+
 def _best_available_node():
     """
     Returns (node_id, ip) for the ONLINE node with the most headroom.
@@ -403,12 +418,10 @@ def _best_available_node():
         if info.get("status") != "ONLINE":
             continue
 
-        ip = (
-            info.get("tailscale_ip")
-            or info.get("openvpn_ip", "").split("-")[0].strip().split()[0]
-            or info.get("ip", "").split("-")[0].strip().split()[0]
-        )
-        if not ip or ip in ("", "unknown"):
+        ip = _first_addr(info.get("tailscale_ip")) \
+            or _first_addr(info.get("openvpn_ip")) \
+            or _first_addr(info.get("ip"))
+        if not ip or ip == "unknown":
             continue
 
         cpu  = info.get("cpu_percent")
@@ -434,6 +447,43 @@ def _best_available_node():
     candidates.sort(key=lambda x: x[0])
     _, node_id, ip = candidates[0]
     return node_id, ip
+
+
+def _ranked_nodes():
+    """Every deployable node, best headroom first, as [(node_id, ip), ...].
+
+    Same scoring as _best_available_node, but the whole ranking rather than
+    just the winner — an auto-target deploy needs somewhere to fall through to
+    when the top node turns out not to run containers (unit3 is a Mac mini
+    whose non-interactive shell has no `docker` on PATH, and it frequently
+    scores best because it is idle).
+    """
+    with lock:
+        nodes_snap = {k: dict(v) for k, v in registry["nodes"].items()}
+
+    ranked = []
+    for node_id, info in nodes_snap.items():
+        if info.get("status") != "ONLINE":
+            continue
+        ip = _first_addr(info.get("tailscale_ip")) \
+            or _first_addr(info.get("openvpn_ip")) \
+            or _first_addr(info.get("ip"))
+        if not ip or ip == "unknown":
+            continue
+        cpu, mem, disk = info.get("cpu_percent"), info.get("mem_percent"), info.get("disk_percent")
+        if cpu is not None and mem is not None:
+            score = (cpu + mem + (disk or 0)) / (3 if disk is not None else 2)
+        else:
+            try:
+                ram_gb = int("".join(filter(str.isdigit,
+                                            info.get("metadata", {}).get("ram", "0").lower())))
+            except Exception:
+                ram_gb = 1
+            score = max(0, 100 - ram_gb)
+        ranked.append((score, node_id, ip))
+
+    ranked.sort(key=lambda x: x[0])
+    return [(node_id, ip) for _, node_id, ip in ranked]
 
 
 # ── SELF-ELECTION ───────────────────────────────────────────────────────────
@@ -1156,6 +1206,27 @@ def list_yamls():
             "container": "locator.yml",
             "path": LOCATOR_YML,
         })
+    # The locator's own compose file, so its deployment is editable from the
+    # same place as its policy.
+    if os.path.isfile(LOCATOR_COMPOSE):
+        results.append({
+            "label": "docker-compose.yml (locator)",
+            "container": "docker-compose.yml",
+            "path": LOCATOR_COMPOSE,
+        })
+    # Blank starting points. Served from constants rather than files so they
+    # cannot be overwritten by a stray save — "Save As" writes a copy into the
+    # compose store instead.
+    for key, label in (
+        (TEMPLATE_LOCATOR_YML, "▸ new locator.yml (blank template)"),
+        (TEMPLATE_COMPOSE_YML, "▸ new docker-compose.yml (blank template)"),
+    ):
+        results.append({
+            "label": label,
+            "container": key,
+            "path": key,
+            "readonly": True,
+        })
     try:
         for fname in sorted(os.listdir(COMPOSE_DIR)):
             if not fname.endswith((".yml", ".yaml")):
@@ -1175,6 +1246,8 @@ def list_yamls():
 @app.route("/api/yaml", methods=["GET"])
 def get_yaml():
     path = request.args.get("path", "")
+    if path in YAML_TEMPLATES:
+        return jsonify({"path": path, "content": YAML_TEMPLATES[path], "readonly": True})
     if not path or not os.path.isfile(path):
         return jsonify({"error": "Not found"}), 404
     try:
@@ -1185,19 +1258,196 @@ def get_yaml():
 
 @app.route("/api/yaml", methods=["POST"])
 def save_yaml():
+    """Write a YAML back.
+
+    `save_as` writes a new file into the compose store instead of the given
+    path — that is the only way to save a blank template, which is otherwise
+    read-only so the starting point survives being edited.
+    """
     path = request.args.get("path", "")
-    if not path:
-        return jsonify({"error": "No path"}), 400
     data = request.get_json(silent=True)
     if not data or "content" not in data:
         return jsonify({"error": "No content"}), 400
+
+    save_as = (data.get("save_as") or "").strip()
+    if save_as:
+        name = os.path.basename(save_as)
+        if not name.endswith((".yml", ".yaml")):
+            name += ".yml"
+        if name.startswith("."):
+            return jsonify({"error": "Invalid filename"}), 400
+        os.makedirs(COMPOSE_DIR, exist_ok=True)
+        path = os.path.join(COMPOSE_DIR, name)
+    elif path in YAML_TEMPLATES:
+        return jsonify({
+            "error": "Blank templates are read-only — use Save As to create a copy."
+        }), 400
+
+    if not path:
+        return jsonify({"error": "No path"}), 400
     try:
         with open(path, "w") as f:
             f.write(data["content"])
         beast_log(f"\U0001f4dd YAML saved: {path}")
-        return jsonify({"ok": True, "status": "saved"})
+        return jsonify({"ok": True, "status": "saved", "path": path})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+def _write_policy_field(service, key, value):
+    """Set one key on one service in locator.yml, in place.
+
+    Done as a line edit rather than a yaml.safe_load/dump round-trip on
+    purpose: this file is mostly comments — the quoting trap on `units`, why
+    each database is stationary — and a dump would silently delete all of it.
+    """
+    with open(LOCATOR_YML, "r") as fh:
+        lines = fh.readlines()
+
+    target = service.lower()
+    in_block = False        # inside the top-level "Service:" mapping
+    svc_line = None         # index of the "  <service>:" header
+    svc_indent = 0
+    end = len(lines)
+
+    for i, raw in enumerate(lines):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+
+        if indent == 0:
+            in_block = stripped.rstrip(":").lower() in ("service", "services")
+            if svc_line is not None:
+                end = i
+                break
+            continue
+        if not in_block:
+            continue
+
+        if svc_line is None:
+            if stripped.endswith(":") and stripped[:-1].strip().lower() == target:
+                svc_line, svc_indent = i, indent
+        elif indent <= svc_indent:
+            end = i
+            break
+
+    if svc_line is None:
+        return False, f"'{service}' is not in locator.yml"
+
+    field_indent = " " * (svc_indent + 2)
+    for i in range(svc_line + 1, end):
+        stripped = lines[i].strip()
+        if stripped.startswith("#") or not stripped:
+            continue
+        if stripped.split(":")[0].strip().lower() == key:
+            lines[i] = f"{field_indent}{key}: {value}\n"
+            break
+    else:
+        lines.insert(svc_line + 1, f"{field_indent}{key}: {value}\n")
+
+    with open(LOCATOR_YML, "w") as fh:
+        fh.writelines(lines)
+    return True, None
+
+
+@app.route("/api/policy", methods=["GET"])
+def get_policy():
+    """Per-service essential/stationary flags for the tactical grid checkboxes."""
+    out = {}
+    for name, cfg in load_policy().items():
+        out[name] = {
+            "essential": cfg.get("deployment_type") == "essential",
+            "stationary": cfg.get("location_type") == "stationary",
+            "units": cfg.get("units", ""),
+            "instances": cfg.get("instances", 1),
+        }
+    return jsonify(out)
+
+
+@app.route("/api/policy", methods=["POST"])
+def set_policy():
+    """Flip one flag from the dashboard.
+
+    Body: {"service": "pdns", "essential": true}  or  {"stationary": false}
+
+    Only the flag named in the body is touched, so ticking Essential cannot
+    quietly clear a service's stationary pin.
+    """
+    data = request.get_json(silent=True) or {}
+    service = (data.get("service") or "").strip()
+    if not service:
+        return jsonify({"error": "No service"}), 400
+
+    # A grid row is "name@unit"; policy is keyed on the bare service name.
+    service = service.split("@")[0]
+
+    if "essential" in data:
+        key, value = "deployment_type", "essential" if data["essential"] else "optional"
+    elif "stationary" in data:
+        key, value = "location_type", "stationary" if data["stationary"] else "mobile"
+    else:
+        return jsonify({"error": "Nothing to set"}), 400
+
+    ok, err = _write_policy_field(service, key, value)
+    if not ok:
+        return jsonify({"error": err}), 404
+
+    _policy_cache["mtime"] = None      # force reload on next read
+    beast_log(f"\U0001f4dd policy: {service} {key}={value}")
+    return jsonify({"ok": True, "service": service, key: value})
+
+
+SSH_MOUNT_DIR   = "/root/.ssh"
+SSH_RUNTIME_DIR = "/root/.ssh-run"
+_ssh_dir_cache  = {"ready": False, "opts": None}
+
+
+def _ssh_base_opts():
+    """SSH options that work from inside this container.
+
+    ~/.ssh is bind-mounted read-only from the host, where it is owned by uid
+    1000 with a group-writable config. This container runs as root, so OpenSSH
+    rejects the lot — 'Bad owner or permissions on /root/.ssh/config' — and
+    every ssh/scp call fails before it reaches the network. That is why deploy
+    failed for every node regardless of target.
+
+    Copy the mount into a root-owned directory with tight permissions and use
+    that instead. The config's IdentityFile lines point at ~/.ssh/..., which
+    would resolve straight back to the bad mount, so rewrite them to the copy.
+    """
+    if _ssh_dir_cache["ready"]:
+        return _ssh_dir_cache["opts"]
+
+    opts = ["-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"]
+    try:
+        if os.path.isdir(SSH_MOUNT_DIR):
+            os.makedirs(SSH_RUNTIME_DIR, exist_ok=True)
+            os.chmod(SSH_RUNTIME_DIR, 0o700)
+            for fname in os.listdir(SSH_MOUNT_DIR):
+                src = os.path.join(SSH_MOUNT_DIR, fname)
+                dst = os.path.join(SSH_RUNTIME_DIR, fname)
+                if not os.path.isfile(src):
+                    continue
+                with open(src, "rb") as fh:
+                    blob = fh.read()
+                if fname == "config":
+                    blob = (blob.decode(errors="replace")
+                            .replace("~/.ssh/", SSH_RUNTIME_DIR + "/")
+                            .replace("/root/.ssh/", SSH_RUNTIME_DIR + "/")
+                            .replace("/home/swoopg111/.ssh/", SSH_RUNTIME_DIR + "/")
+                            ).encode()
+                with open(dst, "wb") as fh:
+                    fh.write(blob)
+                os.chmod(dst, 0o600)
+            cfg = os.path.join(SSH_RUNTIME_DIR, "config")
+            if os.path.isfile(cfg):
+                opts = ["-F", cfg] + opts
+    except Exception as e:
+        print(f"⚠️  SSH config prep failed, falling back to defaults: {e}")
+
+    _ssh_dir_cache.update({"ready": True, "opts": opts})
+    return opts
+
 
 @app.route("/api/deploy/<name>", methods=["POST"])
 def deploy_compose(name):
@@ -1205,7 +1455,8 @@ def deploy_compose(name):
     Deploy a stored compose file to the most available node (or a pinned one).
 
     Optional JSON body:
-    { "node": "unit2" }  — pin a specific target instead of auto-selecting
+    { "node": "unit2" }        — pin a target instead of auto-selecting
+    { "networks": ["auth"] }   — join these existing (external) networks
     """
     import yaml as _yaml
     import subprocess as _sp
@@ -1216,21 +1467,28 @@ def deploy_compose(name):
 
     data = request.get_json(silent=True) or {}
     forced_node = data.get("node")
+    join_networks = [n for n in (data.get("networks") or []) if str(n).strip()]
 
     if forced_node:
         with lock:
             node_info = registry["nodes"].get(forced_node, {})
-        ip = (
-            node_info.get("tailscale_ip")
-            or node_info.get("openvpn_ip", "").split("-")[0].strip().split()[0]
-            or node_info.get("ip", "").split("-")[0].strip().split()[0]
-        )
-        if not ip or ip in ("", "unknown"):
+        # A dead node keeps its last known IP, so without this the deploy
+        # spends the full SSH timeout before failing with nothing useful.
+        if node_info.get("status") != "ONLINE":
+            return jsonify({
+                "error": f"Node '{forced_node}' is not ONLINE",
+            }), 400
+        ip = _first_addr(node_info.get("tailscale_ip")) \
+            or _first_addr(node_info.get("openvpn_ip")) \
+            or _first_addr(node_info.get("ip"))
+        if not ip or ip == "unknown":
             return jsonify({"error": f"No reachable IP for node '{forced_node}'"}), 400
-        target_node, target_ip = forced_node, ip
+        targets = [(forced_node, ip)]
     else:
-        target_node, target_ip = _best_available_node()
-        if not target_node:
+        # Ordered by headroom. Only the first few are worth trying — past that
+        # the "most available node" claim stops meaning anything.
+        targets = _ranked_nodes()[:3]
+        if not targets:
             return jsonify({"error": "No online nodes with reachable IPs"}), 503
 
     remote_dir  = f"/tmp/locator_deploy/{name}"
@@ -1238,29 +1496,87 @@ def deploy_compose(name):
     # Use the SSH config alias (node name) so per-host port/user/key from ~/.ssh/config
     # are respected (e.g. unit1 tunnels through localhost:2222 with its own key).
     # Fall back to explicit user@ip only if no config alias exists.
-    ssh_opts   = ["-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"]
-    ssh_target = target_node   # SSH config alias: unit1, unit2, unit3 …
+    ssh_opts   = _ssh_base_opts()
 
-    try:
+    # Networks picked in the UI are injected into a copy of the compose file —
+    # the stored original is never rewritten. They are declared external
+    # because /api/networks lists networks that already exist on the host.
+    send_path = path
+    tmp_path = None
+    if join_networks:
+        try:
+            with open(path) as fh:
+                doc = _yaml.safe_load(fh) or {}
+            for cfg in (doc.get("services") or {}).values():
+                if not isinstance(cfg, dict):
+                    continue
+                existing = cfg.get("networks") or []
+                if isinstance(existing, dict):
+                    for net in join_networks:
+                        existing.setdefault(net, None)
+                else:
+                    for net in join_networks:
+                        if net not in existing:
+                            existing.append(net)
+                cfg["networks"] = existing
+            declared = doc.get("networks")
+            if not isinstance(declared, dict):
+                declared = {}
+            for net in join_networks:
+                declared.setdefault(net, {"external": True})
+            doc["networks"] = declared
+
+            fd, tmp_path = tempfile.mkstemp(suffix=".yml", prefix=f"{name}-")
+            with os.fdopen(fd, "w") as fh:
+                _yaml.safe_dump(doc, fh, sort_keys=False)
+            send_path = tmp_path
+        except Exception as e:
+            return jsonify({"error": f"Could not add networks: {e}"}), 400
+
+    def _attempt(ssh_target):
+        """Ship the compose file to one node and bring it up there."""
         _sp.run(
             ["ssh"] + ssh_opts + [ssh_target, f"mkdir -p {remote_dir}"],
             check=True, capture_output=True, timeout=15
         )
         _sp.run(
-            ["scp"] + ssh_opts + [path, f"{ssh_target}:{remote_file}"],
+            ["scp"] + ssh_opts + [send_path, f"{ssh_target}:{remote_file}"],
             check=True, capture_output=True, timeout=15
         )
-        result = _sp.run(
+        return _sp.run(
             ["ssh"] + ssh_opts + [ssh_target, f"cd {remote_dir} && docker compose up -d"],
             capture_output=True, text=True, timeout=120
         )
 
-        if result.returncode != 0:
+    try:
+        attempts = []
+        result = None
+        target_node = target_ip = None
+
+        for candidate_node, candidate_ip in targets:
+            # SSH config alias (unit1, unit3 …) so per-host user/port/key apply.
+            try:
+                outcome = _attempt(candidate_node)
+            except _sp.CalledProcessError as e:
+                stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
+                attempts.append({"node": candidate_node, "error": stderr.strip() or str(e)})
+                continue
+            if outcome.returncode != 0:
+                attempts.append({"node": candidate_node, "error": (outcome.stderr or "").strip()})
+                continue
+            result, target_node, target_ip = outcome, candidate_node, candidate_ip
+            break
+
+        if result is None:
             return jsonify({
                 "error": "docker compose up failed",
-                "stderr": result.stderr,
-                "node": target_node,
+                "stderr": "; ".join(f"{a['node']}: {a['error']}" for a in attempts),
+                "attempts": attempts,
+                "node": attempts[0]["node"] if attempts else None,
             }), 500
+
+        if len(attempts) > 0:
+            print(f"↩️  DEPLOY fell through {[a['node'] for a in attempts]} → {target_node}")
 
         # Register every service from the compose file
         now = datetime.now(timezone.utc).isoformat()
@@ -1294,11 +1610,12 @@ def deploy_compose(name):
 
         print(f"🚀 DEPLOYED: '{name}' → {target_node} ({target_ip})")
         return jsonify({
-            "result":  "deployed",
-            "name":    name,
-            "node":    target_node,
-            "ip":      target_ip,
-            "output":  result.stdout,
+            "result":   "deployed",
+            "name":     name,
+            "node":     target_node,
+            "ip":       target_ip,
+            "output":   result.stdout,
+            "skipped":  attempts,   # nodes tried first and why they failed
         }), 200
 
     except _sp.TimeoutExpired:
@@ -1308,6 +1625,12 @@ def deploy_compose(name):
         return jsonify({"error": str(e), "stderr": stderr, "node": target_node}), 500
     except Exception as e:
         return jsonify({"error": str(e), "node": target_node}), 500
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 @app.route("/nodes", methods=["GET"])
@@ -1792,7 +2115,17 @@ def get_available_networks():
 
 @app.route("/trigger-deploy-final", methods=["POST"])
 def trigger_deploy_final():
-    """Receives user preferences and triggers the actual deployment."""
+    """Superseded by /api/deploy/<name>; the dashboard no longer calls this.
+
+    It cannot work from inside the container and never could: deploy.py runs
+    `docker-compose up -d` locally with cwd=<host folder path>, but this
+    container mounts no host filesystem and ships with neither the `docker`
+    nor the `docker-compose` binary. It also scored a target node and then
+    ignored it, deploying locally regardless of the unit picked in the UI.
+
+    Kept only so any out-of-band caller gets its old response shape rather
+    than a 404. New work belongs in deploy_compose().
+    """
     from deploy import deploy_from_browse
     data = request.get_json()
     
@@ -2480,6 +2813,80 @@ def heartbeat_reaper():
 
 # Containers that must never be migrated or deduped automatically
 LOCATOR_YML = os.environ.get("LOCATOR_YML", os.path.join(os.path.dirname(os.path.abspath(__file__)), "locator.yml"))
+LOCATOR_COMPOSE = os.environ.get(
+    "LOCATOR_COMPOSE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "docker-compose.yml"),
+)
+
+# Pseudo-paths, not files — see list_yamls().
+TEMPLATE_LOCATOR_YML = "template:locator.yml"
+TEMPLATE_COMPOSE_YML = "template:docker-compose.yml"
+
+YAML_TEMPLATES = {
+    TEMPLATE_LOCATOR_YML: """\
+# Service policy. Read by the locator on every change (no restart needed).
+#
+# location_type:   stationary = never migrate (anything holding data on local
+#                  disk, since migration moves the compose file and NOT the
+#                  volume). mobile = may be rebalanced between units.
+# deployment_type: essential = must always be running; the locator restarts it
+#                  as soon as it is seen OFFLINE. optional = left alone.
+# units:           current_unit (default) | all | 8 | "7_8_9"
+#                  ALWAYS QUOTE the underscore form — YAML 1.1 reads a bare
+#                  7_8_9 as the integer 789 and the policy matches nothing.
+# instances:       how many per unit (default 1)
+# project_dir /
+# git_remote:      opt in to placement enforcement. Without one of these the
+#                  locator will NOT fan a service out, because a queued deploy
+#                  carries only a container name and the target would have
+#                  nothing to check out.
+# env:             .env values for the target ('common' + per-unit override).
+#                  lokey merges them and never overwrites an existing key.
+
+Service:
+  my-service:
+    deployment_type: optional
+    location_type: stationary
+    units: current_unit
+    instances: 1
+    # project_dir: /home/swoopg111/projects/my-service
+    # git_remote: https://gitlab.com/<group>/my-service.git
+    # env:
+    #   common:
+    #     SOME_KEY: value
+    #   unit8:
+    #     SOME_KEY: unit8-override
+""",
+    TEMPLATE_COMPOSE_YML: """\
+# Blank compose file. Save As writes it into the locator's compose store,
+# where it becomes deployable from the YAMLs tab.
+
+services:
+  my-service:
+    image: nginx:alpine
+    container_name: my-service
+    restart: unless-stopped
+    # Volumes are NOT moved by a migration — mark anything with data below as
+    # location_type: stationary in locator.yml.
+    volumes: []
+    environment:
+      - PYTHONUNBUFFERED=1
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.my-service.rule=Host(`my-service.example.com`)"
+      - "traefik.http.routers.my-service.entrypoints=websecure"
+      - "traefik.http.routers.my-service.tls=true"
+      - "traefik.http.routers.my-service.tls.certresolver=myresolver"
+      - "traefik.http.services.my-service.loadbalancer.server.port=80"
+    networks:
+      - networking
+
+networks:
+  networking:
+    external: true
+""",
+}
+
 _policy_cache = {"mtime": None, "data": {}}
 
 
@@ -2590,10 +2997,8 @@ _PINNED_NAMES = {
 
 def _clean_ip(raw):
     """Strip description suffixes like '10.0.0.1- hostname'."""
-    if not raw:
-        return None
-    clean = raw.split("-")[0].strip().split()[0]
-    return clean if clean and clean not in ("unknown", "") else None
+    clean = _first_addr(raw)
+    return clean if clean and clean != "unknown" else None
 
 
 def _best_ip(info):
@@ -3953,7 +4358,11 @@ def critical_service_watchdog():
 
         for name, svc in services_snap.items():
             base = name.split("@")[0].lower()
-            if not any(w == base for w in _WATCHDOG_SERVICES):
+            # locator.yml's "essential" flag is the editable half of this list.
+            # The hardcoded set stays as a floor, so a broken or missing policy
+            # file cannot leave the agents themselves unwatched.
+            if (_policy_for(base).get("deployment_type") != "essential"
+                    and not any(w == base for w in _WATCHDOG_SERVICES)):
                 continue
             if svc.get("status") != "OFFLINE":
                 continue

@@ -7,6 +7,10 @@ services:
       - ./registry_data:/app/data
       - ./templates:/app/templates
       - ./locator.yml:/app/locator.yml
+      # Editable from the dashboard's YAMLs tab. Without this mount the file
+      # only exists inside the image, so a UI edit would be discarded on the
+      # next rebuild rather than changing the deployment.
+      - ./docker-compose.yml:/app/docker-compose.yml
       - /home/swoopg111/.ssh:/root/.ssh:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:

@@ -806,9 +806,12 @@
 
     <!-- Button  -->
     <div id="upload-container" style="margin-top: 20px; display: flex; justify-content: center; gap: 10px; position: fixed; bottom: 20px; right: 20px; z-index: 9999;">
-      <input type="text" id="manual-path" placeholder="/home/swoopg111/projects/my-app" style="padding: 10px; width: 300px; background: #000; border: 1px solid var(--accent); color: #fff;">
+      <!-- A stored compose name, not a host path: the locator deploys from its
+           own compose store, which is the only thing it can actually read. -->
+      <input type="text" id="manual-path" list="compose-names" placeholder="compose name (e.g. agent-0)" style="padding: 10px; width: 300px; background: #000; border: 1px solid var(--accent); color: #fff;">
+      <datalist id="compose-names"></datalist>
       <button id="add-docker-btn" class="blue-button" type="button" style="padding: 10px 20px; cursor: pointer; background: var(--primary); color: #fff; border: none; border-radius: 4px;">
-        + Deploy Path
+        + Deploy
       </button>
     </div>
 
@@ -905,6 +908,8 @@
                     <th data-sort-table="docker" data-sort-key="status" data-label="Status" style="cursor:pointer" onclick="sortByColumn('docker','status')">Status</th>
                     <th>Metadata</th>
                     <th data-sort-table="docker" data-sort-key="lastseen" data-label="Last Seen" style="cursor:pointer" onclick="sortByColumn('docker','lastseen')">Last Seen</th>
+                    <th title="Must always be running — the locator queues a restart as soon as it goes OFFLINE">Essential</th>
+                    <th title="Never migrate off this node">Stationary</th>
                     <th>Actions</th>
                 </tr></thead>
                 <tbody id="tbody-docker"></tbody>
@@ -1083,6 +1088,7 @@
             <div style="flex:1; display:flex; flex-direction:column; overflow:hidden;">
                 <div style="padding:8px 16px; border-bottom:1px solid rgba(0,255,0,0.2); display:flex; align-items:center; justify-content:space-between; flex-shrink:0;">
                     <span id="yaml-editor-path" style="font-size:11px; color:#555; font-family:monospace;"></span>
+                    <button id="yaml-deploy-btn" onclick="deploySelectedYaml()" title="Deploy this compose file to a node" style="display:none; background:none; border:1px solid var(--neon-green); color:var(--neon-green); padding:5px 16px; font-family:inherit; font-size:12px; letter-spacing:2px; cursor:pointer; border-radius:3px; margin-right:8px;">DEPLOY</button>
                     <button id="yaml-save-btn" onclick="saveYaml()" style="display:none; background:var(--neon-green); color:#000; border:none; padding:6px 20px; font-family:inherit; font-size:12px; font-weight:bold; letter-spacing:2px; cursor:pointer; border-radius:3px;">SAVE</button>
                 </div>
                 <textarea id="yaml-editor" spellcheck="false" style="flex:1; background:#000; color:var(--neon-green); font-family:'Courier New',monospace; font-size:13px; border:none; outline:none; resize:none; padding:16px; line-height:1.6; tab-size:2;" placeholder="Select a file from the list..."></textarea>
@@ -1269,6 +1275,12 @@
 
         // ── YAMLS FEATURE ──────────────────────────────────────────────
         let _yamlCurrentPath = null;
+        let _yamlReadonly = false;
+        let _yamlComposeName = null;
+
+        function deploySelectedYaml() {
+            if (_yamlComposeName) openDeployModal(_yamlComposeName);
+        }
 
         async function loadYamlList() {
             const list = document.getElementById('yaml-list');
@@ -1281,26 +1293,40 @@
                     list.innerHTML = '<div style="color:var(--neon-green);padding:12px;opacity:0.5;">No compose files found.</div>';
                     return;
                 }
+                const dl = document.getElementById('compose-names');
+                if (dl) dl.innerHTML = '';
                 data.forEach(item => {
                     const div = document.createElement('div');
                     div.className = 'yaml-item';
                     div.textContent = item.label;
                     div.title = item.path;
-                    div.onclick = () => selectYaml(item.path, item.label);
+                    // Blank templates read as starting points, not live config.
+                    if (item.readonly) div.style.opacity = '0.75';
+                    div.onclick = () => selectYaml(item.path, item.label, item.readonly);
                     list.appendChild(div);
+
+                    // Only compose-store files are deployable — locator.yml is
+                    // policy, and the templates are not real files.
+                    if (dl && !item.readonly && item.path.indexOf('/compose/') !== -1) {
+                        const opt = document.createElement('option');
+                        opt.value = item.container;
+                        dl.appendChild(opt);
+                    }
                 });
             } catch(e) {
                 list.innerHTML = '<div style="color:var(--danger);padding:12px;">Error loading list.</div>';
             }
         }
 
-        async function selectYaml(path, label) {
+        async function selectYaml(path, label, readonly) {
             document.querySelectorAll('.yaml-item').forEach(el => el.classList.remove('active'));
             const clicked = [...document.querySelectorAll('.yaml-item')].find(el => el.title === path);
             if (clicked) clicked.classList.add('active');
 
             _yamlCurrentPath = path;
-            document.getElementById('yaml-editor-path').textContent = path;
+            _yamlReadonly = !!readonly;
+            document.getElementById('yaml-editor-path').textContent =
+                readonly ? label + '  (template — Save As to create a copy)' : path;
             document.getElementById('yaml-editor').value = 'Loading...';
             document.getElementById('yaml-save-btn').style.display = 'none';
 
@@ -1308,7 +1334,16 @@
                 const res = await fetch('/api/yaml?path=' + encodeURIComponent(path));
                 const data = await res.json();
                 document.getElementById('yaml-editor').value = data.content;
-                document.getElementById('yaml-save-btn').style.display = 'inline-block';
+                const btn = document.getElementById('yaml-save-btn');
+                btn.textContent = _yamlReadonly ? 'SAVE AS' : 'SAVE';
+                btn.style.display = 'inline-block';
+                // Only compose-store files can be deployed; locator.yml is
+                // policy and the templates are not real files.
+                _yamlComposeName = (!readonly && path.indexOf('/compose/') !== -1)
+                    ? path.split('/').pop().replace(/\.ya?ml$/, '')
+                    : null;
+                document.getElementById('yaml-deploy-btn').style.display =
+                    _yamlComposeName ? 'inline-block' : 'none';
             } catch(e) {
                 document.getElementById('yaml-editor').value = 'Error loading file.';
             }
@@ -1317,15 +1352,28 @@
         async function saveYaml() {
             if (!_yamlCurrentPath) return;
             const content = document.getElementById('yaml-editor').value;
+
+            // Templates are read-only server-side too — a name is required so
+            // the starting point survives being edited.
+            let saveAs = null;
+            if (_yamlReadonly) {
+                saveAs = prompt('Save as (filename in the compose store):', 'my-service.yml');
+                if (!saveAs) return;
+            }
+
             try {
                 const res = await fetch('/api/yaml?path=' + encodeURIComponent(_yamlCurrentPath), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content })
+                    body: JSON.stringify(saveAs ? { content, save_as: saveAs } : { content })
                 });
                 const data = await res.json();
-                if (data.ok) notify('Saved: ' + _yamlCurrentPath, 'info');
-                else notify('Save failed: ' + (data.error || 'unknown'), 'error');
+                if (data.ok) {
+                    notify('Saved: ' + (data.path || _yamlCurrentPath), 'info');
+                    if (saveAs) loadYamlList();
+                } else {
+                    notify('Save failed: ' + (data.error || 'unknown'), 'error');
+                }
             } catch(e) {
                 notify('Save error: ' + e.message, 'error');
             }
@@ -1383,21 +1431,17 @@
             </div>
 
             <p style="font-size:14px; color:#aaa;">Target Server:</p>
-            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:20px;">
-                <label><input type="checkbox" name="srv" value="unit1"> Unit 1</label>
-                <label><input type="checkbox" name="srv" value="unit2"> Unit 2</label>
-                <label><input type="checkbox" name="srv" value="unit3"> Unit 3</label>
-                <label><input type="checkbox" name="srv" value="unit4"> Unit 4</label>
-                <label><input type="checkbox" name="srv" value="unit5"> Unit 5</label>
-                <label><input type="checkbox" name="srv" value="unit6"> Unit 6</label>
-                <label style="grid-column: span 2; color:var(--accent); font-weight:bold;">
-                    <input type="checkbox" name="srv" value="efficient" checked> Most Efficient Option
-                </label>
-            </div>
+            <!-- Populated from live ONLINE nodes. The old hardcoded unit1-unit6
+                 list offered four nodes that are dead and omitted unit7/8/9. -->
+            <select id="deploy-target" style="width:100%; padding:8px; margin-bottom:6px; background:#000; color:var(--accent); border:1px solid var(--accent); font-family:inherit;">
+                <option value="">AUTO — let the locator choose (most headroom)</option>
+            </select>
+            <div id="deploy-target-note" style="font-size:11px; color:#666; margin-bottom:20px;"></div>
 
-            <div style="display:flex; justify-content:space-between;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
                 <button onclick="closeDeployModal()" style="background:#444; color:white; border:none; padding:10px 20px; cursor:pointer;">Cancel</button>
-                <button onclick="confirmDeployment()" style="background:var(--accent); color:black; border:none; padding:10px 20px; cursor:pointer; font-weight:bold;">Deploy</button>
+                <span id="deploy-status" style="font-size:12px; color:#888; flex:1; text-align:center;"></span>
+                <button id="deploy-confirm-btn" onclick="confirmDeployment()" style="background:var(--accent); color:black; border:none; padding:10px 20px; cursor:pointer; font-weight:bold;">Deploy</button>
             </div>
         </div>
     </div>
@@ -1421,14 +1465,23 @@
             'registered_at', 'offline_since',
         ];
 
-        let selectedFolderPath = "";
+        // Deploys a compose file from the locator's own store by name, via
+        // /api/deploy/<name>, which scp's it to the target and runs
+        // `docker compose up -d` over SSH.
+        //
+        // This used to POST a host folder path to /trigger-deploy-final, which
+        // could never work: that ran `docker-compose up -d` *inside* the
+        // locator container, which mounts no host filesystem and ships with
+        // neither the docker nor the docker-compose binary.
+        let _deployName = null;
 
-        function openDeployModal(path) {
-            selectedFolderPath = path;
+        function openDeployModal(name) {
+            _deployName = name;
+            document.getElementById('deploy-status').textContent = '';
+            document.getElementById('deploy-confirm-btn').disabled = false;
+
             const netList = document.getElementById('network-list');
             netList.innerHTML = "Loading networks...";
-            
-            // Fetch available networks from backend
             fetch('/api/networks')
                 .then(r => r.json())
                 .then(networks => {
@@ -1438,6 +1491,27 @@
                     });
                 });
 
+            // Only ONLINE nodes are offered — a queued deploy to a dead node
+            // just times out on SSH.
+            const sel = document.getElementById('deploy-target');
+            sel.innerHTML = '<option value="">AUTO — let the locator choose (most headroom)</option>';
+            const nodes = (window._lastRegistry && window._lastRegistry.nodes) || {};
+            let online = 0;
+            Object.entries(nodes)
+                .filter(([id, n]) => n.status === 'ONLINE')
+                .sort((a, b) => a[0].localeCompare(b[0]))
+                .forEach(([id, n]) => {
+                    const o = document.createElement('option');
+                    o.value = id;
+                    const mem = (n.mem_percent != null) ? ` — mem ${Math.round(n.mem_percent)}%` : '';
+                    const disk = (n.disk_percent != null) ? `, disk ${Math.round(n.disk_percent)}%` : '';
+                    o.textContent = id + mem + disk;
+                    sel.appendChild(o);
+                    online++;
+                });
+            document.getElementById('deploy-target-note').textContent =
+                online ? `${online} node(s) online` : 'No nodes online — deploy will fail.';
+
             document.getElementById('deploy-modal').style.display = 'flex';
         }
 
@@ -1446,40 +1520,53 @@
         }
 
         function confirmDeployment() {
+            if (!_deployName) { notify("No compose file selected.", "error"); return; }
+
             const networks = Array.from(document.querySelectorAll('.net-check:checked')).map(cb => cb.value);
-            const servers = Array.from(document.querySelectorAll('input[name="srv"]:checked')).map(cb => cb.value);
-            
-            notify("Deploying services... please wait.");
-            
-            fetch('/trigger-deploy-final', {
+            const node = document.getElementById('deploy-target').value;
+            const statusEl = document.getElementById('deploy-status');
+            const btn = document.getElementById('deploy-confirm-btn');
+
+            btn.disabled = true;
+            statusEl.style.color = '#888';
+            statusEl.textContent = 'Deploying to ' + (node || 'auto-selected node') + '...';
+
+            fetch('/api/deploy/' + encodeURIComponent(_deployName), {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    folder_path: selectedFolderPath,
-                    networks: networks,
-                    servers: servers
-                })
+                body: JSON.stringify({ node: node || null, networks: networks })
             })
-            .then(r => r.json())
-            .then(data => {
-                if (data.status === 'Success') {
-                    notify("Deployment Successful!", "success");
+            .then(r => r.json().then(data => ({ ok: r.ok, data })))
+            .then(({ ok, data }) => {
+                if (ok && data.result === 'deployed') {
+                    notify(`Deployed '${data.name}' to ${data.node}`, "success");
+                    closeDeployModal();
+                    loadRegistryData();
                 } else {
-                    notify("Deployment Failed: " + (data.error || "Unknown error"), "error");
+                    // Surface the remote stderr — "docker compose up failed" on
+                    // its own says nothing about which service broke.
+                    const detail = data.stderr ? (data.error + ': ' + data.stderr) : (data.error || 'Unknown error');
+                    statusEl.style.color = 'var(--danger)';
+                    statusEl.textContent = detail;
+                    notify("Deployment failed: " + detail, "error");
+                    btn.disabled = false;
                 }
-                closeDeployModal();
-                loadRegistryData();
             })
-            .catch(err => notify("Critical Deployment Error: " + err, "error"));
+            .catch(err => {
+                statusEl.style.color = 'var(--danger)';
+                statusEl.textContent = err.message;
+                notify("Deployment error: " + err.message, "error");
+                btn.disabled = false;
+            });
         }
 
         document.getElementById('add-docker-btn').addEventListener('click', function() {
-            const path = document.getElementById('manual-path').value;
-            if (!path) {
-                notify("Please enter a valid folder path.", "error");
+            const name = document.getElementById('manual-path').value.trim();
+            if (!name) {
+                notify("Enter the name of a stored compose file (see the YAMLs tab).", "error");
                 return;
             }
-            openDeployModal(path);
+            openDeployModal(name);
         });
 
 
@@ -1758,6 +1845,79 @@
             }
         }
 
+        // ── Service policy (locator.yml) ────────────────────────────────────
+        // Cached separately from the registry: it changes only when someone
+        // ticks a box or edits the YAML, so it does not need the 10s poll.
+        let _policyData = {};
+
+        function loadPolicy() {
+            return fetch('/api/policy')
+                .then(r => r.json())
+                .then(d => { _policyData = d || {}; })
+                .catch(() => { /* grid still renders; boxes just read unticked */ });
+        }
+
+        function policyFor(item) {
+            const name = ((item.name || '').split('@')[0]).toLowerCase();
+            if (_policyData[name]) return _policyData[name];
+            // locator.yml keys the base name, so "mariadb" covers "mariadb-11.4".
+            for (const key in _policyData) {
+                if (key && name.indexOf(key) !== -1) return _policyData[key];
+            }
+            return null;
+        }
+
+        function policyCell(item, flag) {
+            const td = document.createElement('td');
+            td.style.textAlign = 'center';
+            const pol = policyFor(item);
+            const name = (item.name || '').split('@')[0];
+
+            if (!pol) {
+                // No policy entry means nothing to toggle — say so rather than
+                // showing an unticked box that silently fails on click.
+                td.innerHTML = `<span title="Not in locator.yml — add it there first"
+                                      style="color:#555;font-size:12px;">&mdash;</span>`;
+                return td;
+            }
+
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = !!pol[flag];
+            cb.style.cursor = 'pointer';
+            cb.title = flag === 'essential'
+                ? 'Must always be running — restart is queued as soon as it goes OFFLINE'
+                : 'Never migrate off this node';
+            cb.onclick = (e) => e.stopPropagation();
+            cb.onchange = async () => {
+                cb.disabled = true;
+                const body = { service: name };
+                body[flag] = cb.checked;
+                try {
+                    const res = await fetch('/api/policy', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body)
+                    });
+                    const data = await res.json();
+                    if (res.ok && data.ok) {
+                        pol[flag] = cb.checked;
+                        notify(name + ' ' + flag + ' = ' + cb.checked, 'info');
+                    } else {
+                        cb.checked = !cb.checked;
+                        notify('Policy update failed: ' + (data.error || res.status), 'error');
+                    }
+                } catch (err) {
+                    cb.checked = !cb.checked;
+                    notify('Policy update failed: ' + err.message, 'error');
+                } finally {
+                    cb.disabled = false;
+                }
+            };
+            td.appendChild(cb);
+            return td;
+        }
+
         function loadRegistryData() {
             fetch('/api/registry')
                 .then(response => response.json())
@@ -1939,6 +2099,11 @@
 
                 tr.appendChild(createMetaBadges(item.metadata));
                 tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never'}</td>`;
+
+                // Policy flags, written straight back to locator.yml.
+                tr.appendChild(policyCell(item, 'essential'));
+                tr.appendChild(policyCell(item, 'stationary'));
+
                 const migTd = document.createElement('td');
                 const safeId = (item.id || '').replace(/'/g, "\\'");
                 const safeHost = (item.host || '').replace(/'/g, "\\'");
@@ -2236,8 +2401,15 @@
         }
 
         // Auto-refresh data every 10 seconds
-        loadRegistryData();
+        // Policy first, so the Essential/Stationary boxes are correct on the
+        // very first paint rather than filling in a tick later.
+        loadPolicy().then(loadRegistryData);
+        // Fills the deploy box's autocomplete without waiting for the YAMLs tab.
+        loadYamlList();
         setInterval(loadRegistryData, 10000);
+        // Policy only changes on a tick or a YAML edit — a slower poll is enough
+        // to pick up edits made elsewhere (locator.yml, another browser tab).
+        setInterval(() => loadPolicy(), 60000);
         // Ticks the "Updated Xs ago" text every second, independent of the poll itself.
         setInterval(updateLiveStatusIndicator, 1000);
 
