@@ -77,11 +77,11 @@
             document.documentElement.classList.add('auth-failed');
         }
         if (typeof Keycloak === 'undefined') {
-            authFailed('Keycloak adapter failed to load from auth.theofficialblacksheepco.online');
+            authFailed('Keycloak adapter failed to load from auth.theofficialblacksheepco.com');
             return;
         }
         var kc = new Keycloak({
-            url: 'https://auth.theofficialblacksheepco.online',
+            url: 'https://auth.theofficialblacksheepco.com',
             realm: 'blacksheep',
             clientId: 'locator'
         });
@@ -777,7 +777,7 @@
 </head>
 <body>
 
-    <div id="auth-fail">SSO UNAVAILABLE — sign-in could not be verified, registry data hidden.<br>Check auth.theofficialblacksheepco.online, then reload.</div>
+    <div id="auth-fail">SSO UNAVAILABLE — sign-in could not be verified, registry data hidden.<br>Check auth.theofficialblacksheepco.com, then reload.</div>
 
     <!-- NOTIFICATION SYSTEM -->
     <div id="notification" style="display:none; position:fixed; top:20px; left:50%; transform:translateX(-50%); background:rgba(0,255,255,0.9); color:#000; padding:15px 30px; border-radius:5px; z-index:20000; font-weight:bold; box-shadow:0 0 20px rgba(0,255,255,0.5);">
