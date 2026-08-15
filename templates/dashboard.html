@@ -81,7 +81,7 @@
             return;
         }
         var kc = new Keycloak({
-            url: 'https://auth.theofficialblacksheepco.com',
+            url: 'https://bsco-keycloak.fly.dev',
             realm: 'blacksheep',
             clientId: 'locator'
         });
@@ -901,10 +901,7 @@
                 <thead><tr>
                     <th data-sort-table="docker" data-sort-key="name" data-label="Service" style="cursor:pointer" onclick="sortByColumn('docker','name')">Service</th>
                     <th class="col-host" data-sort-table="docker" data-sort-key="host" data-label="Node / Host" style="cursor:pointer" onclick="sortByColumn('docker','host')">Node / Host</th>
-                    <th data-sort-table="docker" data-sort-key="port" data-label="Port" style="cursor:pointer" onclick="sortByColumn('docker','port')">Port</th>
-                    <th data-sort-table="docker" data-sort-key="internal" data-label="Internal IP" style="cursor:pointer" onclick="sortByColumn('docker','internal')">Internal IP</th>
-                    <th data-sort-table="docker" data-sort-key="url" data-label="Public / Traefik" style="cursor:pointer" onclick="sortByColumn('docker','url')">Public / Traefik</th>
-                    <th>Stats (CPU/RAM/Temp/Disk)</th>
+                                                                                <th>Stats (CPU/RAM/Temp/Disk)</th>
                     <th data-sort-table="docker" data-sort-key="status" data-label="Status" style="cursor:pointer" onclick="sortByColumn('docker','status')">Status</th>
                     <th>Metadata</th>
                     <th data-sort-table="docker" data-sort-key="lastseen" data-label="Last Seen" style="cursor:pointer" onclick="sortByColumn('docker','lastseen')">Last Seen</th>
@@ -2079,9 +2076,6 @@
                 tr.innerHTML = `
                     <td style="font-weight:bold">${item.name}</td>
                     <td class="col-host">${hostBadges}</td>
-                    <td>${item.port || '-'}</td>
-                    <td>${item.internal || '-'}</td>
-                    <td>${item.url ? `<a href="${item.url}" target="_blank" onclick="event.stopPropagation()">${item.url}</a>` : '-'}</td>
                 `;
 
                 // Stats Column
@@ -2506,8 +2500,8 @@
             { name: 'Vercel', host: 'cloud / CDN', software: 'Next.js hosting, edge functions, static deployments', dashboard: 'https://vercel.com/dashboard', notes: 'Next.js apps, serverless' },
             { name: 'Render', host: 'cloud / PaaS', software: 'Container hosting, web services, cron jobs, databases', dashboard: 'https://dashboard.render.com', notes: 'Containerized backend services' },
             { name: 'Fly.io', host: 'cloud / PaaS', software: 'Container deployments, global edge, Postgres', dashboard: 'https://fly.io/dashboard', notes: 'Edge container hosting' },
-            { name: 'Unit 3 — Mac mini', host: 'unit3 / LAN 10.0.0.196', software: 'Keycloak 24.0.5, PostgreSQL 16, MCP Tools (7 servers)', url: 'https://auth.theofficialblacksheepco.com', ssh: 'ssh unit3', notes: 'macOS Monterey 8GB RAM — native (no Docker)' },
-            { name: 'Unit 3 — Keycloak', host: 'unit3 :8180', software: 'Keycloak 24.0.5 (Quarkus) + PostgreSQL 16 backend', url: 'https://auth.theofficialblacksheepco.com', dashboard: 'https://auth.theofficialblacksheepco.com/admin', notes: 'Migrated from unit1 Docker 2026-06-25' },
+            { name: 'Unit 3 — Mac mini', host: 'unit3 / LAN 10.0.0.196', software: 'Keycloak 24.0.5, PostgreSQL 16, MCP Tools (7 servers)', url: 'https://bsco-keycloak.fly.dev', ssh: 'ssh unit3', notes: 'macOS Monterey 8GB RAM — native (no Docker)' },
+            { name: 'Unit 3 — Keycloak', host: 'unit3 :8180', software: 'Keycloak 24.0.5 (Quarkus) + PostgreSQL 16 backend', url: 'https://bsco-keycloak.fly.dev', dashboard: 'https://auth.theofficialblacksheepco.com/admin', notes: 'Migrated from unit1 Docker 2026-06-25' },
             { name: 'Unit 3 — MCP Tools', host: 'unit3 :8001–8009', software: 'filesystem, github, brave-search, puppeteer, memory, sequential-thinking, slack', internal: 'SSE via mcp-gateway → 10.0.0.196:800X', notes: 'Used by Claude Code, The Beast, Gemini' },
         ];
         document.querySelectorAll('#tbody-cloud-platforms tr').forEach((tr, i) => {
