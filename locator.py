@@ -1308,6 +1308,9 @@ def _write_policy_field(service, key, value):
     svc_line = None         # index of the "  <service>:" header
     svc_indent = 0
     end = len(lines)
+    blk_line = None         # index of the top-level "Service:" header itself
+    blk_end = None          # first line after the whole Service mapping
+    entry_indent = None     # indent the existing service entries use
 
     for i, raw in enumerate(lines):
         stripped = raw.strip()
@@ -1317,12 +1320,19 @@ def _write_policy_field(service, key, value):
 
         if indent == 0:
             in_block = stripped.rstrip(":").lower() in ("service", "services")
+            if in_block:
+                blk_line = i
+            elif blk_line is not None and blk_end is None:
+                blk_end = i
             if svc_line is not None:
                 end = i
                 break
             continue
         if not in_block:
             continue
+
+        if entry_indent is None:
+            entry_indent = indent
 
         if svc_line is None:
             if stripped.endswith(":") and stripped[:-1].strip().lower() == target:
@@ -1332,7 +1342,38 @@ def _write_policy_field(service, key, value):
             break
 
     if svc_line is None:
-        return False, f"'{service}' is not in locator.yml"
+        # Not in the file yet. Append a block rather than refusing: the tactical
+        # grid lets any running container be pinned, and most of them have never
+        # had a policy entry. Written as text for the same reason the rest of
+        # this function is — a yaml round-trip would strip every comment.
+        if blk_line is None:
+            return False, "locator.yml has no 'Service:' block"
+
+        ind = " " * (entry_indent or 2)
+        fields = {
+            "deployment_type": "optional",
+            "location_type":   "mobile",
+            "units":           "current_unit",
+            "instances":       1,
+        }
+        fields[key] = value
+
+        at = blk_end if blk_end is not None else len(lines)
+        while at > 0 and not lines[at - 1].strip():   # keep trailing blanks below
+            at -= 1
+
+        block = []
+        if at > 0 and lines[at - 1].strip():
+            block.append("\n")          # keep one blank line between entries
+        block += [f"{ind}# added from the tactical grid {datetime.now():%Y-%m-%d}\n",
+                  f"{ind}{service}:\n"]
+        block += [f"{ind}  {k}: {v}\n" for k, v in fields.items()]
+        block.append("\n")
+        lines[at:at] = block
+
+        with open(LOCATOR_YML, "w") as fh:
+            fh.writelines(lines)
+        return True, None
 
     field_indent = " " * (svc_indent + 2)
     for i in range(svc_line + 1, end):
@@ -1364,6 +1405,24 @@ def get_policy():
     return jsonify(out)
 
 
+def _is_name_locked(name):
+    """True when a name is pinned by code and cannot be unpinned from the grid.
+
+    _PINNED_NAMES is a substring list baked into this file, and _is_pinned()
+    consults it regardless of what locator.yml says — so unticking one of these
+    in the dashboard changed the YAML but not the behaviour. The box lied.
+    These are cemented instead: shown ticked, disabled, and refused server-side.
+    """
+    low = (name or "").lower()
+    return any(p in low for p in _PINNED_NAMES)
+
+
+@app.route("/api/policy/locked", methods=["GET"])
+def get_policy_locked():
+    """The hardcoded pin substrings, so the grid can cement matching rows."""
+    return jsonify({"names": sorted(_PINNED_NAMES)})
+
+
 @app.route("/api/policy", methods=["POST"])
 def set_policy():
     """Flip one flag from the dashboard.
@@ -1385,6 +1444,9 @@ def set_policy():
         key, value = "deployment_type", "essential" if data["essential"] else "optional"
     elif "stationary" in data:
         key, value = "location_type", "stationary" if data["stationary"] else "mobile"
+        if not data["stationary"] and _is_name_locked(service):
+            return jsonify({"error": f"'{service}' is cemented — pinned in code, "
+                                     f"cannot be unpinned"}), 409
     else:
         return jsonify({"error": "Nothing to set"}), 400
 
@@ -1395,6 +1457,61 @@ def set_policy():
     _policy_cache["mtime"] = None      # force reload on next read
     beast_log(f"\U0001f4dd policy: {service} {key}={value}")
     return jsonify({"ok": True, "service": service, key: value})
+
+
+@app.route("/api/policy/bulk", methods=["POST"])
+def set_policy_bulk():
+    """Apply a batch of grid checkbox changes in one request.
+
+    Body: {"changes": [{"service": "forge", "stationary": true},
+                       {"service": "redis", "essential": false}, ...]}
+
+    The tactical grid stages ticks locally and sends them here on Save, so a
+    mis-click can be discarded before it ever reaches locator.yml. Each entry
+    carries exactly one flag, matching /api/policy's rule that setting Pinned
+    must never quietly clear Essential.
+
+    Partial success is normal and reported per service: one unwritable entry
+    should not discard the rest of the batch.
+    """
+    data = request.get_json(silent=True) or {}
+    changes = data.get("changes")
+    if not isinstance(changes, list) or not changes:
+        return jsonify({"error": "No changes"}), 400
+
+    saved, failed = [], []
+    for entry in changes:
+        if not isinstance(entry, dict):
+            failed.append({"service": str(entry), "error": "Malformed entry"})
+            continue
+
+        service = (entry.get("service") or "").strip().split("@")[0]
+        if not service:
+            failed.append({"service": "", "error": "No service"})
+            continue
+
+        if "essential" in entry:
+            key, value = "deployment_type", "essential" if entry["essential"] else "optional"
+        elif "stationary" in entry:
+            key, value = "location_type", "stationary" if entry["stationary"] else "mobile"
+            if not entry["stationary"] and _is_name_locked(service):
+                failed.append({"service": service,
+                               "error": "cemented — pinned in code, cannot be unpinned"})
+                continue
+        else:
+            failed.append({"service": service, "error": "Nothing to set"})
+            continue
+
+        ok, err = _write_policy_field(service, key, value)
+        if ok:
+            saved.append({"service": service, key: value})
+            beast_log(f"\U0001f4dd policy: {service} {key}={value}")
+        else:
+            failed.append({"service": service, "error": err})
+
+    # One invalidation for the whole batch — every write went to the same file.
+    _policy_cache["mtime"] = None
+    return jsonify({"ok": not failed, "saved": saved, "failed": failed})
 
 
 SSH_MOUNT_DIR   = "/root/.ssh"
@@ -2230,6 +2347,77 @@ def claim_migration(mig_id):
     return jsonify({"result": "claimed", "id": mig_id})
 
 
+# A migration that "succeeded" is not finished — the agent only reports that its
+# commands ran, not that the service came up. agent-0 unit8→unit7 stopped on the
+# source, reported DONE, and started nowhere. These drive the verify pass that
+# turns that silent outage into a loud failure plus a rollback.
+MIGRATION_VERIFY_TIMEOUT  = int(os.environ.get("MIGRATION_VERIFY_TIMEOUT", 300))
+MIGRATION_VERIFY_INTERVAL = int(os.environ.get("MIGRATION_VERIFY_INTERVAL", 15))
+MIGRATION_START_TYPES     = ("git_pull_and_start", "native_prereq_and_start")
+
+
+def _service_online_at(container, unit):
+    """True when the registry shows `container` ONLINE on `unit`."""
+    target = (container or "").split("@")[0].lower()
+    with lock:
+        for svc in registry.get("services", {}).values():
+            if ((svc.get("name") or "").split("@")[0].lower() == target
+                    and svc.get("host") == unit
+                    and svc.get("status") == "ONLINE"):
+                return True
+    return False
+
+
+def _verify_migration(mig_id):
+    """Confirm the service actually came up on the target; roll back if not.
+
+    Runs in its own thread after a start-type migration reports success. The
+    registry only refreshes on the agent's tick, so the timeout has to outlast
+    one — hence 300s by default rather than something snappier.
+
+    On failure the source is told to start the container again. That half is the
+    whole point: the source was stopped before the target was tried, so without
+    it a failed migration leaves the service running on no node at all.
+    """
+    with migration_lock:
+        mig = migration_queue.get(mig_id)
+        if not mig:
+            return
+        container = mig.get("container", "")
+        to_node   = mig.get("to_node", "")
+        from_node = mig.get("from_node", "")
+
+    deadline = time.time() + MIGRATION_VERIFY_TIMEOUT
+    while time.time() < deadline:
+        time.sleep(MIGRATION_VERIFY_INTERVAL)
+        if _service_online_at(container, to_node):
+            with migration_lock:
+                mig = migration_queue.get(mig_id)
+                if mig:
+                    mig["status"]       = "DONE"
+                    mig["verified"]     = True
+                    mig["completed_at"] = datetime.now(timezone.utc).isoformat()
+            print(f"✅ MIGRATION {mig_id}: verified '{container}' ONLINE on {to_node}")
+            return
+
+    reason = (f"'{container}' did not come up on {to_node} within "
+              f"{MIGRATION_VERIFY_TIMEOUT}s")
+    with migration_lock:
+        mig = migration_queue.get(mig_id)
+        if mig:
+            mig["status"]       = "FAILED"
+            mig["verified"]     = False
+            mig["error"]        = reason
+            mig["completed_at"] = datetime.now(timezone.utc).isoformat()
+    print(f"❌ MIGRATION {mig_id}: {reason}")
+
+    if from_node and from_node != to_node:
+        _queue_command(from_node, container, "start", source="migration-rollback")
+        print(f"↩️  ROLLBACK: queued start of '{container}' back on {from_node}")
+    emit_event("migration", from_container=from_node, to_container=to_node,
+               unit=to_node, container=container, success=False)
+
+
 @app.route("/api/migrations/complete", methods=["POST"])
 def complete_migration():
     """
@@ -2242,15 +2430,32 @@ def complete_migration():
     mig_id  = data.get("id")
     success = data.get("success", True)
 
+    verify_after = False
     with migration_lock:
         if mig_id in migration_queue:
             mig = migration_queue[mig_id]
-            mig["status"]       = "DONE" if success else "FAILED"
-            mig["completed_at"] = datetime.now(timezone.utc).isoformat()
-            print(f"{'✅' if success else '❌'} MIGRATION {mig_id}: {'DONE' if success else 'FAILED'}")
-            emit_event("migration", from_container=mig.get("from_node", ""),
-                       to_container=mig.get("to_node", ""), unit=mig.get("to_node", ""),
-                       container=mig.get("container", ""), success=success)
+
+            # A start-type migration reporting success only means its commands
+            # ran. Hold it at VERIFYING until the registry actually shows the
+            # service up on the target — marking DONE here is what let a
+            # target-side failure read as a completed move.
+            if success and mig.get("type") in MIGRATION_START_TYPES:
+                mig["status"]      = "VERIFYING"
+                mig["verifying_at"] = datetime.now(timezone.utc).isoformat()
+                verify_after = True
+                print(f"🔎 MIGRATION {mig_id}: agent reported success — verifying "
+                      f"'{mig.get('container')}' on {mig.get('to_node')}")
+            else:
+                mig["status"]       = "DONE" if success else "FAILED"
+                mig["completed_at"] = datetime.now(timezone.utc).isoformat()
+                print(f"{'✅' if success else '❌'} MIGRATION {mig_id}: {'DONE' if success else 'FAILED'}")
+            # Deferred while VERIFYING — _verify_migration emits the failure
+            # event itself, and a success event here would announce an outcome
+            # nothing has checked yet.
+            if not verify_after:
+                emit_event("migration", from_container=mig.get("from_node", ""),
+                           to_container=mig.get("to_node", ""), unit=mig.get("to_node", ""),
+                           container=mig.get("container", ""), success=success)
 
             # When a git_push_and_stop finishes, queue the follow-on pull on the target.
             # dedup     → git_pull_only      (container already running on target, just sync state)
@@ -2293,7 +2498,13 @@ def complete_migration():
                 }
                 print(f"🔁 AUTO-QUEUED native_prereq_and_start {start_id} → {mig.get('to_node')}")
 
-    return jsonify({"result": "acknowledged"})
+    # Outside the lock: the verifier polls for minutes and takes the same lock.
+    if verify_after:
+        threading.Thread(target=_verify_migration, args=(mig_id,),
+                         daemon=True, name=f"verify-{mig_id}").start()
+
+    return jsonify({"result": "acknowledged",
+                    "verifying": verify_after})
 
 
 
@@ -2992,6 +3203,11 @@ _PINNED_NAMES = {
     "matrix_synapse", "matrix_element", "matrix_sms_bridge",
     "lokey", "lokey-client",
     "wg-easy", "crowdsec", "fail2ban",
+    # Public web front doors. Both are bound to unit8 by an A record in pdns and
+    # by Traefik's file provider, so migrating one moves the compose file while
+    # DNS keeps pointing at unit8 — the site just goes dark. locator.yml already
+    # pins them; this makes it uneditable from the grid as well.
+    "main-site", "client-portal",
 }
 
 
@@ -4238,6 +4454,30 @@ def active_discovery_scanner():
 
 # ── WEBSITE PINGER ───────────────────────────────────────────────────────────
 
+# Hosts fronted by Sablier, which starts their container on demand and stops it
+# again when idle. Polling one of these IS traffic: the uptime check wakes the
+# container, Sablier expires the session, the next check wakes it again, and the
+# service never actually sleeps. Monitoring has to leave them alone to work.
+ON_DEMAND_HOSTS = {
+    h.strip().lower()
+    for h in os.environ.get(
+        "ON_DEMAND_HOSTS",
+        "pgadmin.theofficialblacksheepco.com,a0.theofficialblacksheepco.online"
+    ).split(",")
+    if h.strip()
+}
+
+
+def _is_on_demand_url(url):
+    """True when this URL points at a Sablier-managed host — do not poll it."""
+    from urllib.parse import urlparse
+    try:
+        host = urlparse(str(url or "")).hostname or ""
+    except Exception:
+        return False
+    return host.lower() in ON_DEMAND_HOSTS
+
+
 def website_pinger():
     """Discovers websites from Docker Traefik labels, registers them using container status."""
     if not docker_client:
@@ -4300,7 +4540,8 @@ def url_status_checker():
         with lock:
             targets = [(sid, svc.get("url")) for sid, svc in registry["services"].items()
                        if svc.get("category") in ("websites", "serverless")
-                       and str(svc.get("url", "")).startswith("http")]
+                       and str(svc.get("url", "")).startswith("http")
+                       and not _is_on_demand_url(svc.get("url"))]
 
         changed = False
         for sid, url in targets:

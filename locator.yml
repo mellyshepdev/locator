@@ -76,6 +76,21 @@ Service:
     units: "8"
     instances: 1
 
+  # The two public web front doors. Both are bound to unit8 by an A record in
+  # pdns and by Traefik's file provider, so a migration would move the compose
+  # file while DNS kept pointing here — the site would simply go dark.
+  main-site:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
+  client-portal:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
   pdns:
     deployment_type: essential
     location_type: stationary
@@ -121,3 +136,4 @@ Service:
         INPUT_PROFILE: journald        # Debian 13, journald-only
       unit4:
         INPUT_PROFILE: syslog          # Ubuntu 22.04, rsyslog active
+

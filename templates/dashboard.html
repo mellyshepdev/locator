@@ -911,6 +911,24 @@
                 </tr></thead>
                 <tbody id="tbody-docker"></tbody>
             </table></div>
+            <!-- Appears only while Essential/Stationary ticks are staged. Until
+                 Save is pressed nothing has been written to locator.yml. -->
+            <div id="policy-save-bar" style="display:none;align-items:center;gap:12px;
+                        margin-top:10px;padding:8px 12px;border:1px solid #ffaa00;
+                        border-radius:4px;background:rgba(255,170,0,0.08);">
+                <span style="color:#ffaa00;font-size:12px;">
+                    Unsaved policy changes — highlighted below
+                </span>
+                <span style="flex:1"></span>
+                <button id="policy-discard-btn" onclick="discardPolicyChanges()"
+                        style="cursor:pointer;background:transparent;color:#888;
+                               border:1px solid #555;border-radius:3px;padding:5px 12px;
+                               font-family:inherit;font-size:11px;">DISCARD</button>
+                <button id="policy-save-btn" onclick="savePolicyChanges()"
+                        style="cursor:pointer;background:#ffaa00;color:#111;border:none;
+                               border-radius:3px;padding:5px 14px;font-weight:bold;
+                               font-family:inherit;font-size:11px;">SAVE</button>
+            </div>
         </div>
 
         <!-- PURPLE RECTANGLE: WEBSITES -->
@@ -1847,11 +1865,25 @@
         // ticks a box or edits the YAML, so it does not need the 10s poll.
         let _policyData = {};
 
+        // Substrings that _is_pinned() honours in code no matter what the YAML
+        // says. Rows matching one are cemented: always pinned, never tickable.
+        let _policyLocked = [];
+
         function loadPolicy() {
-            return fetch('/api/policy')
+            const policy = fetch('/api/policy')
                 .then(r => r.json())
                 .then(d => { _policyData = d || {}; })
                 .catch(() => { /* grid still renders; boxes just read unticked */ });
+            const locked = fetch('/api/policy/locked')
+                .then(r => r.json())
+                .then(d => { _policyLocked = (d && d.names) || []; })
+                .catch(() => { /* fall back to everything editable */ });
+            return Promise.all([policy, locked]);
+        }
+
+        function isCemented(name) {
+            const low = (name || '').toLowerCase();
+            return _policyLocked.some(p => low.indexOf(p) !== -1);
         }
 
         function policyFor(item) {
@@ -1864,55 +1896,152 @@
             return null;
         }
 
+        // Ticks are staged here, not written. Keyed by bare service name:
+        //   { forge: { stationary: true }, redis: { essential: false } }
+        // Nothing reaches locator.yml until Save posts the batch, so a mis-click
+        // on a pin is recoverable — it used to hit the API on the click itself.
+        let _policyPending = {};
+
+        function pendingCount() {
+            return Object.values(_policyPending)
+                         .reduce((n, flags) => n + Object.keys(flags).length, 0);
+        }
+
+        // The saved value, ignoring anything staged.
+        function policySaved(name, flag) {
+            const pol = _policyData[name.toLowerCase()];
+            if (pol) return !!pol[flag];
+            for (const key in _policyData) {
+                if (key && name.toLowerCase().indexOf(key) !== -1) return !!_policyData[key][flag];
+            }
+            return false;   // not in locator.yml yet — an unticked box, not a dash
+        }
+
+        function stagePolicy(name, flag, checked) {
+            if (checked === policySaved(name, flag)) {
+                // Toggled back to where it started: stop tracking it.
+                if (_policyPending[name]) {
+                    delete _policyPending[name][flag];
+                    if (!Object.keys(_policyPending[name]).length) delete _policyPending[name];
+                }
+            } else {
+                (_policyPending[name] = _policyPending[name] || {})[flag] = checked;
+            }
+            refreshPolicyBar();
+        }
+
         function policyCell(item, flag) {
             const td = document.createElement('td');
             td.style.textAlign = 'center';
-            const pol = policyFor(item);
             const name = (item.name || '').split('@')[0];
+            const pol = policyFor(item);
 
-            if (!pol) {
-                // No policy entry means nothing to toggle — say so rather than
-                // showing an unticked box that silently fails on click.
-                td.innerHTML = `<span title="Not in locator.yml — add it there first"
-                                      style="color:#555;font-size:12px;">&mdash;</span>`;
+            // Cemented: _is_pinned() returns true for this name from code, so the
+            // pin cannot be lifted here. Show it ticked and locked rather than
+            // offering a box that changes the YAML and nothing else.
+            if (flag === 'stationary' && isCemented(name)) {
+                const lock = document.createElement('input');
+                lock.type = 'checkbox';
+                lock.checked = true;
+                lock.disabled = true;
+                lock.style.cursor = 'not-allowed';
+                lock.style.accentColor = '#00f0ff';
+                lock.title = 'Cemented — pinned in locator\'s code, cannot be unpinned';
+                td.appendChild(lock);
+                const mark = document.createElement('span');
+                mark.textContent = ' \u{1F512}';
+                mark.style.fontSize = '10px';
+                mark.title = lock.title;
+                td.appendChild(mark);
                 return td;
             }
 
+            const staged  = _policyPending[name] && (flag in _policyPending[name]);
+            const checked = staged ? _policyPending[name][flag] : policySaved(name, flag);
+
             const cb = document.createElement('input');
             cb.type = 'checkbox';
-            cb.checked = !!pol[flag];
+            // Staged value wins over the server's: the grid re-renders on the
+            // 10s registry poll, and reading _policyData here would silently
+            // undo a tick the moment the poll landed.
+            cb.checked = checked;
             cb.style.cursor = 'pointer';
-            cb.title = flag === 'essential'
+            cb.dataset.policyName = name;
+            cb.dataset.policyFlag = flag;
+            cb.title = (flag === 'essential'
                 ? 'Must always be running — restart is queued as soon as it goes OFFLINE'
-                : 'Never migrate off this node';
+                : 'Never migrate off this node')
+                + (pol ? '' : ' (will be added to locator.yml on save)');
+            if (staged) td.style.background = 'rgba(255,170,0,0.18)';
             cb.onclick = (e) => e.stopPropagation();
-            cb.onchange = async () => {
-                cb.disabled = true;
-                const body = { service: name };
-                body[flag] = cb.checked;
-                try {
-                    const res = await fetch('/api/policy', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body)
-                    });
-                    const data = await res.json();
-                    if (res.ok && data.ok) {
-                        pol[flag] = cb.checked;
-                        notify(name + ' ' + flag + ' = ' + cb.checked, 'info');
-                    } else {
-                        cb.checked = !cb.checked;
-                        notify('Policy update failed: ' + (data.error || res.status), 'error');
-                    }
-                } catch (err) {
-                    cb.checked = !cb.checked;
-                    notify('Policy update failed: ' + err.message, 'error');
-                } finally {
-                    cb.disabled = false;
-                }
+            cb.onchange = () => {
+                stagePolicy(name, flag, cb.checked);
+                td.style.background = (_policyPending[name] && (flag in _policyPending[name]))
+                    ? 'rgba(255,170,0,0.18)' : '';
             };
             td.appendChild(cb);
             return td;
+        }
+
+        function refreshPolicyBar() {
+            const bar = document.getElementById('policy-save-bar');
+            if (!bar) return;
+            const n = pendingCount();
+            bar.style.display = n ? 'flex' : 'none';
+            const btn = document.getElementById('policy-save-btn');
+            if (btn) btn.textContent = 'SAVE ' + n + ' CHANGE' + (n === 1 ? '' : 'S');
+        }
+
+        function discardPolicyChanges() {
+            _policyPending = {};
+            refreshPolicyBar();
+            if (lastRegistryData) renderGrid(lastRegistryData);
+            notify('Pending policy changes discarded', 'info');
+        }
+
+        async function savePolicyChanges() {
+            const changes = [];
+            for (const name in _policyPending) {
+                for (const flag in _policyPending[name]) {
+                    changes.push({ service: name, [flag]: _policyPending[name][flag] });
+                }
+            }
+            if (!changes.length) return;
+
+            const btn = document.getElementById('policy-save-btn');
+            if (btn) { btn.disabled = true; btn.textContent = 'SAVING…'; }
+            try {
+                const res  = await fetch('/api/policy/bulk', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ changes })
+                });
+                const data = await res.json();
+
+                // Clear only what actually got written; anything that failed
+                // stays staged and highlighted so it is not lost silently.
+                const failedNames = new Set((data.failed || []).map(f => f.service));
+                for (const name in _policyPending) {
+                    if (!failedNames.has(name)) delete _policyPending[name];
+                }
+
+                await loadPolicy();
+                if (lastRegistryData) renderGrid(lastRegistryData);
+                refreshPolicyBar();
+
+                if (data.ok) {
+                    notify('Saved ' + (data.saved || []).length + ' policy change(s)', 'success');
+                } else {
+                    notify('Saved ' + (data.saved || []).length + ', failed: ' +
+                           (data.failed || []).map(f => f.service + ' (' + f.error + ')').join(', '),
+                           'error');
+                }
+            } catch (err) {
+                notify('Policy save failed: ' + err.message, 'error');
+            } finally {
+                if (btn) btn.disabled = false;
+                refreshPolicyBar();
+            }
         }
 
         function loadRegistryData() {
