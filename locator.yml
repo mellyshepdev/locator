@@ -79,61 +79,9 @@ Service:
   # The two public web front doors. Both are bound to unit8 by an A record in
   # pdns and by Traefik's file provider, so a migration would move the compose
   # file while DNS kept pointing here — the site would simply go dark.
-  main-site:
+  main-site-apache:
     deployment_type: essential
     location_type: stationary
     units: "8"
     instances: 1
-
-  client-portal:
-    deployment_type: essential
-    location_type: stationary
-    units: "8"
-    instances: 1
-
-  pdns:
-    deployment_type: essential
-    location_type: stationary
-    units: "8_9"   # quoted: YAML reads 8_9 as int 89
-    instances: 1
-
-  lokey:
-    deployment_type: essential
-    location_type: stationary
-    units: all
-    instances: 1
-
-  # filebeat was replaced by fluent-bit (see live-logger). Kept only so the
-  # name resolves if a stale agent ever reports it; it deploys nowhere.
-  filebeat:
-    deployment_type: optional
-    location_type: stationary
-    units: current_unit
-    instances: 1
-
-  fluent-bit:
-    deployment_type: essential
-    location_type: stationary
-    inactivity_timeout_minutes: "0"
-    units: "4_7_8_9"
-    instances: 1
-    project_dir: /home/swoopg111/projects/live-logger
-    git_remote: https://gitlab.com/gbonds1/live-logger.git
-    env:
-      common:
-        # live-logger-api is published on unit8's TAILNET address only — it
-        # has no auth of its own and unit8 has a public IP with ufw inactive.
-        INGEST_HOST: 100.94.36.111
-        INGEST_PORT: "8080"
-      unit8:
-        INPUT_PROFILE: hub
-        INGEST_HOST: live-logger-api   # same docker network, no tailnet hop
-        INGEST_BIND: 100.94.36.111
-        COMPOSE_PROFILES: hub          # only the hub runs the UI + API
-      unit7:
-        INPUT_PROFILE: journald        # Debian 13, journald-only
-      unit9:
-        INPUT_PROFILE: journald        # Debian 13, journald-only
-      unit4:
-        INPUT_PROFILE: syslog          # Ubuntu 22.04, rsyslog active
 
