@@ -2,7 +2,13 @@ services:
   locator:
     build: .
     container_name: locator
-    restart: "no"
+    # Was restart:"no", so any crash left locator down until a human
+    # noticed. That is why it stayed down for a day with no failover.
+    restart: unless-stopped
+    # unit4 has no Traefik of its own and its :80/:443 are NSG-blocked, so
+    # unit8 Traefik reaches locator over the tailnet on this port.
+    ports:
+      - "50500:5000"
     volumes:
       - ./registry_data:/app/data
       - ./templates:/app/templates
@@ -14,13 +20,16 @@ services:
       - /home/swoopg111/.ssh:/root/.ssh:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      - UNIT_NAME=unit8
+      - UNIT_NAME=unit4
       - COMPOSE_DIR=/app/data/compose
       - BALANCE_HIGH=65
       - BALANCE_DIFF=5
       - BALANCE_STRIKES=2
       - BALANCE_COOLDOWN=300
       - OOM_THRESHOLD=90
+      # Idle auto-shutdown fires at 15 minutes of no traffic, not the 1h default.
+      # Only containers labelled locator.idle.stop=true are eligible.
+      - IDLE_DEFAULT_TIMEOUT=900
       - GIT_AUTO_PUSH=true
       - GIT_REMOTE=${GIT_REMOTE:-}
       - PYTHONUNBUFFERED=1
