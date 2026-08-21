@@ -48,6 +48,19 @@ services:
       - TRACCAR_HOST=traccar.prime-quality.online
       - TRACCAR_PASS=${TRACCAR_PASS}
       - LOCATOR_ADMIN_KEY=${LOCATOR_ADMIN_KEY:-}
+      # ── CLEARANCE (levels 1-10) ────────────────────────────────────────
+      # Master switch. While false the gate is installed but inert and the
+      # Locator behaves exactly as it did before — that is the safe state to
+      # deploy in. Flip to true only once a real login shows clearance-<n> in
+      # realm_access.roles (see docs/CLEARANCE.md).
+      - CLEARANCE_ENFORCE=${CLEARANCE_ENFORCE:-false}
+      # Heartbeat/ingest routes (/register, node metrics, command polling) are
+      # written by unattended agents that carry LOCATOR_ADMIN_KEY, not a user
+      # token. Leave false until every agent ships the key, else the mesh goes
+      # dark the moment enforcement turns on.
+      - CLEARANCE_ENFORCE_INGEST=${CLEARANCE_ENFORCE_INGEST:-false}
+      - OIDC_ISSUER=${OIDC_ISSUER:-https://bsco-keycloak.fly.dev/realms/blacksheep}
+      - OIDC_AUDIENCE=${OIDC_AUDIENCE:-locator}
     labels:
       - "traefik.enable=true"
       # UI router — protected by Keycloak (catch-all, lower priority)

@@ -9,3 +9,8 @@ registry_data/
 *.bak2-*
 *.bak3-*
 *.bak4-*
+
+# FreeIPA — the directory's own state and its secrets. /data holds the CA
+# private key; .env holds the admin and LDAP bind passwords.
+freeipa/data/
+freeipa/.env

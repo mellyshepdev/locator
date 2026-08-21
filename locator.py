@@ -60,6 +60,7 @@ from flask import Flask, request, jsonify, Response, render_template
 
 import notifier
 import db
+import clearance
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -783,6 +784,12 @@ def _git_push_worker():
 
 app = Flask(__name__)
 
+# Clearance gate (levels 1-10). Registers a before_request that enforces the
+# per-endpoint minimums in clearance.ROUTE_CLEARANCE. Inert until
+# CLEARANCE_ENFORCE=true, so this can ship ahead of the Keycloak/FreeIPA
+# cutover without changing any current behaviour.
+clearance.install(app)
+
 
 # ── CORS ────────────────────────────────────────────────────────────────────
 
@@ -830,17 +837,22 @@ def register_device_qr():
 
 @app.route("/api/registry", methods=["GET"])
 def get_full_registry():
-    """Return the full registry — services + nodes."""
+    """Return the registry — services + nodes — scoped to the caller's clearance."""
     with lock:
-        return jsonify(registry)
+        snapshot = {
+            "services": clearance.project(registry["services"]),
+            "nodes":    clearance.project(registry["nodes"]),
+            "updated":  registry["updated"],
+        }
+    return jsonify(snapshot)
 
 
 @app.route("/services", methods=["GET"])
 @app.route("/api/services", methods=["GET"])
 def get_services():
-    """Return all registered services."""
+    """Return the registered services the caller is cleared to see."""
     with lock:
-        return jsonify(registry["services"])
+        return jsonify(clearance.project(registry["services"]))
 
 
 @app.route("/services/<name>", methods=["GET"])
@@ -850,8 +862,11 @@ def get_service(name):
         service = registry["services"].get(name)
         if not service:
             _, service = _find_service_entry(name)
-    if service:
-        return jsonify(service)
+    if service and clearance.visible(service):
+        return jsonify(clearance.redact(service))
+    # A service the caller may not see reports as absent rather than forbidden:
+    # a 403 here would confirm the name exists, which is half of what an
+    # unprivileged caller is fishing for.
     return jsonify({"error": f"Service '{name}' not found"}), 404
 
 
@@ -1753,9 +1768,9 @@ def deploy_compose(name):
 @app.route("/nodes", methods=["GET"])
 @app.route("/api/nodes", methods=["GET"])
 def get_nodes():
-    """Return all known nodes."""
+    """Return the known nodes the caller is cleared to see."""
     with lock:
-        return jsonify(registry["nodes"])
+        return jsonify(clearance.project(registry["nodes"]))
 
 
 @app.route("/nodes", methods=["POST"])
@@ -1809,6 +1824,24 @@ def health_check():
         "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT,
         "timestamp": datetime.now(timezone.utc).isoformat()
     })
+
+
+@app.route("/api/whoami", methods=["GET"])
+def whoami():
+    """
+    Identify the caller and report what its clearance unlocks.
+
+    Deliberately public: it answers for anonymous callers too (clearance 0),
+    which is what lets the dashboard tell "not signed in yet" apart from
+    "signed in but not cleared for this view" without a failed request first.
+    It reveals nothing about the registry — only about the caller's own token.
+    """
+    principal = clearance.current()
+    body = principal.to_dict()
+    body["levels"] = clearance.LEVEL_NAMES
+    if principal.via == "invalid-token":
+        body["token_error"] = principal.claims.get("error", "token rejected")
+    return jsonify(body)
 
 
 @app.route("/api/election", methods=["GET"])
@@ -1979,9 +2012,13 @@ def stream_events():
 
 @app.route("/registry.json", methods=["GET"])
 def download_registry():
-    """Serve the registry as a downloadable JSON file."""
+    """Serve the registry as a downloadable JSON file, scoped to the caller."""
     with lock:
-        data = json.dumps(registry, indent=2)
+        data = json.dumps({
+            "services": clearance.project(registry["services"]),
+            "nodes":    clearance.project(registry["nodes"]),
+            "updated":  registry["updated"],
+        }, indent=2)
     return Response(data, mimetype="application/json",
                     headers={"Content-Disposition": "attachment; filename=registry.json"})
 

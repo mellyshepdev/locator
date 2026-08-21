@@ -85,17 +85,97 @@
             realm: 'blacksheep',
             clientId: 'locator'
         });
+        window.kc = kc;
+
+        // Every same-origin request carries the access token from here on.
+        // Wrapping fetch once beats threading an Authorization header through
+        // the ~16 call sites below, and it means a call site added later is
+        // authenticated by default rather than by remembering to be.
+        // The old CSS gate hid the DOM but left /api/* answering to plain
+        // curl; the server now enforces clearance per endpoint, so the token
+        // is what actually gets the data back.
+        (function installAuthedFetch() {
+            var raw = window.fetch.bind(window);
+            window.fetch = function(input, init) {
+                var url = (typeof input === 'string') ? input : (input && input.url) || '';
+                var sameOrigin = !/^https?:\/\//i.test(url) || url.indexOf(window.location.origin) === 0;
+                if (!sameOrigin || !kc.authenticated) return raw(input, init);
+                // 30s of remaining validity, else refresh. Failure is
+                // non-fatal here: send the stale token and let the server's
+                // 401 drive the re-login, rather than blocking the request.
+                return kc.updateToken(30).catch(function() {}).then(function() {
+                    var opts = Object.assign({}, init || {});
+                    var headers = new Headers((init && init.headers) || {});
+                    if (kc.token) headers.set('Authorization', 'Bearer ' + kc.token);
+                    opts.headers = headers;
+                    return raw(input, opts);
+                });
+            };
+        })();
+
+        // Layer 4: hide what this clearance cannot reach. Purely cosmetic —
+        // the server refuses these endpoints regardless — but it stops the UI
+        // offering buttons that only ever produce a 403.
+        function applyClearance(me) {
+            window.CLEARANCE = me;
+            var allowed = me.views || [];
+            document.querySelectorAll('#ui-toggle .toggle-btn').forEach(function(btn) {
+                var view = btn.getAttribute('data-view');
+                if (view && allowed.indexOf(view) === -1) btn.style.display = 'none';
+            });
+            var badge = document.getElementById('clearance-badge');
+            if (badge) {
+                badge.textContent = 'CLEARANCE ' + me.clearance + ' — ' +
+                    String(me.clearance_name || '').toUpperCase() +
+                    (me.tenant ? ' · ' + me.tenant.toUpperCase() : '');
+                badge.style.display = 'block';
+            }
+            // If the active view is now off-limits (deep link, or a level that
+            // changed since last visit) fall back to the best one that isn't.
+            var active = document.querySelector('#ui-toggle .toggle-btn.active');
+            var activeView = active && active.getAttribute('data-view');
+            if (activeView && allowed.indexOf(activeView) === -1) {
+                var fallback = ['grid', 'map', '3js', 'traccar', 'yamls', 'exec']
+                    .filter(function(v) { return allowed.indexOf(v) !== -1; })[0];
+                if (fallback) switchView(fallback);
+            }
+        }
+
         kc.init({
             onLoad: 'login-required',
             pkceMethod: 'S256',
             checkLoginIframe: false
         })
             .then(function(auth) {
-                if (auth) {
-                    document.documentElement.classList.add('auth-ok');
-                } else {
+                if (!auth) {
                     authFailed('Keycloak login-required resolved without a session');
+                    return;
                 }
+                // Ask the server what this token is worth before revealing the
+                // page. /api/whoami is public and answers for anonymous
+                // callers too, so a clearance of 0 here means the account
+                // authenticated but has no level assigned in FreeIPA yet —
+                // worth saying plainly instead of showing an empty dashboard.
+                return fetch('/api/whoami')
+                    .then(function(r) { return r.json(); })
+                    .then(function(me) {
+                        if (me.enforced && (!me.clearance || me.clearance < 1)) {
+                            authFailed('Signed in as ' + (me.name || 'unknown') +
+                                       ' but no clearance level is assigned.');
+                            return;
+                        }
+                        document.documentElement.classList.add('auth-ok');
+                        applyClearance(me);
+                    })
+                    .catch(function(err) {
+                        // whoami unreachable: the server is the authority, and
+                        // it will refuse anything sensitive on its own. Show
+                        // the page rather than hard-failing on a hiccup.
+                        document.documentElement.classList.add('auth-ok');
+                        if (window.__reportClientError) {
+                            window.__reportClientError('whoami failed: ' + err, window.location.href);
+                        }
+                    });
             })
             .catch(function(err) {
                 authFailed('Keycloak init failed: ' + (err && err.message ? err.message : JSON.stringify(err)), err);
@@ -785,12 +865,13 @@
 
     <!-- UI TOGGLE -->
     <div id="ui-toggle">
-        <button class="toggle-btn" onclick="switchView('map')">Mesh Map</button>
-        <button class="toggle-btn active" onclick="switchView('grid')">Tactical Grid</button>
-        <button class="toggle-btn" onclick="switchView('3js')">3D Mesh</button>
-        <button class="toggle-btn" onclick="switchView('traccar')">Traccar Map</button>
-        <button class="toggle-btn" onclick="switchView('yamls')">YAMLs</button>
-        <button class="toggle-btn" onclick="switchView('exec')">Exec</button>
+        <button class="toggle-btn" data-view="map" onclick="switchView('map')">Mesh Map</button>
+        <button class="toggle-btn active" data-view="grid" onclick="switchView('grid')">Tactical Grid</button>
+        <button class="toggle-btn" data-view="3js" onclick="switchView('3js')">3D Mesh</button>
+        <button class="toggle-btn" data-view="traccar" onclick="switchView('traccar')">Traccar Map</button>
+        <button class="toggle-btn" data-view="yamls" onclick="switchView('yamls')">YAMLs</button>
+        <button class="toggle-btn" data-view="exec" onclick="switchView('exec')">Exec</button>
+        <span id="clearance-badge" style="display:none; margin-left:14px; align-self:center; font-family:'Courier New',monospace; font-size:10px; letter-spacing:2px; color:var(--neon-green); border:1px solid var(--neon-green); border-radius:3px; padding:3px 9px; opacity:0.85;"></span>
     </div>
 
     <!-- LIVE STATUS — shows the page is actually polling, and flags it loudly if it stops -->
@@ -1154,12 +1235,27 @@
     <script>
         // ── UI TOGGLE LOGIC ──
         function switchView(viewName) {
+            // Refuse views this clearance does not reach. The server rejects
+            // their endpoints anyway, so opening one would just render an
+            // empty panel full of 403s — and a deep link (/?view=exec) is the
+            // one path that gets here without going past a hidden button.
+            const me = window.CLEARANCE;
+            if (me && me.enforced && me.views && me.views.indexOf(viewName) === -1) {
+                if (typeof notify === 'function') {
+                    notify('Clearance ' + me.clearance + ' cannot open "' + viewName + '"', 'error');
+                }
+                return;
+            }
+
             document.querySelectorAll('.toggle-btn').forEach(btn => btn.classList.remove('active'));
             document.querySelectorAll('.view-container').forEach(vc => vc.classList.remove('active'));
 
-            const viewMap = { map: [1, 'view-map'], grid: [2, 'view-grid'], '3js': [3, 'view-3js'], traccar: [4, 'view-traccar'], yamls: [5, 'view-yamls'], exec: [6, 'view-exec'] };
-            const [btnIdx, viewId] = viewMap[viewName] || [1, 'view-map'];
-            document.querySelector(`#ui-toggle button:nth-child(${btnIdx})`).classList.add('active');
+            const viewMap = { map: 'view-map', grid: 'view-grid', '3js': 'view-3js', traccar: 'view-traccar', yamls: 'view-yamls', exec: 'view-exec' };
+            const viewId = viewMap[viewName] || 'view-map';
+            // Keyed off data-view rather than nth-child: the toggle bar now
+            // also holds the clearance badge, and buttons get hidden per level.
+            const btn = document.querySelector(`#ui-toggle .toggle-btn[data-view="${viewName}"]`);
+            if (btn) btn.classList.add('active');
             document.getElementById(viewId).classList.add('active');
 
             if (viewName === 'yamls') loadYamlList();
