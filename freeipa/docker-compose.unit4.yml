@@ -1,0 +1,93 @@
+# ── FREEIPA on unit4 — identity source for Locator clearance levels ─────────
+#
+# Two deliberate deviations from the generic recipe in docker-compose.yml:
+#
+#   bridge networking, not host — host networking was the first choice (better
+#     for Kerberos, which embeds addresses in tickets), but unit4's apache-web
+#     already publishes :8080, and Dogtag's PKI insists on 8080/8443. Under
+#     host networking that collision aborts the install outright
+#     (ipaserver/install/ca.py check_ports). Bridge keeps 8080/8443 inside the
+#     container namespace where they are only ever used internally, and leaves
+#     apache-web untouched. Everything clients actually need is published.
+#
+#   no integrated DNS — unit9 already runs the authoritative PowerDNS for
+#     theofficialblacksheepco.online, and unit4 has systemd-resolved holding
+#     127.0.0.53:53. Letting FreeIPA take over :53 would fight both. Installed
+#     with --setup-dns=no; the FQDN resolves via /etc/hosts on unit4 until the
+#     public A record (ipa -> 100.82.31.92) is approved.
+#
+# Published on unit4's tailnet address only (100.82.31.92): 389/636
+# (LDAP/LDAPS), 88/464 (Kerberos), 80/443 (web UI + CA). All verified free
+# before install. 8080/8443 stay internal — PKI only uses them container-side.
+#
+# Back up ./data — it holds the CA private key. Losing it means re-enrolling
+# every host.
+
+services:
+  freeipa:
+    image: freeipa/freeipa-server:rocky-9
+    container_name: freeipa
+    hostname: ipa.theofficialblacksheepco.online
+    restart: unless-stopped
+    command: ["no-exit"]
+    stop_grace_period: 60s
+    # The FQDN must resolve INSIDE the container to the container's own
+    # address, not unit4's. Dogtag's readiness probe fetches
+    # http://<fqdn>:8080/ca/admin/ca/getStatus against its own Tomcat; pointed
+    # at 100.82.31.92 that request leaves the container and lands on unit4's
+    # apache-web (which publishes :8080), returns 404, and the CA never comes
+    # up. Static IP on a dedicated bridge so this stays stable across restarts.
+    extra_hosts:
+      - "ipa.theofficialblacksheepco.online:172.30.0.10"
+    networks:
+      ipa_net:
+        ipv4_address: 172.30.0.10
+    ports:
+      # Bound to the tailnet address only. This directory holds every account
+      # in the org; it has no business listening on unit4's public interface.
+      - "100.82.31.92:389:389"     # LDAP   (StartTLS)
+      - "100.82.31.92:636:636"     # LDAPS  — what Keycloak federates over
+      - "100.82.31.92:88:88"       # Kerberos KDC
+      - "100.82.31.92:88:88/udp"
+      - "100.82.31.92:464:464"     # kpasswd
+      - "100.82.31.92:464:464/udp"
+      - "100.82.31.92:443:443"     # web UI + CA
+      - "100.82.31.92:80:80"
+    environment:
+      IPA_SERVER_HOSTNAME: ipa.theofficialblacksheepco.online
+      IPA_SERVER_IP: 100.82.31.92
+      PASSWORD: ${IPA_ADMIN_PASSWORD}
+      DEBUG_TRACE: 0
+    volumes:
+      - ./data:/data:Z
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      - /run
+      - /tmp
+    cgroup: host
+    security_opt:
+      - seccomp:unconfined
+      # Ubuntu 22.04 applies Docker's default AppArmor profile, which denies the
+      # mount operations systemd needs for the dirsrv unit's PrivateTmp /
+      # ProtectSystem sandboxing. Without this, 389-ds fails to start with
+      # 226/NAMESPACE ("Failed to set up mount namespacing") and the install
+      # aborts before the directory server ever comes up. Scoped to this
+      # container only; everything else on unit4 keeps its profile.
+      - apparmor:unconfined
+    cap_add:
+      - SYS_ADMIN
+      - SYS_TIME
+      - NET_ADMIN
+    healthcheck:
+      test: ["CMD", "bash", "-c", "kinit -k 2>/dev/null && ipa ping"]
+      interval: 60s
+      timeout: 15s
+      retries: 5
+      start_period: 1200s
+
+networks:
+  ipa_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
