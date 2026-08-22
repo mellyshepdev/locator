@@ -178,6 +178,12 @@ ROUTE_CLEARANCE = {
 
     # ── Root: arbitrary code execution ──────────────────────────────────
     "queue_exec":            ROOT,
+
+    # ── Root: identity administration ───────────────────────────────────
+    # Lists accounts and grants clearance levels. Whoever can reach these can
+    # promote themselves, so it sits at the same level as arbitrary exec.
+    "admin_pending_users":   ROOT,
+    "admin_set_clearance":   ROOT,
 }
 
 # Dashboard views, for layer 4. Keys match switchView()'s argument.
