@@ -3818,8 +3818,117 @@ def _queue_command(unit, container, action, source="idle", extra=None):
 
 EXEC_OUTPUT_RETENTION = 500   # completed exec commands kept for history (separate cap — output-bearing)
 
+# A container start/stop that hasn't reported in 3 minutes is stuck, but an exec
+# job routinely runs far longer than that — a refresh doing apt + git across a
+# dozen repos takes minutes. Re-serving it on the container clock would start a
+# SECOND copy on the same unit while the first is still running, so exec carries
+# its own, much longer retry window and its own hard timeout.
+EXEC_RETRY_SECONDS   = int(os.environ.get("EXEC_RETRY_SECONDS", 1800))
+EXEC_RUN_TIMEOUT     = int(os.environ.get("EXEC_RUN_TIMEOUT", 3600))    # DISPATCHED, never reported → TIMEOUT
+EXEC_PICKUP_TIMEOUT  = int(os.environ.get("EXEC_PICKUP_TIMEOUT", 1800))  # PENDING, never collected → MISSED
+EXEC_REAPER_INTERVAL = int(os.environ.get("EXEC_REAPER_INTERVAL", 60))
 
-def _queue_exec_command(unit, script, source="manual", label=None):
+
+def _record_run(cmd):
+    """Mirror a queued command into Postgres. Never let a DB hiccup break the
+    queue itself — the run must still happen if the bookkeeping fails."""
+    try:
+        db.record_command_run(cmd)
+    except Exception as e:
+        print(f"⚠️  Failed to record command run {cmd.get('id')}: {e}")
+
+
+def _update_run(cmd, error=None, duration_ms=None):
+    try:
+        db.update_command_run(cmd, error=error, duration_ms=duration_ms)
+    except Exception as e:
+        print(f"⚠️  Failed to update command run {cmd.get('id')}: {e}")
+
+
+def _output_tail(text, limit=200):
+    """Last meaningful line of a command's output, for an event-log one-liner."""
+    for line in reversed((text or "").strip().splitlines()):
+        line = line.strip()
+        if line:
+            return line[:limit]
+    return ""
+
+
+def _emit_run_event(cmd, duration_ms=None, error=None):
+    """Put an exec outcome on the event log the tactical grid reads.
+
+    A failure names the unit and carries the tail of stderr, so "which unit had
+    trouble, and roughly why" is answerable from the event feed alone without
+    going and fetching the full output.
+    """
+    label  = cmd.get("label") or "exec"
+    unit   = cmd.get("unit")
+    ok     = bool(cmd.get("success"))
+    status = cmd.get("status") or ("DONE" if ok else "FAILED")
+    if ok:
+        message = f"{label} on {unit} completed"
+        if duration_ms:
+            message += f" in {round(duration_ms / 1000)}s"
+    else:
+        message = f"{label} on {unit} {status.lower()}"
+        if cmd.get("exit_code") not in (None, 0):
+            message += f" (exit {cmd['exit_code']})"
+        detail = error or _output_tail(cmd.get("stderr")) or _output_tail(cmd.get("stdout"))
+        if detail:
+            message += f": {detail}"
+    return emit_event("exec_ok" if ok else "exec_failed",
+                      unit=unit, label=label, message=message, status=status,
+                      command_id=cmd.get("id"), exit_code=cmd.get("exit_code"),
+                      duration_ms=duration_ms, job_id=cmd.get("job_id"))
+
+
+def exec_run_reaper():
+    """Close out exec jobs that will never report.
+
+    Two distinct silences, kept distinct because they mean different things:
+    a job nobody ever collected (MISSED — that unit's lokey is not polling, so
+    the unit is effectively unmanaged) versus one collected and never reported
+    (TIMEOUT — it started and died, or is wedged). Both are removed from the
+    queue so the pending endpoint cannot re-serve them afterwards.
+    """
+    while True:
+        time.sleep(EXEC_REAPER_INTERVAL)
+        now = datetime.now(timezone.utc)
+        stale = []
+        try:
+            with command_lock:
+                for cmd in list(command_queue.values()):
+                    if cmd.get("action") != "exec":
+                        continue
+                    if cmd["status"] == "PENDING":
+                        stamp, limit, status = cmd.get("queued_at"), EXEC_PICKUP_TIMEOUT, "MISSED"
+                        reason = "no lokey collected the job — is the unit's agent running?"
+                    elif cmd["status"] == "DISPATCHED":
+                        stamp, limit, status = cmd.get("dispatched_at"), EXEC_RUN_TIMEOUT, "TIMEOUT"
+                        reason = "the unit collected the job and never reported back"
+                    else:
+                        continue
+                    try:
+                        age = (now - datetime.fromisoformat(stamp)).total_seconds()
+                    except (TypeError, ValueError):
+                        continue
+                    if age <= limit:
+                        continue
+                    cmd["status"]       = status
+                    cmd["success"]      = False
+                    cmd["completed_at"] = now.isoformat()
+                    stale.append((dict(cmd), reason))
+                    command_queue.pop(cmd["id"], None)
+            for cmd, reason in stale:
+                print(f"⌛ EXEC {cmd['status']}: '{(cmd.get('label') or cmd.get('script') or '')[:60]}' "
+                      f"on {cmd['unit']} — {reason}")
+                _update_run(cmd, error=reason)
+                _emit_run_event(cmd, error=reason)
+        except Exception as e:
+            print(f"⚠️ Error in exec run reaper: {e}")
+
+
+def _queue_exec_command(unit, script, source="manual", label=None, job_id=None):
     """Queue an arbitrary-shell-command job for a unit's lokey. Not deduped —
     every call is its own job, unlike the container start/stop queue above.
     Lokey is a pure executor here: it runs whatever is queued and reports
@@ -3828,7 +3937,7 @@ def _queue_exec_command(unit, script, source="manual", label=None):
         cmd_id = str(uuid.uuid4())[:8]
         cmd = {
             "id": cmd_id, "unit": unit, "action": "exec", "script": script,
-            "label": label, "source": source, "status": "PENDING",
+            "label": label, "source": source, "status": "PENDING", "job_id": job_id,
             "queued_at": datetime.now(timezone.utc).isoformat(),
             "dispatched_at": None, "completed_at": None, "success": None,
             "stdout": None, "stderr": None, "exit_code": None,
@@ -3840,7 +3949,9 @@ def _queue_exec_command(unit, script, source="manual", label=None):
             for old in done[: len(done) - EXEC_OUTPUT_RETENTION]:
                 command_queue.pop(old["id"], None)
         print(f"📨 EXEC QUEUED: '{script[:80]}' on {unit} ({source})")
-        return cmd
+        queued = dict(cmd)
+    _record_run(queued)
+    return queued
 
 
 @app.route("/api/exec", methods=["POST"])
@@ -3890,14 +4001,60 @@ def get_command(cmd_id):
 # ── SCRIPT SCHEDULER ─────────────────────────────────────────────────────────
 # Recurring exec jobs: "run this script on this unit every N" registered once,
 # fired forever by script_scheduler() below via the same _queue_exec_command
-# path a one-off /api/exec call uses. Interval-based (reuses _parse_duration,
-# e.g. "24h" for daily), not full cron — good enough for "every day/hour/etc."
-# without a cron-expression parser.
+# path a one-off /api/exec call uses.
+#
+# Two ways to say when. `interval` (reuses _parse_duration, e.g. "24h") counts
+# forward from the last firing, so its clock drifts by however long locator was
+# restarting — a job meant for 08:00 slides later every week. `times`
+# (["08:00","20:00"], UTC) pins the job to wall-clock slots instead, which is
+# what the fleet refresh needs to keep the staggered per-unit ordering the
+# crontabs had. Still not cron: no day-of-week or day-of-month.
 
 scheduled_jobs: dict = {}
 schedule_lock = threading.Lock()
 SCHEDULE_FILE = os.path.join(DATA_DIR, "scheduled_jobs.json")
 SCHEDULE_CHECK_INTERVAL = int(os.environ.get("SCHEDULE_CHECK_INTERVAL", 30))
+
+
+def _parse_times(value):
+    """['08:00', '20:00'] or '08:00,20:00' → sorted [(h, m), …]. [] if unusable."""
+    if not value:
+        return []
+    if isinstance(value, str):
+        value = [p for p in re.split(r"[,\s]+", value) if p]
+    out = []
+    for item in value:
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})", str(item).strip())
+        if not m:
+            continue
+        hour, minute = int(m.group(1)), int(m.group(2))
+        if 0 <= hour < 24 and 0 <= minute < 60:
+            out.append((hour, minute))
+    return sorted(set(out))
+
+
+def _next_wall_clock(times, after=None):
+    """Next UTC datetime matching one of `times`, strictly after `after`."""
+    after = after or datetime.now(timezone.utc)
+    for day in (0, 1):
+        base = (after + timedelta(days=day)).replace(second=0, microsecond=0)
+        for hour, minute in times:
+            candidate = base.replace(hour=hour, minute=minute)
+            if candidate > after:
+                return candidate
+    return after + timedelta(days=1)
+
+
+def _advance_job(job, now=None):
+    """Set job['next_run'] to its next firing. Wall-clock jobs land on their
+    next slot; interval jobs count forward from now, as they always did."""
+    now = now or datetime.now(timezone.utc)
+    times = _parse_times(job.get("times"))
+    if times:
+        job["next_run"] = _next_wall_clock(times, now).isoformat()
+    else:
+        job["next_run"] = (now + timedelta(seconds=job["interval_seconds"])).isoformat()
+    return job["next_run"]
 
 
 def persist_schedule():
@@ -3913,18 +4070,59 @@ def persist_schedule():
 
 
 def load_schedule():
-    """Load scheduled_jobs from disk on startup, if present."""
+    """Load scheduled_jobs from disk on startup, if present.
+
+    A job whose next_run is already in the past was due while locator was down.
+    Firing every one of those on boot would stampede the fleet (every unit
+    refreshing at once, hours off schedule), so instead each is recorded as a
+    MISSED run against its unit and rolled forward to the next slot. That way a
+    locator outage shows up in the same place as a failed run rather than as
+    silence — which is exactly how the last outage went unnoticed.
+    """
     if not os.path.exists(SCHEDULE_FILE):
         return
     try:
         with open(SCHEDULE_FILE) as f:
             jobs = json.load(f)
+        now = datetime.now(timezone.utc)
+        missed = []
         with schedule_lock:
             for job in jobs:
                 scheduled_jobs[job["id"]] = job
+                if not job.get("enabled", True):
+                    continue
+                try:
+                    due = datetime.fromisoformat(job["next_run"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if due < now:
+                    missed.append((dict(job), due))
+                    _advance_job(job, now)
         print(f"📅 Loaded {len(jobs)} scheduled job(s) from disk")
+        for job, due in missed:
+            _record_missed_run(job, due, now)
+        if missed:
+            persist_schedule()
     except Exception as e:
         print(f"⚠️  Failed to load schedule: {e}")
+
+
+def _record_missed_run(job, due, now=None):
+    """Log a firing that never happened because locator was not running."""
+    now = now or datetime.now(timezone.utc)
+    late = round((now - due).total_seconds() / 60)
+    cmd = {
+        "id": str(uuid.uuid4())[:8], "unit": job.get("unit"), "action": "exec",
+        "label": job.get("label"), "source": "scheduled", "script": job.get("script"),
+        "job_id": job.get("id"), "status": "MISSED", "success": False,
+        "queued_at": due.isoformat(), "completed_at": now.isoformat(),
+        "exit_code": None, "stdout": None, "stderr": None,
+    }
+    reason = f"locator was not running at the scheduled time ({late} min late, run skipped)"
+    print(f"⌛ SCHEDULE MISSED: {job.get('label') or job.get('id')} on {job.get('unit')} — {reason}")
+    _record_run(cmd)
+    _update_run(cmd, error=reason)
+    _emit_run_event(cmd, error=reason)
 
 
 def script_scheduler():
@@ -3939,14 +4137,13 @@ def script_scheduler():
                        and datetime.fromisoformat(j["next_run"]) <= now]
             for job in due:
                 cmd = _queue_exec_command(job["unit"], job["script"], source="scheduled",
-                                           label=job.get("label"))
+                                           label=job.get("label"), job_id=job["id"])
                 with schedule_lock:
                     live = scheduled_jobs.get(job["id"])
                     if live:
                         live["last_run"] = now.isoformat()
                         live["last_command_id"] = cmd["id"]
-                        live["next_run"] = (now + timedelta(
-                            seconds=live["interval_seconds"])).isoformat()
+                        _advance_job(live, now)
                 print(f"📅 SCHEDULED EXEC fired: job {job['id']} ('{job['script'][:60]}') on {job['unit']}")
             if due:
                 persist_schedule()
@@ -3956,8 +4153,13 @@ def script_scheduler():
 
 @app.route("/api/schedule", methods=["POST"])
 def create_schedule():
-    """Register a recurring exec job. Body: {unit, script, interval, label?}.
-    'interval' accepts the same '3600'/'90m'/'2h'/'24h' shorthand as idle timeouts."""
+    """Register a recurring exec job.
+
+    Body: {unit, script, label?} plus EITHER 'interval' ('3600'/'90m'/'24h',
+    the same shorthand idle timeouts use) OR 'times' (["08:00","20:00"], UTC
+    wall-clock slots). Wall-clock is the right choice for anything that should
+    land at a particular hour; interval for "every N regardless of when".
+    """
     denied = _require_admin_key()
     if denied:
         return denied
@@ -3966,24 +4168,34 @@ def create_schedule():
     script   = data.get("script") or ""
     interval = data.get("interval")
     label    = data.get("label")
-    if not unit or not script.strip() or not interval:
-        return jsonify({"error": "Provide 'unit', 'script', and 'interval'"}), 400
-    interval_seconds = _parse_duration(interval, None)
-    if not interval_seconds or interval_seconds <= 0:
-        return jsonify({"error": f"Couldn't parse interval '{interval}'"}), 400
+    times    = _parse_times(data.get("times"))
+    if not unit or not script.strip() or (not interval and not times):
+        return jsonify({"error": "Provide 'unit', 'script', and either 'interval' or 'times'"}), 400
+    if data.get("times") and not times:
+        return jsonify({"error": f"Couldn't parse times {data.get('times')!r} — expected e.g. [\"08:00\",\"20:00\"]"}), 400
+
+    interval_seconds = None
+    if not times:
+        interval_seconds = _parse_duration(interval, None)
+        if not interval_seconds or interval_seconds <= 0:
+            return jsonify({"error": f"Couldn't parse interval '{interval}'"}), 400
+
     now = datetime.now(timezone.utc)
     job_id = str(uuid.uuid4())[:8]
     job = {
         "id": job_id, "unit": unit, "script": script, "label": label,
-        "interval": interval, "interval_seconds": interval_seconds,
+        "interval": None if times else interval,
+        "interval_seconds": interval_seconds,
+        "times": [f"{h:02d}:{m:02d}" for h, m in times] or None,
         "enabled": True, "created_at": now.isoformat(),
-        "next_run": (now + timedelta(seconds=interval_seconds)).isoformat(),
-        "last_run": None, "last_command_id": None,
+        "next_run": None, "last_run": None, "last_command_id": None,
     }
+    _advance_job(job, now)
     with schedule_lock:
         scheduled_jobs[job_id] = job
     persist_schedule()
-    print(f"📅 SCHEDULE CREATED: '{script[:60]}' on {unit} every {interval}")
+    when = f"at {', '.join(job['times'])} UTC" if times else f"every {interval}"
+    print(f"📅 SCHEDULE CREATED: '{script[:60]}' on {unit} {when}")
     return jsonify({"result": "scheduled", "job": job})
 
 
@@ -4027,6 +4239,120 @@ def toggle_schedule(job_id):
         job = dict(job)
     persist_schedule()
     return jsonify({"result": "ok", "job": job})
+
+
+# ── FLEET REFRESH ────────────────────────────────────────────────────────────
+# The twice-daily housekeeping run (repo sync, package updates, docker prune)
+# used to be a crontab on each unit, which meant nothing anywhere knew whether
+# it had actually run: unit8's copy of the script was truncated to 0 bytes by a
+# failed self-update on 2026-08-19 and failed silently twice a day for three
+# days, and unit4 lost its copy in the rebuild and simply stopped refreshing.
+# Locator now owns the schedule, so every run is a command_runs row and every
+# failure is an event tagged with the unit it happened on.
+
+REFRESH_LABEL  = "refresh"
+REFRESH_SCRIPT = os.environ.get(
+    "REFRESH_SCRIPT",
+    # REFRESH_NO_FANOUT keeps each unit refreshing only itself — locator is what
+    # fans out now. UNIT_NAME is passed explicitly because lokey's chroot does
+    # not change the UTS namespace, so `hostname` inside it returns a container
+    # id rather than the unit.
+    'REFRESH_NO_FANOUT=1 UNIT_NAME={unit} "$HOME/.local/bin/refresh"',
+)
+
+
+def _refresh_script_for(unit):
+    return REFRESH_SCRIPT.format(unit=unit)
+
+
+def _refresh_jobs():
+    """Registered schedule entries that are fleet-refresh jobs."""
+    with schedule_lock:
+        return [dict(j) for j in scheduled_jobs.values() if j.get("label") == REFRESH_LABEL]
+
+
+@app.route("/api/refresh/status", methods=["GET"])
+def refresh_status():
+    """Per-unit refresh health: last outcome, when, how long, and what's next.
+
+    Deliberately unauthenticated and output-free — it carries status, timings
+    and exit codes but never script text or captured output, so the dashboard
+    can render it without handing anyone the fleet's command history.
+    """
+    try:
+        latest = db.latest_run_per_unit(REFRESH_LABEL)
+    except Exception as e:
+        print(f"⚠️  Failed to read refresh status: {e}")
+        return jsonify({"error": "run history unavailable"}), 503
+
+    now = datetime.now(timezone.utc)
+    units = {}
+    for job in _refresh_jobs():
+        unit = job["unit"]
+        entry = units.setdefault(unit, {"unit": unit})
+        entry["scheduled"] = job.get("times") or job.get("interval")
+        entry["enabled"]   = job.get("enabled", True)
+        entry["next_run"]  = job.get("next_run")
+    for unit, run in latest.items():
+        entry = units.setdefault(unit, {"unit": unit})
+        entry["last_run"] = run
+        # Overdue = the last run we have is older than a full cycle. Late
+        # answers "is this unit quietly not refreshing any more", which a
+        # per-run failure alone does not.
+        try:
+            age_h = (now - datetime.fromisoformat(run["queued_at"])).total_seconds() / 3600
+            entry["hours_since_last_run"] = round(age_h, 1)
+        except (TypeError, ValueError, KeyError):
+            pass
+
+    healthy = [u for u, e in units.items() if (e.get("last_run") or {}).get("status") == "DONE"]
+    return jsonify({
+        "label": REFRESH_LABEL,
+        "checked_at": now.isoformat(),
+        "units": sorted(units.values(), key=lambda e: e["unit"]),
+        "summary": {"units": len(units), "last_run_ok": len(healthy),
+                    "last_run_not_ok": len(units) - len(healthy)},
+    })
+
+
+@app.route("/api/refresh/runs", methods=["GET"])
+def refresh_runs():
+    """Full run history including captured output. Admin-gated: the output of a
+    refresh names repos, paths and package state."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    unit  = request.args.get("unit")
+    limit = min(int(request.args.get("limit", 50)), 500)
+    label = request.args.get("label", REFRESH_LABEL)
+    try:
+        return jsonify(db.list_command_runs(unit=unit, label=(label or None), limit=limit))
+    except Exception as e:
+        print(f"⚠️  Failed to read run history: {e}")
+        return jsonify({"error": "run history unavailable"}), 503
+
+
+@app.route("/api/refresh/run", methods=["POST"])
+def refresh_run_now():
+    """Fire a refresh immediately. Body: {unit} for one, or {all: true} for
+    every unit that has a refresh job registered."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    unit = (data.get("unit") or "").strip()
+    if unit:
+        units = [unit]
+    elif data.get("all"):
+        units = sorted({j["unit"] for j in _refresh_jobs() if j.get("enabled", True)})
+    else:
+        return jsonify({"error": "Provide 'unit' or 'all': true"}), 400
+    if not units:
+        return jsonify({"error": "no refresh jobs registered"}), 404
+    queued = [_queue_exec_command(u, _refresh_script_for(u), source="manual",
+                                  label=REFRESH_LABEL)
+              for u in units]
+    return jsonify({"result": "queued", "commands": queued})
 
 
 @app.route("/api/idle/report", methods=["POST"])
@@ -4080,18 +4406,26 @@ def commands_pending():
             if unit and cmd["unit"] != unit:
                 continue
             if cmd["status"] == "DISPATCHED":
-                # Re-serve only if the lokey never reported back (crashed mid-command)
+                # Re-serve only if the lokey never reported back (crashed mid-command).
+                # Exec jobs get the long window — see EXEC_RETRY_SECONDS — because
+                # 3 minutes of silence from a refresh means "still working", not
+                # "crashed", and re-serving would run a second copy alongside it.
+                retry_after = (EXEC_RETRY_SECONDS if cmd.get("action") == "exec"
+                               else COMMAND_RETRY_SECONDS)
                 try:
                     age = (now - datetime.fromisoformat(cmd["dispatched_at"])).total_seconds()
                 except (TypeError, ValueError):
-                    age = COMMAND_RETRY_SECONDS + 1
-                if age <= COMMAND_RETRY_SECONDS:
+                    age = retry_after + 1
+                if age <= retry_after:
                     continue
             elif cmd["status"] != "PENDING":
                 continue
             cmd["status"] = "DISPATCHED"
             cmd["dispatched_at"] = now.isoformat()
             out.append(dict(cmd))
+    for cmd in out:
+        if cmd.get("action") == "exec":
+            _update_run(cmd)
     return jsonify(out)
 
 
@@ -4122,6 +4456,14 @@ def commands_complete():
     if cmd["action"] == "exec":
         print(f"{'✅' if success else '❌'} EXEC '{(cmd.get('script') or '')[:80]}' on {cmd['unit']}: "
               f"{'ok' if success else 'failed'} (exit {cmd.get('exit_code')})")
+        duration_ms = None
+        try:
+            started = datetime.fromisoformat(cmd["dispatched_at"] or cmd["queued_at"])
+            duration_ms = int((now - started).total_seconds() * 1000)
+        except (TypeError, ValueError):
+            pass
+        _update_run(cmd, duration_ms=duration_ms)
+        _emit_run_event(cmd, duration_ms=duration_ms)
         return jsonify({"ok": True})
 
     print(f"{'✅' if success else '❌'} COMMAND {cmd['action']} '{cmd.get('container')}' on {cmd['unit']}: {'ok' if success else 'failed'}")
@@ -4658,6 +5000,20 @@ def start_background_workers():
             return
         _workers_started = True
 
+    # The command queue is in-memory, so anything a previous process left open
+    # can never complete. Close those rows now rather than leaving runs that
+    # read as "still going" forever. Done here, not in main()/the WSGI branch,
+    # because both call this function — which is the one place the two startup
+    # paths cannot drift apart.
+    try:
+        with command_lock:
+            live_ids = list(command_queue.keys())
+        for row in db.close_orphaned_runs(keep_ids=live_ids):
+            print(f"⌛ Closed orphaned run {row['id']} ({row.get('label') or 'exec'} on {row['unit']}) "
+                  "— locator restarted while it was in flight")
+    except Exception as e:
+        print(f"⚠️  Failed to close orphaned command runs: {e}")
+
     workers = [
         _log_forwarder,             # forward logs to beast-telemetry / live-logger
         heartbeat_reaper,
@@ -4671,6 +5027,7 @@ def start_background_workers():
         critical_service_watchdog,  # restarts apache/lokey/locator if OFFLINE
         traccar_feeder,             # lokey's GPS fixes into Traccar
         script_scheduler,           # recurring exec jobs from /api/schedule
+        exec_run_reaper,            # ages out exec jobs that never reported back
     ]
     if BALANCE_ENABLED:
         workers.append(load_balancer)

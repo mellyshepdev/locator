@@ -117,6 +117,39 @@ CREATE TABLE IF NOT EXISTS client_errors (
     received_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_client_errors_received_at ON client_errors (received_at DESC);
+
+-- Every exec job locator hands a unit, and how it ended.
+--
+-- The in-memory command_queue in locator.py is capped and dies with the
+-- process, so before this table a scheduled run left no trace at all: a unit
+-- whose refresh failed looked exactly like a unit whose refresh never ran.
+-- Rows are written when a command is queued and updated when the unit reports
+-- back, so a run that never reports is still visible -- as PENDING/DISPATCHED
+-- until the reaper ages it out to MISSED/TIMEOUT, which is the case that
+-- matters (a dead lokey, or a unit that dropped off the mesh).
+CREATE TABLE IF NOT EXISTS command_runs (
+    id            TEXT PRIMARY KEY,
+    unit          TEXT NOT NULL,
+    label         TEXT,
+    source        TEXT,
+    script        TEXT,
+    job_id        TEXT,
+    status        TEXT NOT NULL,
+    success       BOOLEAN,
+    exit_code     INT,
+    queued_at     TIMESTAMPTZ,
+    dispatched_at TIMESTAMPTZ,
+    completed_at  TIMESTAMPTZ,
+    duration_ms   INT,
+    stdout        TEXT,
+    stderr        TEXT,
+    error         TEXT,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_command_runs_unit_queued  ON command_runs (unit, queued_at DESC);
+CREATE INDEX IF NOT EXISTS idx_command_runs_label_queued ON command_runs (label, queued_at DESC);
+CREATE INDEX IF NOT EXISTS idx_command_runs_open         ON command_runs (status)
+    WHERE status IN ('PENDING', 'DISPATCHED');
 """
 
 
@@ -209,6 +242,133 @@ def list_events(limit=200):
             {"id": r["id"], "type": r["event_type"], "timestamp": r["created_at"].isoformat(), **r["data"]}
             for r in reversed(rows)
         ]
+
+
+def record_command_run(cmd):
+    """Insert (or refresh) the row for a queued exec command.
+
+    Called from _queue_exec_command, so the record exists from the moment the
+    job is handed out rather than only once it reports back -- the whole point
+    is that a run which never completes still leaves evidence.
+    """
+    with _conn() as conn:
+        if conn is None:
+            return
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO command_runs
+                       (id, unit, label, source, script, job_id, status, queued_at, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+                   ON CONFLICT (id) DO UPDATE
+                   SET status = EXCLUDED.status, updated_at = now()""",
+                (cmd.get("id"), cmd.get("unit"), cmd.get("label"), cmd.get("source"),
+                 cmd.get("script"), cmd.get("job_id"), cmd.get("status", "PENDING"),
+                 cmd.get("queued_at") or None),
+            )
+
+
+def update_command_run(cmd, error=None, duration_ms=None):
+    """Write a command's outcome back to its row: status, exit code, output, timings."""
+    with _conn() as conn:
+        if conn is None:
+            return
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE command_runs
+                      SET status = %s, success = %s, exit_code = %s,
+                          dispatched_at = COALESCE(%s, dispatched_at),
+                          completed_at  = COALESCE(%s, completed_at),
+                          duration_ms   = COALESCE(%s, duration_ms),
+                          stdout = COALESCE(%s, stdout),
+                          stderr = COALESCE(%s, stderr),
+                          error  = COALESCE(%s, error),
+                          updated_at = now()
+                    WHERE id = %s""",
+                (cmd.get("status"), cmd.get("success"), cmd.get("exit_code"),
+                 cmd.get("dispatched_at") or None, cmd.get("completed_at") or None,
+                 duration_ms, cmd.get("stdout"), cmd.get("stderr"), error, cmd.get("id")),
+            )
+
+
+def close_orphaned_runs(keep_ids=(), reason="locator restarted before the unit reported back"):
+    """Age out rows left open by a locator restart.
+
+    The command queue is in-memory, so anything still PENDING/DISPATCHED after a
+    restart can never be completed -- without this it would sit "in progress"
+    forever and read as a hung unit. Returns the rows it closed so the caller
+    can log them.
+    """
+    with _conn() as conn:
+        if conn is None:
+            return []
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """UPDATE command_runs
+                      SET status = 'LOST', success = false, error = %s, updated_at = now()
+                    WHERE status IN ('PENDING', 'DISPATCHED')
+                      AND NOT (id = ANY(%s))
+                RETURNING id, unit, label, queued_at""",
+                (reason, list(keep_ids)),
+            )
+            rows = cur.fetchall()
+        return [dict(r, queued_at=(r["queued_at"].isoformat() if r["queued_at"] else None))
+                for r in rows]
+
+
+def _run_row(r, with_output=True):
+    out = {
+        "id": r["id"], "unit": r["unit"], "label": r["label"], "source": r["source"],
+        "job_id": r["job_id"], "status": r["status"], "success": r["success"],
+        "exit_code": r["exit_code"], "duration_ms": r["duration_ms"], "error": r["error"],
+    }
+    for field in ("queued_at", "dispatched_at", "completed_at"):
+        value = r.get(field)
+        out[field] = value.isoformat() if value else None
+    if with_output:
+        out["script"] = r.get("script")
+        out["stdout"] = r.get("stdout")
+        out["stderr"] = r.get("stderr")
+    return out
+
+
+def list_command_runs(unit=None, label=None, limit=100, with_output=True):
+    """Run history, newest first, optionally narrowed to one unit and/or label."""
+    with _conn() as conn:
+        if conn is None:
+            return []
+        clauses, params = [], []
+        if unit:
+            clauses.append("unit = %s")
+            params.append(unit)
+        if label:
+            clauses.append("label = %s")
+            params.append(label)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(int(limit))
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"SELECT * FROM command_runs {where} ORDER BY queued_at DESC NULLS LAST LIMIT %s",
+                params,
+            )
+            rows = cur.fetchall()
+        return [_run_row(r, with_output) for r in rows]
+
+
+def latest_run_per_unit(label):
+    """The most recent run of `label` on each unit -- the per-unit status view."""
+    with _conn() as conn:
+        if conn is None:
+            return {}
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT DISTINCT ON (unit) *
+                     FROM command_runs
+                    WHERE label = %s
+                 ORDER BY unit, queued_at DESC""",
+                (label,),
+            )
+            rows = cur.fetchall()
+        return {r["unit"]: _run_row(r, with_output=False) for r in rows}
 
 
 def insert_client_error(entry):
