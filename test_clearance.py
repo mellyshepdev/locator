@@ -114,6 +114,26 @@ def auth(token):
     return {"Authorization": "Bearer " + token}
 
 
+def _all_endpoints():
+    """Every Flask endpoint defined across the app's modules.
+
+    Routes live in locator.py and in kc_admin.py (registered onto the same app),
+    so a coverage check that reads only locator.py reports the admin routes as
+    stale policy entries.
+    """
+    import re
+    here = os.path.dirname(__file__) or "."
+    names = set()
+    for mod in ("locator.py", "kc_admin.py"):
+        path = os.path.join(here, mod)
+        if not os.path.exists(path):
+            continue
+        src = open(path).read()
+        names |= set(re.findall(
+            r'@app\.route\([^\n]*\)\n(?:@app\.route\([^\n]*\)\n)*\s*def (\w+)\(', src))
+    return names
+
+
 class TestTokenVerification(unittest.TestCase):
     def test_valid_token_yields_level(self):
         claims = C.verify_token(make_token(clearance=7))
@@ -363,8 +383,7 @@ class TestPolicyCoverage(unittest.TestCase):
         the gate would fail it closed at runtime, which is safe but confusing.
         """
         import re
-        src = open(os.path.join(os.path.dirname(__file__) or ".", "locator.py")).read()
-        endpoints = set(re.findall(r'@app\.route\([^\n]*\)\n(?:@app\.route\([^\n]*\)\n)*def (\w+)\(', src))
+        endpoints = _all_endpoints()
         classified = C.PUBLIC | C.INGEST | set(C.ROUTE_CLEARANCE)
         missing = sorted(endpoints - classified)
         self.assertEqual(missing, [], f"unclassified endpoints: {missing}")
@@ -376,8 +395,7 @@ class TestPolicyCoverage(unittest.TestCase):
         whatever it was written for, so it should not rot unnoticed.
         """
         import re
-        src = open(os.path.join(os.path.dirname(__file__) or ".", "locator.py")).read()
-        endpoints = set(re.findall(r'@app\.route\([^\n]*\)\n(?:@app\.route\([^\n]*\)\n)*def (\w+)\(', src))
+        endpoints = _all_endpoints()
         # "static" is Flask's built-in file server, not a route in this source.
         classified = (C.PUBLIC | C.INGEST | set(C.ROUTE_CLEARANCE)) - {"static"}
         stale = sorted(classified - endpoints)

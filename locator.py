@@ -61,6 +61,8 @@ from flask import Flask, request, jsonify, Response, render_template
 import notifier
 import db
 import clearance
+import bao
+import secretscan
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -3780,6 +3782,21 @@ def enforce_unit_placement():
                     env_cfg = pol.get("env") or {}
                     env_map = {**(env_cfg.get("common") or {}),
                                **(env_cfg.get(unit) or {})}
+                    # Validate bao:// references HERE, before queuing. The
+                    # values stay behind: the command payload carries the
+                    # reference and lokey trades it at /api/secrets/resolve,
+                    # because /api/commands/pending has no auth. Resolving
+                    # anyway means a bad path fails loudly on this box now,
+                    # not as a blank .env on a unit nobody is watching.
+                    if bao.has_refs(env_map):
+                        try:
+                            bao.resolve_env_map(env_map)
+                        except bao.BaoError as e:
+                            print(f"🔒 placement of '{name}' on {unit} held back — "
+                                  f"OpenBao: {e}")
+                            emit_event("secrets", action="placement_blocked",
+                                       service=name, unit=unit, error=str(e))
+                            continue
                     _queue_command(
                         unit, name, "deploy", source="unit_placement",
                         extra={
@@ -3989,6 +4006,382 @@ def _queue_exec_command(unit, script, source="manual", label=None, job_id=None):
         queued = dict(cmd)
     _record_run(queued)
     return queued
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  SECRETS BROKER  —  locator is the only holder of the OpenBao token
+# ═══════════════════════════════════════════════════════════════════════
+# locator.yml's env: block holds bao:// REFERENCES, never values. Deploy
+# commands carry the reference (a path is not a secret); lokey exchanges it
+# here for the value using LOCATOR_ADMIN_KEY. That split exists because
+# /api/commands/pending is unauthenticated and Traefik's locator-api router
+# bypasses Keycloak for /api/ — anything queued is world-readable.
+
+@app.route("/api/secrets/status", methods=["GET"])
+def secrets_status():
+    """Broker health. Never returns secret values.
+
+    Ungated but redacted, so the Keycloak-protected dashboard (whose browser
+    session carries no admin key) can still show whether the broker is alive.
+    Send the admin key to get the full picture.
+    """
+    try:
+        full = bao.status()
+    except Exception as e:
+        return jsonify({"reachable": False, "error": str(e)}), 200
+    if request.headers.get("X-Locator-Admin-Key") and not _require_admin_key():
+        return jsonify(full)
+    return jsonify({k: full.get(k) for k in
+                    ("reachable", "sealed", "configured", "token_ok",
+                     "token_ttl_seconds", "cached_secrets", "version")})
+
+
+@app.route("/api/secrets/resolve", methods=["POST"])
+def secrets_resolve():
+    """Exchange bao:// references for values. Admin key required.
+
+    Two body shapes:
+      {"service": "reech", "unit": "unit8"}  -> that service's whole env block
+                                                from locator.yml, resolved
+      {"refs": ["bao://secret/reech#client_secret", ...]} -> ref -> value
+
+    Returns 502 and resolves NOTHING on any failure. A partially resolved env
+    map is worse than none: it seeds a blank into .env and surfaces days later
+    as an auth error nobody can trace back to here.
+    """
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+
+    if data.get("refs"):
+        refs = data["refs"]
+        if not isinstance(refs, list):
+            return jsonify({"error": "refs must be a list"}), 400
+        out = {}
+        try:
+            for ref in refs:
+                out[ref] = bao.resolve_ref(ref)
+        except bao.BaoError as e:
+            return jsonify({"error": str(e)}), 502
+        return jsonify({"resolved": out, "count": len(out)})
+
+    service = (data.get("service") or "").strip().lower()
+    if not service:
+        return jsonify({"error": "body needs 'service' or 'refs'"}), 400
+    pol = _policy_for(service)
+    if not pol:
+        return jsonify({"error": f"no policy for '{service}' in locator.yml"}), 404
+    env_cfg = pol.get("env") or {}
+    unit = (data.get("unit") or "").strip().lower()
+    env_map = {**(env_cfg.get("common") or {}), **(env_cfg.get(unit) or {})}
+    if not env_map:
+        return jsonify({"service": service, "unit": unit, "env": {}, "refs_used": []})
+    try:
+        resolved, used = bao.resolve_env_map(env_map)
+    except bao.BaoError as e:
+        emit_event("secrets", action="resolve_failed", service=service, error=str(e))
+        return jsonify({"error": str(e), "service": service}), 502
+    return jsonify({"service": service, "unit": unit,
+                    "env": resolved, "refs_used": used})
+
+
+@app.route("/api/secrets/refresh", methods=["POST"])
+def secrets_refresh():
+    """Drop cached secrets so the next resolve re-reads OpenBao. Post-rotation."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    prefix = (request.get_json(silent=True) or {}).get("prefix")
+    dropped = bao.invalidate(prefix)
+    return jsonify({"dropped": dropped, "prefix": prefix})
+
+
+@app.route("/api/secrets/refs", methods=["GET"])
+def secrets_refs():
+    """Every bao:// reference locator.yml mentions, per service.
+
+    Paths only, never values — this is the map you check after rotating a
+    secret to see which services need a redeploy.
+    """
+    out = {}
+    for name, pol in (load_policy() or {}).items():
+        env_cfg = pol.get("env") or {}
+        refs = {}
+        for scope, block in env_cfg.items():
+            if not isinstance(block, dict):
+                continue
+            for k, v in block.items():
+                if bao.is_ref(v):
+                    refs.setdefault(scope, {})[str(k)] = str(v)
+        if refs:
+            out[name] = refs
+    return jsonify({"services": out, "count": len(out)})
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  COMPOSE SECRET SWEEP  —  find plaintext credentials, then vault them
+# ═══════════════════════════════════════════════════════════════════════
+# lokey uploads every unit's docker-compose.yml into COMPOSE_DIR and the store
+# is committed and pushed, so a password typed into an environment: block is
+# both readable on the unit and permanent in git history. The sweeper reports;
+# quarantine is a deliberate, admin-keyed act because it edits live compose
+# files on units and a bad rewrite takes a stack down.
+
+SECRETSCAN_INTERVAL = int(os.environ.get("SECRETSCAN_INTERVAL", "900"))
+SECRETSCAN_ENABLED = os.environ.get("SECRETSCAN_ENABLED", "true").lower() in ("1", "true", "yes")
+# Where a quarantined credential is filed. One secret per compose file keeps
+# the bao:// reference readable and the blast radius of a rotation small.
+SECRETSCAN_MOUNT = os.environ.get("SECRETSCAN_MOUNT", "secret")
+SECRETSCAN_PREFIX = os.environ.get("SECRETSCAN_PREFIX", "compose")
+
+_scan_cache = {"at": None, "findings": [], "files": 0}
+_scan_lock = threading.Lock()
+
+
+def _compose_store_files():
+    """(name, path) for every compose file in the store."""
+    out = []
+    try:
+        for fname in sorted(os.listdir(COMPOSE_DIR)):
+            if fname.endswith((".yml", ".yaml")):
+                out.append((os.path.splitext(fname)[0], os.path.join(COMPOSE_DIR, fname)))
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def _scan_store():
+    """Scan every stored compose file. Findings keep their raw values, so this
+    result must be passed through secretscan.public() before it leaves here."""
+    findings, files = [], 0
+    for name, path in _compose_store_files():
+        try:
+            with open(path, errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        files += 1
+        findings.extend(secretscan.scan_text(text, source=name))
+    return findings, files
+
+
+@app.route("/api/secrets/scan", methods=["GET"])
+def secrets_scan():
+    """Plaintext credentials found in the compose store. Values are masked.
+
+    ?fresh=1 rescans instead of serving the sweeper's last pass.
+    """
+    if request.args.get("fresh") in ("1", "true", "yes"):
+        findings, files = _scan_store()
+        with _scan_lock:
+            _scan_cache.update({"at": datetime.now(timezone.utc).isoformat(),
+                                "findings": findings, "files": files})
+    with _scan_lock:
+        findings = list(_scan_cache["findings"])
+        at, files = _scan_cache["at"], _scan_cache["files"]
+
+    by_file, by_sev = {}, {}
+    for f in findings:
+        by_file.setdefault(f["source"], []).append(f["key"])
+        by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+    return jsonify({
+        "scanned_at": at,
+        "files_scanned": files,
+        "total": len(findings),
+        "by_severity": by_sev,
+        "by_file": {k: sorted(set(v)) for k, v in sorted(by_file.items())},
+        "findings": secretscan.public(findings),
+    })
+
+
+def _bao_path_for(compose_name):
+    return f"{SECRETSCAN_PREFIX}/{compose_name}"
+
+
+@app.route("/api/secrets/quarantine", methods=["POST"])
+def secrets_quarantine():
+    """Move one compose file's plaintext credentials into OpenBao.
+
+    Body: {"file": "matomo-db", "keys": [...optional subset...],
+           "dry_run": true}
+
+    Order matters and is not negotiable: the value goes into OpenBao FIRST and
+    is read back, then the file is rewritten. Rewriting first would, on a bao
+    write failure, leave a ${VAR} with nothing behind it — the credential gone
+    from the file and never stored anywhere.
+
+    This rewrites the STORE copy and queues a redact_env command for the unit
+    that owns the container, so the real file on the unit is fixed too.
+    """
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    name = (data.get("file") or "").strip()
+    if not name:
+        return jsonify({"error": "body needs 'file'"}), 400
+    dry_run = bool(data.get("dry_run"))
+    only = set(data.get("keys") or [])
+
+    path = os.path.join(COMPOSE_DIR, f"{name}.yml")
+    if not os.path.isfile(path):
+        path = os.path.join(COMPOSE_DIR, f"{name}.yaml")
+    if not os.path.isfile(path):
+        return jsonify({"error": f"no compose file '{name}' in the store"}), 404
+    with open(path, errors="replace") as f:
+        text = f.read()
+
+    findings = secretscan.scan_text(text, source=name)
+    actionable = [f for f in findings
+                  if f["severity"] not in ("placeholder", "hashed")
+                  and (not only or f["key"] in only)]
+    skipped = [f for f in findings if f not in actionable]
+    if not actionable:
+        return jsonify({"file": name, "quarantined": [], "skipped": secretscan.public(skipped),
+                        "note": "nothing actionable"})
+
+    # Same key twice in one file (a password repeated across two services) must
+    # agree, or we cannot store one value under one field name.
+    values = {}
+    for f in actionable:
+        prev = values.get(f["key"])
+        if prev is not None and prev != f["value"]:
+            return jsonify({"error": f"'{f['key']}' appears twice in {name} with "
+                                     f"different values — resolve by hand"}), 409
+        values[f["key"]] = f["value"]
+
+    bao_path = _bao_path_for(name)
+    new_text, changed = secretscan.redact_text(text, actionable)
+    refs = {k: f"bao://{SECRETSCAN_MOUNT}/{bao_path}#{k}" for k in sorted(values)}
+
+    if dry_run:
+        return jsonify({"file": name, "dry_run": True,
+                        "would_store": sorted(values), "bao_path": f"{SECRETSCAN_MOUNT}/{bao_path}",
+                        "refs": refs, "skipped": secretscan.public(skipped),
+                        "diff_lines": sorted({f["line"] for f in actionable})})
+
+    try:
+        bao.write_secret(SECRETSCAN_MOUNT, bao_path, values)
+        # Read back before touching the file. A write that reported success but
+        # stored nothing would otherwise be discovered only after redaction.
+        stored = bao.read_secret(SECRETSCAN_MOUNT, bao_path, use_cache=False)
+        missing = [k for k, v in values.items() if stored.get(k) != v]
+        if missing:
+            raise bao.BaoError(f"read-back mismatch for {missing}")
+    except bao.BaoError as e:
+        emit_event("secrets", action="quarantine_failed", file=name, error=str(e))
+        return jsonify({"error": f"OpenBao write failed, file left untouched: {e}"}), 502
+
+    backup = f"{path}.bak-prequarantine-{int(time.time())}"
+    try:
+        with open(backup, "w") as f:
+            f.write(text)
+        with open(path, "w") as f:
+            f.write(new_text)
+    except OSError as e:
+        return jsonify({"error": f"secrets stored in OpenBao but the store file "
+                                 f"could not be rewritten: {e}"}), 500
+
+    queued = _queue_redactions(name, sorted(values), refs)
+    emit_event("secrets", action="quarantined", file=name,
+               keys=sorted(values), bao_path=f"{SECRETSCAN_MOUNT}/{bao_path}",
+               units=queued)
+    if GIT_AUTO_PUSH:
+        _git_push_event.set()
+    print(f"🔐 QUARANTINED {len(changed)} credential(s) from {name} → "
+          f"{SECRETSCAN_MOUNT}/{bao_path}; redaction queued for {queued or 'no unit'}")
+    return jsonify({"file": name, "quarantined": sorted(values),
+                    "bao_path": f"{SECRETSCAN_MOUNT}/{bao_path}", "refs": refs,
+                    "store_backup": backup, "units_queued": queued,
+                    "skipped": secretscan.public(skipped)})
+
+
+def _queue_redactions(compose_name, keys, refs):
+    """Tell whichever unit runs this container to strip the same lines locally.
+
+    The command carries only key names and bao:// references, never a value —
+    /api/commands/pending is unauthenticated.
+    """
+    units = set()
+    with lock:
+        services = dict(registry.get("services") or {})
+    for svc_name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        if (svc.get("name") or svc_name or "").lower() != compose_name.lower():
+            continue
+        # ONLINE only. The registry still carries unit1 as the host of half the
+        # estate — that laptop has been dead for months — and queuing a
+        # redaction there would park a command nobody ever collects while the
+        # unit actually running the container keeps its plaintext copy.
+        if str(svc.get("status", "")).upper() != "ONLINE":
+            continue
+        unit = svc.get("host")
+        if unit and unit != "external":
+            units.add(unit)
+    for unit in sorted(units):
+        _queue_command(unit, compose_name, "redact_env", source="secret_sweep",
+                       extra={"keys": list(keys), "refs": refs})
+    return sorted(units)
+
+
+def bao_token_renewer():
+    """Keep the broker's periodic token alive.
+
+    A periodic token never expires WHILE it is renewed, and dies without a
+    sound the moment renewal stops. Renewing at a fraction of the remaining TTL
+    means a few missed passes (a locator restart, a bao restart) cost nothing.
+    """
+    while True:
+        try:
+            st = bao.status()
+            if not st.get("token_ok"):
+                # Not configured yet is the normal state before
+                # provision-bao-broker.sh has been run; don't spam about it.
+                time.sleep(300)
+                continue
+            ttl = st.get("token_ttl_seconds") or 0
+            if ttl and ttl < 7 * 24 * 3600:
+                lease = bao.renew_self()
+                print(f"🔐 OpenBao broker token renewed — lease now {lease}s")
+            time.sleep(max(3600, min(int(ttl / 4) if ttl else 3600, 21600)))
+        except bao.BaoError as e:
+            print(f"⚠️  OpenBao token renewal failed: {e}")
+            time.sleep(600)
+        except Exception as e:
+            print(f"⚠️  token renewer error: {e}")
+            time.sleep(600)
+
+
+def secret_sweeper():
+    """Background pass over the compose store. Reports only — never edits."""
+    if not SECRETSCAN_ENABLED:
+        print("🔐 secret sweeper disabled (SECRETSCAN_ENABLED=false)")
+        return
+    known = set()
+    while True:
+        try:
+            findings, files = _scan_store()
+            with _scan_lock:
+                _scan_cache.update({"at": datetime.now(timezone.utc).isoformat(),
+                                    "findings": findings, "files": files})
+            # Alert on what is NEW since the last pass. Re-announcing 27 known
+            # findings every 15 minutes trains everyone to ignore the channel.
+            seen = {(f["source"], f["key"], f["severity"]) for f in findings}
+            fresh = seen - known
+            if fresh and known:
+                for source, key, sev in sorted(fresh):
+                    print(f"🔐 NEW plaintext credential: {source} → {key} ({sev})")
+                    emit_event("secrets", action="exposed", file=source,
+                               key=key, severity=sev)
+            elif fresh:
+                print(f"🔐 secret sweep: {len(findings)} plaintext credential(s) "
+                      f"across {files} compose file(s) — GET /api/secrets/scan")
+            known = seen
+        except Exception as e:
+            print(f"⚠️  secret sweeper error: {e}")
+        time.sleep(SECRETSCAN_INTERVAL)
 
 
 @app.route("/api/exec", methods=["POST"])
@@ -5065,6 +5458,8 @@ def start_background_workers():
         traccar_feeder,             # lokey's GPS fixes into Traccar
         script_scheduler,           # recurring exec jobs from /api/schedule
         exec_run_reaper,            # ages out exec jobs that never reported back
+        secret_sweeper,             # plaintext credentials in the compose store
+        bao_token_renewer,          # keeps the OpenBao broker token alive
     ]
     if BALANCE_ENABLED:
         workers.append(load_balancer)

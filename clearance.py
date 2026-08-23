@@ -60,7 +60,15 @@ SEES_ALL_ROWS = STAFF
 OIDC_ISSUER = os.environ.get(
     "OIDC_ISSUER", "https://bsco-keycloak.fly.dev/realms/blacksheep"
 ).rstrip("/")
-OIDC_AUDIENCE   = os.environ.get("OIDC_AUDIENCE", "locator")
+# Accepted client(s). Comma-separated: the dashboard signs in as `locator`,
+# but the client portal signs in as `client-portal`, and its admin box calls
+# these same routes. Both are clients of the same realm, so the token is still
+# signature- and issuer-verified — this only widens *which* client may present
+# it, not who may act.
+OIDC_AUDIENCES  = [a.strip() for a in
+                   os.environ.get("OIDC_AUDIENCE", "locator,client-portal").split(",")
+                   if a.strip()]
+OIDC_AUDIENCE   = OIDC_AUDIENCES[0]
 CLEARANCE_CLAIM = os.environ.get("CLEARANCE_CLAIM", "clearance")
 TENANT_CLAIM    = os.environ.get("TENANT_CLAIM", "tenant")
 
@@ -134,6 +142,10 @@ ROUTE_CLEARANCE = {
     "certs_status":          PARTNER,
     "dns_status":            ENGINEER,
     "list_migrations":       PARTNER,
+    # Fleet refresh — status/history read like the other operational telemetry;
+    # triggering one redeploys across the fleet, so that sits with the deploys.
+    "refresh_status":        PARTNER,
+    "refresh_runs":          PARTNER,
     "traccar_devices":       STAFF,     # live physical positions of people
     "get_available_networks": STAFF,
     "service_networks":      STAFF,
@@ -170,6 +182,7 @@ ROUTE_CLEARANCE = {
     "set_policy_bulk":       INFRA,
     "deploy_compose":        INFRA,
     "trigger_deploy_final":  INFRA,
+    "refresh_run_now":       INFRA,
     "create_migration":      INFRA,
     "dns_sync":              INFRA,
     "create_schedule":       INFRA,
@@ -337,7 +350,7 @@ def verify_token(token):
             key=key,
             algorithms=["RS256", "RS384", "RS512", "PS256"],
             issuer=OIDC_ISSUER,
-            audience=OIDC_AUDIENCE,
+            audience=OIDC_AUDIENCES,
             options={"require": ["exp", "iat", "iss"]},
             leeway=30,
         )
@@ -356,8 +369,10 @@ def verify_token(token):
             )
         except Exception as exc:
             raise ClearanceError(f"invalid token: {exc}")
-        if claims.get("azp") != OIDC_AUDIENCE:
-            raise ClearanceError("token was not issued for the Locator")
+        if claims.get("azp") not in OIDC_AUDIENCES:
+            raise ClearanceError(
+                f"token was issued for '{claims.get('azp')}', which is not an "
+                f"accepted client ({', '.join(OIDC_AUDIENCES)})")
         return claims
     except Exception as exc:
         raise ClearanceError(f"invalid token: {exc}")

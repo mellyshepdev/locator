@@ -17,6 +17,11 @@ services:
       # only exists inside the image, so a UI edit would be discarded on the
       # next rebuild rather than changing the deployment.
       - ./docker-compose.yml:/app/docker-compose.yml
+      # The OpenBao broker token. A FILE, not an env var: anything in
+      # `environment:` shows up in `docker inspect` for every user on the host,
+      # and this compose file is committed to git. Provisioned by
+      # ./provision-bao-broker.sh, which is why ./secrets is gitignored.
+      - ./secrets:/app/secrets:ro
       - /home/swoopg111/.ssh:/root/.ssh:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
@@ -53,6 +58,17 @@ services:
       # Locator behaves exactly as it did before — that is the safe state to
       # deploy in. Flip to true only once a real login shows clearance-<n> in
       # realm_access.roles (see docs/CLEARANCE.md).
+      # ── SECRETS BROKER ────────────────────────────────────────────────
+      # OpenBao runs on this same box, so this stays on the docker network /
+      # loopback and never crosses the tailnet.
+      - BAO_ADDR=${BAO_ADDR:-http://100.82.31.92:8200}
+      - BAO_TOKEN_FILE=/app/secrets/bao.token
+      - BAO_CACHE_TTL=300
+      # Sweeps the compose store for plaintext credentials. Report-only:
+      # quarantine is an explicit POST, never automatic, because it rewrites
+      # live compose files on other units.
+      - SECRETSCAN_ENABLED=${SECRETSCAN_ENABLED:-true}
+      - SECRETSCAN_INTERVAL=900
       - CLEARANCE_ENFORCE=${CLEARANCE_ENFORCE:-false}
       # Heartbeat/ingest routes (/register, node metrics, command polling) are
       # written by unattended agents that carry LOCATOR_ADMIN_KEY, not a user

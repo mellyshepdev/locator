@@ -14,3 +14,9 @@ registry_data/
 # private key; .env holds the admin and LDAP bind passwords.
 freeipa/data/
 freeipa/.env
+
+# OpenBao broker token, minted by provision-bao-broker.sh. The whole point of
+# the broker is that the fleet's secrets stop living in this repo — a committed
+# token would put the key to all of them right back in it.
+secrets/
+*.bak-prequarantine-*
