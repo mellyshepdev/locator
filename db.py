@@ -15,6 +15,7 @@ registry.json/in-memory state alone, same as before this module existed.
 import os
 import json
 import threading
+import time
 from contextlib import contextmanager
 
 try:
@@ -26,6 +27,17 @@ except ImportError:
     _PSYCOPG2_AVAILABLE = False
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+# Locator runs a dozen background threads plus gunicorn's gthread pool, and any
+# of them can touch Postgres — heartbeat snapshots, the event log, SSE readers,
+# now the command-run recorder. A ceiling of 5 was reached the first time four
+# exec jobs were queued at once: every insert failed with "connection pool
+# exhausted" and the runs went unrecorded, which is precisely the blindness this
+# is all meant to remove. Sized for the thread count, not the query rate.
+DB_POOL_MIN = int(os.environ.get("DB_POOL_MIN", 1))
+DB_POOL_MAX = int(os.environ.get("DB_POOL_MAX", 20))
+DB_CONNECT_TIMEOUT = int(os.environ.get("DB_CONNECT_TIMEOUT", 10))
+DB_STATEMENT_TIMEOUT_MS = int(os.environ.get("DB_STATEMENT_TIMEOUT_MS", 15000))
 
 _pool = None
 _pool_lock = threading.Lock()
@@ -51,7 +63,16 @@ def _get_pool():
     with _pool_lock:
         if _pool is None:
             try:
-                _pool = psycopg2.pool.ThreadedConnectionPool(1, 5, dsn=DATABASE_URL)
+                # Bounded waits, both of them. The database is now a tailnet hop
+                # away, so an unreachable unit8 or a wedged query must fail the
+                # caller rather than park a gunicorn thread forever — locator
+                # degrading to registry.json is survivable, locator not answering
+                # is not.
+                _pool = psycopg2.pool.ThreadedConnectionPool(
+                    DB_POOL_MIN, DB_POOL_MAX, dsn=DATABASE_URL,
+                    connect_timeout=DB_CONNECT_TIMEOUT,
+                    options=f"-c statement_timeout={DB_STATEMENT_TIMEOUT_MS}",
+                )
             except Exception as e:
                 _warn_once(f"could not connect to Postgres ({e})")
                 return None
@@ -64,7 +85,18 @@ def _conn():
     if pool is None:
         yield None
         return
-    conn = pool.getconn()
+    # A burst can still momentarily drain the pool. Wait briefly rather than
+    # dropping the write: these calls are short, so a connection frees up fast,
+    # and a lost row is worse than a few hundred ms of latency.
+    conn = None
+    for attempt in range(4):
+        try:
+            conn = pool.getconn()
+            break
+        except psycopg2.pool.PoolError:
+            if attempt == 3:
+                raise
+            time.sleep(0.25 * (attempt + 1))
     try:
         yield conn
         conn.commit()
@@ -165,28 +197,52 @@ def init_schema():
 
 def save_registry_snapshot(registry):
     """Upsert the full in-memory registry (nodes + services) into Postgres.
-    Called from persist_registry() alongside the existing registry.json write."""
+    Called from persist_registry() alongside the existing registry.json write.
+
+    Sent as two batched statements, not one per row. Row-at-a-time was harmless
+    while Postgres was a container away on the same host, but locator now runs
+    on unit4 and the database on unit8: at ~60ms of tailnet round trip, 346 rows
+    is over twenty seconds per snapshot, with a pooled connection held the whole
+    time. Heartbeats arrive faster than that, so the snapshots stacked up until
+    every gunicorn thread was blocked and locator stopped answering — it looked
+    exactly like a crash. execute_values collapses each loop to a single round
+    trip.
+    """
     with _conn() as conn:
         if conn is None:
             return
+        nodes = [
+            (node_id, json.dumps(data), data.get("status"), data.get("last_seen") or None)
+            for node_id, data in registry.get("nodes", {}).items()
+        ]
+        services = [
+            (svc_id, json.dumps(data), data.get("category"), data.get("status"))
+            for svc_id, data in registry.get("services", {}).items()
+        ]
         with conn.cursor() as cur:
-            for node_id, data in registry.get("nodes", {}).items():
-                cur.execute(
+            if nodes:
+                psycopg2.extras.execute_values(
+                    cur,
                     """INSERT INTO nodes (id, data, status, last_seen, updated_at)
-                       VALUES (%s, %s, %s, %s, now())
+                       VALUES %s
                        ON CONFLICT (id) DO UPDATE
                        SET data = EXCLUDED.data, status = EXCLUDED.status,
                            last_seen = EXCLUDED.last_seen, updated_at = now()""",
-                    (node_id, json.dumps(data), data.get("status"), data.get("last_seen") or None),
+                    nodes,
+                    template="(%s, %s, %s, %s, now())",
+                    page_size=500,
                 )
-            for svc_id, data in registry.get("services", {}).items():
-                cur.execute(
+            if services:
+                psycopg2.extras.execute_values(
+                    cur,
                     """INSERT INTO services (id, data, category, status, updated_at)
-                       VALUES (%s, %s, %s, %s, now())
+                       VALUES %s
                        ON CONFLICT (id) DO UPDATE
                        SET data = EXCLUDED.data, category = EXCLUDED.category,
                            status = EXCLUDED.status, updated_at = now()""",
-                    (svc_id, json.dumps(data), data.get("category"), data.get("status")),
+                    services,
+                    template="(%s, %s, %s, %s, now())",
+                    page_size=500,
                 )
             cur.execute(
                 """INSERT INTO registry_meta (key, value) VALUES ('updated', %s)
@@ -313,6 +369,23 @@ def close_orphaned_runs(keep_ids=(), reason="locator restarted before the unit r
             rows = cur.fetchall()
         return [dict(r, queued_at=(r["queued_at"].isoformat() if r["queued_at"] else None))
                 for r in rows]
+
+
+def get_command_run(cmd_id):
+    """One run row by id, or None.
+
+    Lets a completion report be honoured even when the in-memory queue no longer
+    holds the command — which is the normal case when the unit being refreshed is
+    the one hosting locator: refresh redeploys locator, and the result arrives
+    after the restart.
+    """
+    with _conn() as conn:
+        if conn is None:
+            return None
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM command_runs WHERE id = %s", (cmd_id,))
+            row = cur.fetchone()
+        return _run_row(row) if row else None
 
 
 def _run_row(r, with_output=True):

@@ -48,6 +48,12 @@ services:
       - TRACCAR_HOST=traccar.prime-quality.online
       - TRACCAR_PASS=${TRACCAR_PASS}
       - LOCATOR_ADMIN_KEY=${LOCATOR_ADMIN_KEY:-}
+      - CLEARANCE_ENFORCE=${CLEARANCE_ENFORCE:-false}
+      - CLEARANCE_ENFORCE_INGEST=${CLEARANCE_ENFORCE_INGEST:-false}
+      - OIDC_ISSUER=${OIDC_ISSUER:-https://bsco-keycloak.fly.dev/realms/blacksheep}
+      - OIDC_AUDIENCE=${OIDC_AUDIENCE:-locator,client-portal}
+      - KC_ADMIN_CLIENT_ID=${KC_ADMIN_CLIENT_ID:-clearance-admin}
+      - KC_ADMIN_CLIENT_SECRET=${KC_ADMIN_CLIENT_SECRET:-}
     labels:
       - "traefik.enable=true"
       # UI router — protected by Keycloak (catch-all, lower priority)

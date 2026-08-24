@@ -85,17 +85,70 @@
             realm: 'blacksheep',
             clientId: 'locator'
         });
+        window.kc = kc;
+
+        // Every same-origin request carries the access token from here on, so
+        // the server can enforce clearance per endpoint.
+        (function installAuthedFetch() {
+            var raw = window.fetch.bind(window);
+            window.fetch = function(input, init) {
+                var url = (typeof input === 'string') ? input : (input && input.url) || '';
+                var sameOrigin = !/^https?:\/\//i.test(url) || url.indexOf(window.location.origin) === 0;
+                if (!sameOrigin || !kc.authenticated) return raw(input, init);
+                return kc.updateToken(30).catch(function(){}).then(function() {
+                    var opts = Object.assign({}, init || {});
+                    var headers = new Headers((init && init.headers) || {});
+                    if (kc.token) headers.set('Authorization', 'Bearer ' + kc.token);
+                    opts.headers = headers;
+                    return raw(input, opts);
+                });
+            };
+        })();
+
+        // Layer 4: hide what this clearance cannot reach (cosmetic; server enforces).
+        function applyClearance(me) {
+            window.CLEARANCE = me;
+            var allowed = me.views || [];
+            document.querySelectorAll('#ui-toggle .toggle-btn').forEach(function(btn) {
+                var view = btn.getAttribute('data-view');
+                if (view && allowed.indexOf(view) === -1) btn.style.display = 'none';
+            });
+            var badge = document.getElementById('clearance-badge');
+            if (badge) {
+                badge.textContent = 'CLEARANCE ' + me.clearance + ' \u2014 ' +
+                    String(me.clearance_name || '').toUpperCase() +
+                    (me.tenant ? ' \u00b7 ' + me.tenant.toUpperCase() : '');
+                badge.style.display = 'block';
+            }
+            var active = document.querySelector('#ui-toggle .toggle-btn.active');
+            var activeView = active && active.getAttribute('data-view');
+            if (activeView && allowed.indexOf(activeView) === -1) {
+                var fallback = ['grid','map','3js','traccar','yamls','exec'].filter(function(v){return allowed.indexOf(v)!==-1;})[0];
+                if (fallback) switchView(fallback);
+            }
+        }
+
         kc.init({
             onLoad: 'login-required',
             pkceMethod: 'S256',
             checkLoginIframe: false
         })
             .then(function(auth) {
-                if (auth) {
-                    document.documentElement.classList.add('auth-ok');
-                } else {
-                    authFailed('Keycloak login-required resolved without a session');
-                }
+                if (!auth) { authFailed('Keycloak login-required resolved without a session'); return; }
+                return fetch('/api/whoami')
+                    .then(function(r){ return r.json(); })
+                    .then(function(me) {
+                        if (me.enforced && (!me.clearance || me.clearance < 1)) {
+                            authFailed('Signed in as ' + (me.name || 'unknown') + ' but no clearance level is assigned.');
+                            return;
+                        }
+                        document.documentElement.classList.add('auth-ok');
+                        applyClearance(me);
+                    })
+                    .catch(function(err) {
+                        document.documentElement.classList.add('auth-ok');
+                        if (window.__reportClientError) window.__reportClientError('whoami failed: ' + err, window.location.href);
+                    });
             })
             .catch(function(err) {
                 authFailed('Keycloak init failed: ' + (err && err.message ? err.message : JSON.stringify(err)), err);
@@ -753,6 +806,37 @@
         }
         .event-box .grid-title { font-size: 12px; margin-bottom: 6px; }
 
+        /* FLEET REFRESH strip — sits above the device grid so the twice-daily
+           run is visible without opening anything. Hidden until the first
+           successful fetch, so a locator with no refresh jobs shows nothing
+           rather than an empty box. */
+        .refresh-strip {
+            border: 1px solid var(--neon-green-dim);
+            background: rgba(0, 20, 0, 0.35);
+            border-radius: 6px;
+            padding: 8px 10px;
+            margin: 0 0 12px 34px;   /* clears the collapsed event-log spine */
+        }
+        .refresh-strip-head {
+            display: flex; align-items: baseline; gap: 12px;
+            margin-bottom: 8px; font-family: monospace;
+        }
+        #refresh-summary { font-size: 11px; opacity: 0.75; }
+        .refresh-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+        .refresh-chip {
+            border: 1px solid rgba(255,255,255,0.15);
+            border-left-width: 3px;
+            border-radius: 4px;
+            padding: 5px 9px;
+            font-family: monospace; font-size: 11px; line-height: 1.5;
+            min-width: 150px;
+        }
+        .refresh-chip .rc-unit { font-weight: bold; letter-spacing: 0.5px; }
+        .refresh-chip .rc-meta { opacity: 0.7; }
+        .refresh-chip.ok      { border-left-color: var(--success); }
+        .refresh-chip.bad     { border-left-color: var(--danger); background: rgba(255,0,60,0.08); }
+        .refresh-chip.unknown { border-left-color: rgba(255,255,255,0.3); }
+        .refresh-chip.running { border-left-color: var(--accent); }
     </style>
 <!-- Matomo -->
 <script>
@@ -785,12 +869,13 @@
 
     <!-- UI TOGGLE -->
     <div id="ui-toggle">
-        <button class="toggle-btn" onclick="switchView('map')">Mesh Map</button>
-        <button class="toggle-btn active" onclick="switchView('grid')">Tactical Grid</button>
-        <button class="toggle-btn" onclick="switchView('3js')">3D Mesh</button>
-        <button class="toggle-btn" onclick="switchView('traccar')">Traccar Map</button>
-        <button class="toggle-btn" onclick="switchView('yamls')">YAMLs</button>
-        <button class="toggle-btn" onclick="switchView('exec')">Exec</button>
+        <button class="toggle-btn" data-view="map" onclick="switchView('map')">Mesh Map</button>
+        <button class="toggle-btn active" data-view="grid" onclick="switchView('grid')">Tactical Grid</button>
+        <button class="toggle-btn" data-view="3js" onclick="switchView('3js')">3D Mesh</button>
+        <button class="toggle-btn" data-view="traccar" onclick="switchView('traccar')">Traccar Map</button>
+        <button class="toggle-btn" data-view="yamls" onclick="switchView('yamls')">YAMLs</button>
+        <button class="toggle-btn" data-view="exec" onclick="switchView('exec')">Exec</button>
+        <span id="clearance-badge" style="display:none; margin-left:14px; align-self:center; font-family:'Courier New',monospace; font-size:10px; letter-spacing:2px; color:var(--neon-green); border:1px solid var(--neon-green); border-radius:3px; padding:3px 9px; opacity:0.85;"></span>
     </div>
 
     <!-- LIVE STATUS — shows the page is actually polling, and flags it loudly if it stops -->
@@ -847,6 +932,17 @@
        <p id="event-empty">System events and client errors will appear here.</p>
       </div>
       </div>
+
+        <!-- FLEET REFRESH — one chip per unit locator refreshes on a schedule.
+             Reads /api/refresh/status, which carries status/timings only (no
+             script text or captured output), so it needs no admin key. -->
+        <div class="refresh-strip" id="refresh-strip" hidden>
+            <div class="refresh-strip-head">
+                <span class="grid-title" style="margin:0;font-size:0.8rem;">FLEET REFRESH</span>
+                <span id="refresh-summary"></span>
+            </div>
+            <div class="refresh-chips" id="refresh-chips"></div>
+        </div>
 
         <!-- BLUE RECTANGLE: DEVICES -->
         <div class="grid-container grid-blue">
@@ -1154,12 +1250,18 @@
     <script>
         // ── UI TOGGLE LOGIC ──
         function switchView(viewName) {
+            const me = window.CLEARANCE;
+            if (me && me.enforced && me.views && me.views.indexOf(viewName) === -1) {
+                if (typeof notify === 'function') notify('Clearance ' + me.clearance + ' cannot open "' + viewName + '"', 'error');
+                return;
+            }
             document.querySelectorAll('.toggle-btn').forEach(btn => btn.classList.remove('active'));
             document.querySelectorAll('.view-container').forEach(vc => vc.classList.remove('active'));
 
-            const viewMap = { map: [1, 'view-map'], grid: [2, 'view-grid'], '3js': [3, 'view-3js'], traccar: [4, 'view-traccar'], yamls: [5, 'view-yamls'], exec: [6, 'view-exec'] };
-            const [btnIdx, viewId] = viewMap[viewName] || [1, 'view-map'];
-            document.querySelector(`#ui-toggle button:nth-child(${btnIdx})`).classList.add('active');
+            const viewMap = { map: 'view-map', grid: 'view-grid', '3js': 'view-3js', traccar: 'view-traccar', yamls: 'view-yamls', exec: 'view-exec' };
+            const viewId = viewMap[viewName] || 'view-map';
+            const btn = document.querySelector(`#ui-toggle .toggle-btn[data-view="${viewName}"]`);
+            if (btn) btn.classList.add('active');
             document.getElementById(viewId).classList.add('active');
 
             if (viewName === 'yamls') loadYamlList();
@@ -2599,6 +2701,62 @@
             eventBox.appendChild(entry);
             eventBox.scrollTop = eventBox.scrollHeight;
         }
+
+        /* --- Fleet refresh strip --- */
+        function fmtAgo(iso) {
+            if (!iso) return '—';
+            const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+            if (mins < 1)   return 'just now';
+            if (mins < 60)  return mins + 'm ago';
+            if (mins < 1440) return Math.round(mins / 60) + 'h ago';
+            return Math.round(mins / 1440) + 'd ago';
+        }
+        function fmtNext(iso) {
+            if (!iso) return '—';
+            const d = new Date(iso);
+            return d.toISOString().slice(11, 16) + 'Z';
+        }
+        function renderRefreshStrip(data) {
+            const strip = document.getElementById('refresh-strip');
+            const chips = document.getElementById('refresh-chips');
+            if (!strip || !chips) return;
+            const units = data.units || [];
+            if (!units.length) { strip.hidden = true; return; }
+            strip.hidden = false;
+            const s = data.summary || {};
+            document.getElementById('refresh-summary').textContent =
+                `${s.last_run_ok || 0}/${s.units || 0} last run OK`;
+            chips.innerHTML = '';
+            units.forEach(u => {
+                const run = u.last_run || {};
+                // Anything that is not a clean DONE is a problem worth colouring:
+                // MISSED and TIMEOUT mean nobody ran it, which reads the same as
+                // a failure from where the operator is standing.
+                let cls = 'unknown';
+                if (run.status === 'DONE') cls = 'ok';
+                else if (run.status === 'PENDING' || run.status === 'DISPATCHED') cls = 'running';
+                else if (run.status) cls = 'bad';
+                const secs = run.duration_ms ? Math.round(run.duration_ms / 1000) + 's' : '';
+                const exit = (run.exit_code !== null && run.exit_code !== undefined && run.exit_code !== 0)
+                    ? ` exit ${run.exit_code}` : '';
+                const el = document.createElement('div');
+                el.className = 'refresh-chip ' + cls;
+                el.title = run.error || run.status || 'no run recorded yet';
+                el.innerHTML =
+                    `<div class="rc-unit">${u.unit}</div>` +
+                    `<div>${run.status || 'NO RUNS'}${exit} ${secs}</div>` +
+                    `<div class="rc-meta">${fmtAgo(run.queued_at)} · next ${fmtNext(u.next_run)}</div>`;
+                chips.appendChild(el);
+            });
+        }
+        function pollRefreshStrip() {
+            fetch('/api/refresh/status')
+                .then(r => r.ok ? r.json() : null)
+                .then(d => { if (d) renderRefreshStrip(d); })
+                .catch(() => {});
+        }
+        pollRefreshStrip();
+        setInterval(pollRefreshStrip, 30000);
 
         fetch('/api/events')
             .then(res => res.json())

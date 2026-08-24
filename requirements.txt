@@ -13,3 +13,4 @@ Pillow
 psycopg2-binary
 
 watchdog
+PyJWT[crypto]

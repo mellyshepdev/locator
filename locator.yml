@@ -85,3 +85,85 @@ Service:
     units: "8"
     instances: 1
 
+
+  # ── STOP-GAP, added 2026-08-23 ─────────────────────────────────────────
+  # nasa is ONLINE on unit7 AND unit9, so _enforce_dedup tried to evict the
+  # unit7 copy with a git_push_and_stop every ~90s. It failed every time —
+  # unit7's nasa was started with `docker run`, not compose, so it carries no
+  # com.docker.compose.* labels and lokey cannot find a project dir to push.
+  # A FAILED dedup migration no longer blocks the next one, so it relaunched
+  # forever: 147 failures between 20:48 and 01:00.
+  #
+  # Declaring both units is what actually stops it. location_type: stationary
+  # does NOT — _enforce_dedup only exempts via _PINNED_NAMES or
+  # _is_multi_unit_service(), and the latter reads THIS field.
+  #
+  # This is deliberately NOT the end state: nasa is meant to be migratable.
+  # To get there, give it a real compose project on unit7 (a docker-compose.yml
+  # + `docker compose up -d` so the labels exist), add project_dir/git_remote
+  # here, then narrow units back to one. Until the labels exist, no migration
+  # of nasa can ever succeed.
+  #
+  # QUOTED on purpose: YAML 1.1 reads a bare 7_9 as the integer 79.
+  nasa:
+    deployment_type: optional
+    location_type: mobile
+    units: "7_9"
+    instances: 1
+
+  # ── Fleet-wide log shipper (live-logger) ───────────────────────────────
+  # Added 2026-08-23. Both were stopped and stayed stopped: fluent-bit is
+  # restart: unless-stopped and had been deliberately SIGTERMed, which that
+  # policy never recovers from, and container-names is restart: "no", so any
+  # kill is permanent.
+  #
+  # deployment_type: essential is set here but is NOT protection today. Tested
+  # 2026-08-23: policy loaded, the registry correctly saw
+  # live-logger-container-names@unit9 go OFFLINE, and
+  # critical_service_watchdog() queued no start in 5 minutes. Treat these two
+  # as unsupervised until that is fixed; the flag only drives the grid badge.
+  #
+  # units MUST be present and MUST be quoted. Without it
+  # _is_multi_unit_service() is false and _enforce_dedup treats the per-unit
+  # shippers as duplicates and evicts all but one — the exact loop that
+  # bug #6 fixed. A bare 4_7_8_9 is the integer 4789 (YAML 1.1 digit
+  # separators) and matches no unit at all.
+  #
+  # stationary because fluent_bit_state holds this unit's tail read-offsets
+  # and retry buffer, and migration moves the compose file, not the volume.
+  fluent-bit:
+    deployment_type: essential
+    location_type: stationary
+    units: "4_7_8_9"
+    instances: 1
+    restart_when_stopped: true
+
+  live-logger-container-names:
+    deployment_type: essential
+    location_type: stationary
+    units: "4_7_8_9"
+    instances: 1
+    restart_when_stopped: true
+
+  # ── lokey — the host agent, every unit ─────────────────────────────────
+  # Added 2026-08-23.
+  #
+  # QUOTED: a bare 3_4_5_6_7_8_9 is the integer 3456789 (YAML 1.1 digit
+  # separators) and would match no unit at all.
+  #
+  # These three flags are a no-op FOR LOKEY SPECIFICALLY — locator.py already
+  # hardcodes all of them: "lokey"/"lokey-client" are in _WATCHDOG_SERVICES
+  # (= essential) and in _PINNED_NAMES (= stationary, and dedup-exempt).
+  # Written out so the policy file states the intent rather than relying on
+  # the hardcoded floor.
+  #
+  # There is deliberately no "restart when stopped" key here. Nothing in
+  # locator.py reads one; load_policy() copies exactly seven keys out of each
+  # entry (location_type, deployment_type, units, instances, project_dir,
+  # git_remote, env) and silently drops everything else. Restart-on-stop has
+  # to be implemented before it can be configured.
+  lokey:
+    deployment_type: essential
+    location_type: stationary
+    units: "3_4_5_6_7_8_9"
+    instances: 1

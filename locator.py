@@ -60,6 +60,8 @@ from flask import Flask, request, jsonify, Response, render_template
 
 import notifier
 import db
+import clearance
+import kc_admin
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -783,6 +785,13 @@ def _git_push_worker():
 
 app = Flask(__name__)
 
+# Clearance gate (levels 1-10). Inert until CLEARANCE_ENFORCE=true.
+clearance.install(app)
+
+# Identity administration for the client portal's new-accounts box.
+# Routes are gated at clearance 10 by clearance.ROUTE_CLEARANCE.
+kc_admin.register(app, clearance)
+
 
 # ── CORS ────────────────────────────────────────────────────────────────────
 
@@ -830,17 +839,22 @@ def register_device_qr():
 
 @app.route("/api/registry", methods=["GET"])
 def get_full_registry():
-    """Return the full registry — services + nodes."""
+    """Return the registry — services + nodes — scoped to the caller's clearance."""
     with lock:
-        return jsonify(registry)
+        snapshot = {
+            "services": clearance.project(registry["services"]),
+            "nodes":    clearance.project(registry["nodes"]),
+            "updated":  registry["updated"],
+        }
+    return jsonify(snapshot)
 
 
 @app.route("/services", methods=["GET"])
 @app.route("/api/services", methods=["GET"])
 def get_services():
-    """Return all registered services."""
+    """Return the registered services the caller is cleared to see."""
     with lock:
-        return jsonify(registry["services"])
+        return jsonify(clearance.project(registry["services"]))
 
 
 @app.route("/services/<name>", methods=["GET"])
@@ -850,8 +864,8 @@ def get_service(name):
         service = registry["services"].get(name)
         if not service:
             _, service = _find_service_entry(name)
-    if service:
-        return jsonify(service)
+    if service and clearance.visible(service):
+        return jsonify(clearance.redact(service))
     return jsonify({"error": f"Service '{name}' not found"}), 404
 
 
@@ -1417,6 +1431,38 @@ def _is_name_locked(name):
     return any(p in low for p in _PINNED_NAMES)
 
 
+@app.route("/api/policy/<unit>", methods=["GET"])
+def get_policy_for_unit(unit):
+    """Policy entries that apply to one unit — for lokey's local enforcement.
+
+    lokey enforces restart_when_stopped itself instead of waiting for
+    critical_service_watchdog() to queue a start. That watchdog needs the
+    registry to show the service OFFLINE *and* its node ONLINE, so it goes
+    blind precisely when registration is failing — which is exactly when a
+    stopped container most needs restarting. Serving the policy lets each
+    agent act from its own Docker socket with no round trip, and keep acting
+    from its cached copy when this locator is unreachable.
+
+    Sits in INGEST beside commands_pending: lokey presents no user token,
+    only a Host header. Exposes strictly less than /api/policy — only entries
+    naming this unit, and never the env: block, which carries credentials.
+    """
+    unit = (unit or "").strip().lower()
+    out = {}
+    for name, cfg in load_policy().items():
+        spec = (cfg.get("units") or "").strip().lower()
+        # "all" and "current_unit" are answered without consulting the
+        # registry on purpose. Resolving "all" against ONLINE nodes would
+        # reintroduce the dependency this endpoint exists to remove, and an
+        # agent can only ever start a container already present on its host.
+        if spec in ("", "all", "current_unit") or unit in _expand_unit_spec(spec, []):
+            out[name] = {
+                "restart_when_stopped": bool(cfg.get("restart_when_stopped")),
+                "deployment_type": cfg.get("deployment_type", ""),
+                "location_type": cfg.get("location_type", ""),
+            }
+    return jsonify(out)
+
 @app.route("/api/policy/locked", methods=["GET"])
 def get_policy_locked():
     """The hardcoded pin substrings, so the grid can cement matching rows."""
@@ -1753,9 +1799,9 @@ def deploy_compose(name):
 @app.route("/nodes", methods=["GET"])
 @app.route("/api/nodes", methods=["GET"])
 def get_nodes():
-    """Return all known nodes."""
+    """Return the known nodes the caller is cleared to see."""
     with lock:
-        return jsonify(registry["nodes"])
+        return jsonify(clearance.project(registry["nodes"]))
 
 
 @app.route("/nodes", methods=["POST"])
@@ -1809,6 +1855,17 @@ def health_check():
         "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT,
         "timestamp": datetime.now(timezone.utc).isoformat()
     })
+
+
+@app.route("/api/whoami", methods=["GET"])
+def whoami():
+    """Identify the caller and report what its clearance unlocks. Public."""
+    principal = clearance.current()
+    body = principal.to_dict()
+    body["levels"] = clearance.LEVEL_NAMES
+    if principal.via == "invalid-token":
+        body["token_error"] = principal.claims.get("error", "token rejected")
+    return jsonify(body)
 
 
 @app.route("/api/election", methods=["GET"])
@@ -1979,9 +2036,13 @@ def stream_events():
 
 @app.route("/registry.json", methods=["GET"])
 def download_registry():
-    """Serve the registry as a downloadable JSON file."""
+    """Serve the registry as a downloadable JSON file, scoped to the caller."""
     with lock:
-        data = json.dumps(registry, indent=2)
+        data = json.dumps({
+            "services": clearance.project(registry["services"]),
+            "nodes":    clearance.project(registry["nodes"]),
+            "updated":  registry["updated"],
+        }, indent=2)
     return Response(data, mimetype="application/json",
                     headers={"Content-Disposition": "attachment; filename=registry.json"})
 
@@ -3140,6 +3201,11 @@ def load_policy():
                     cfg.get("deployment_type", cfg.get("deployement_type", ""))).lower(),
                 "units": str(cfg.get("units", cfg.get("Unit", "current_unit"))).lower(),
                 "instances": cfg.get("instances", 1),
+                # Read by lokey, not by this file: each agent enforces
+                # this against its own Docker socket. Must be whitelisted
+                # here or load_policy() silently drops it like any other
+                # unknown key, and the setting looks configured but is not.
+                "restart_when_stopped": bool(cfg.get("restart_when_stopped", False)),
                 # Needed to deploy onto a unit that has never hosted the
                 # service — a queued command carries only a container name,
                 # so without these there is nothing to check out there.
@@ -3203,6 +3269,17 @@ _PINNED_NAMES = {
     "matrix_synapse", "matrix_element", "matrix_sms_bridge",
     "lokey", "lokey-client",
     "wg-easy", "crowdsec", "fail2ban",
+    # Added 2026-08-23, ahead of idle shutdown moving from opt-in to opt-out.
+    # None of these has a wake-on-request path, so once stopped they stay
+    # stopped until a human notices:
+    #   openbao    — the secrets broker every bao:// reference resolves
+    #                through; stopping it breaks the next deploy on any unit.
+    #   fluent-bit — the log shippers. A quiet shipper is the one you most need
+    #                running, and unit8's being down 36h is why its containers
+    #                were missing from the log filter lists entirely.
+    #   keycloak / freeipa — identity. Stopping either locks people out of
+    #                everything that authenticates against them.
+    "openbao", "fluent-bit", "keycloak", "freeipa",
     # Public web front doors. Both are bound to unit8 by an A record in pdns and
     # by Traefik's file provider, so migrating one moves the compose file while
     # DNS keeps pointing at unit8 — the site just goes dark. locator.yml already
@@ -4442,8 +4519,37 @@ def commands_complete():
     now = datetime.now(timezone.utc)
     with command_lock:
         cmd = command_queue.get(cmd_id)
-        if not cmd:
+    if not cmd:
+        # Not in memory — but if it is a recorded exec run, honour the report
+        # anyway. Refreshing the unit that hosts locator redeploys locator
+        # mid-run, so the result legitimately arrives after a restart that
+        # emptied the queue; refusing it there would lose exactly the outcome
+        # this is meant to capture. Anything genuinely unknown still 404s.
+        try:
+            known = db.get_command_run(cmd_id)
+        except Exception as e:
+            print(f"⚠️  Failed to look up command run {cmd_id}: {e}")
+            known = None
+        if not known:
             return jsonify({"error": "unknown command"}), 404
+        late = {
+            "id": cmd_id, "unit": known["unit"], "action": "exec",
+            "label": known.get("label"), "source": known.get("source"),
+            "script": known.get("script"), "job_id": known.get("job_id"),
+            "queued_at": known.get("queued_at"), "dispatched_at": known.get("dispatched_at"),
+            "completed_at": now.isoformat(),
+            "status": "DONE" if success else "FAILED", "success": success,
+            "stdout": str(data.get("stdout") or "")[:EXEC_OUTPUT_CAP],
+            "stderr": str(data.get("stderr") or "")[:EXEC_OUTPUT_CAP],
+            "exit_code": data.get("exit_code"),
+        }
+        print(f"{'✅' if success else '❌'} EXEC (late report) '{(late.get('label') or '')}' "
+              f"on {late['unit']}: exit {late.get('exit_code')}")
+        _update_run(late, error=None if success else "reported after a locator restart")
+        _emit_run_event(late)
+        return jsonify({"ok": True, "note": "recorded after locator restart"})
+
+    with command_lock:
         cmd["status"] = "DONE" if success else "FAILED"
         cmd["success"] = success
         cmd["completed_at"] = now.isoformat()
