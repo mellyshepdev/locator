@@ -39,7 +39,7 @@ services:
       - ELECTION_DRY_RUN=false
       - DISK_VETO_PERCENT=97
       - DATABASE_URL=${DATABASE_URL}
-      - LOCATOR_CANONICAL_URL=https://locator.theofficialblacksheepco.online
+      - LOCATOR_CANONICAL_URL=https://locator.prime-quality.online
       # Traccar runs on unit9 as a systemd service on :8082. Nothing has served
       # 80/443 there since its Caddy went away, so the default host
       # (traccar.theofficialblacksheepco.online) resolves to a machine with no
@@ -48,23 +48,23 @@ services:
       - TRACCAR_HOST=traccar.prime-quality.online
       - TRACCAR_PASS=${TRACCAR_PASS}
       - LOCATOR_ADMIN_KEY=${LOCATOR_ADMIN_KEY:-}
-      - CLEARANCE_ENFORCE=${CLEARANCE_ENFORCE:-false}
-      - CLEARANCE_ENFORCE_INGEST=${CLEARANCE_ENFORCE_INGEST:-false}
-      - OIDC_ISSUER=${OIDC_ISSUER:-https://bsco-keycloak.fly.dev/realms/blacksheep}
+      - CLEARANCE_ENFORCE=-true
+      - CLEARANCE_ENFORCE_INGEST=-true
+      - OIDC_ISSUER=${OIDC_ISSUER:-https://auth.theofficialblacksheepco.online/realms/blacksheep}
       - OIDC_AUDIENCE=${OIDC_AUDIENCE:-locator,client-portal}
       - KC_ADMIN_CLIENT_ID=${KC_ADMIN_CLIENT_ID:-clearance-admin}
       - KC_ADMIN_CLIENT_SECRET=${KC_ADMIN_CLIENT_SECRET:-}
     labels:
       - "traefik.enable=true"
       # UI router — protected by Keycloak (catch-all, lower priority)
-      - "traefik.http.routers.locator.rule=Host(`locator.theofficialblacksheepco.online`)"
+      - "traefik.http.routers.locator.rule=Host(`locator.prime-quality.online`)"
       - "traefik.http.routers.locator.entrypoints=websecure"
       - "traefik.http.routers.locator.tls=true"
       - "traefik.http.routers.locator.tls.certresolver=myresolver"
       - "traefik.http.routers.locator.priority=100"
       - "traefik.http.routers.locator.service=locator"
       # API router — no auth so lokey heartbeats and all programmatic calls pass through
-      - "traefik.http.routers.locator-api.rule=Host(`locator.theofficialblacksheepco.online`) && (PathPrefix(`/api/`) || PathPrefix(`/register`) || PathPrefix(`/deregister/`) || PathPrefix(`/nodes/`) || PathPrefix(`/wake/`) || PathPrefix(`/health`) || Path(`/silent-check-sso.html`))"
+      - "traefik.http.routers.locator-api.rule=Host(`locator.prime-quality.online`) && (PathPrefix(`/api/`) || PathPrefix(`/register`) || PathPrefix(`/deregister/`) || PathPrefix(`/nodes/`) || PathPrefix(`/wake/`) || PathPrefix(`/health`) || Path(`/silent-check-sso.html`))"
       - "traefik.http.routers.locator-api.entrypoints=websecure"
       - "traefik.http.routers.locator-api.tls=true"
       - "traefik.http.routers.locator-api.tls.certresolver=myresolver"
