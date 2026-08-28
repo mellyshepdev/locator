@@ -121,10 +121,10 @@
             var allowed = me.views || [];
             document.querySelectorAll('#ui-toggle .toggle-btn').forEach(function(btn) {
                 var view = btn.getAttribute('data-view');
-                if (view && allowed.indexOf(view) === -1) btn.style.display = 'none';
+                if (me.enforced && view && allowed.indexOf(view) === -1) btn.style.display = 'none';
             });
             var badge = document.getElementById('clearance-badge');
-            if (badge) {
+            if (badge && me.enforced) {
                 badge.textContent = 'CLEARANCE ' + me.clearance + ' — ' +
                     String(me.clearance_name || '').toUpperCase() +
                     (me.tenant ? ' · ' + me.tenant.toUpperCase() : '');
@@ -134,7 +134,7 @@
             // changed since last visit) fall back to the best one that isn't.
             var active = document.querySelector('#ui-toggle .toggle-btn.active');
             var activeView = active && active.getAttribute('data-view');
-            if (activeView && allowed.indexOf(activeView) === -1) {
+            if (me.enforced && activeView && allowed.indexOf(activeView) === -1) {
                 var fallback = ['grid', 'map', '3js', 'traccar', 'yamls', 'exec']
                     .filter(function(v) { return allowed.indexOf(v) !== -1; })[0];
                 if (fallback) switchView(fallback);

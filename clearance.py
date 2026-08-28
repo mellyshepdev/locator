@@ -105,6 +105,7 @@ PUBLIC = {
     "static",             # Flask's built-in static file server
     "whoami",             # tells the caller what it is; safe pre-auth
     "report_client_error",
+    "secrets_status",
 }
 
 # Ingest endpoints — written to by unattended agents. Gated by ENFORCE_INGEST
@@ -166,6 +167,8 @@ ROUTE_CLEARANCE = {
     "list_schedule":         ENGINEER,
     "list_commands":         ENGINEER,
     "get_command":           ENGINEER,
+    "secrets_refs":          ENGINEER,
+    "secrets_scan":          ENGINEER,
 
     # ── Write: runtime control ──────────────────────────────────────────
     "toggle_container":      OPERATOR,
@@ -191,6 +194,11 @@ ROUTE_CLEARANCE = {
 
     # ── Root: arbitrary code execution ──────────────────────────────────
     "queue_exec":            ROOT,
+
+    # ── Root: secrets management ────────────────────────────────────────
+    "secrets_resolve":       ROOT,
+    "secrets_refresh":       ROOT,
+    "secrets_quarantine":    ROOT,
 
     # ── Root: identity administration ───────────────────────────────────
     # Lists accounts and grants clearance levels. Whoever can reach these can
