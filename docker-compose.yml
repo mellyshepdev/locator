@@ -46,7 +46,7 @@ services:
       # listener - and that domain is SafeBrowse-blocked besides. This route
       # goes through unit8's Traefik, which reaches unit9 over the tailnet.
       - TRACCAR_HOST=traccar.prime-quality.online
-      - TRACCAR_PASS=${TRACCAR_PASS}
+      - TRACCAR_PASS=Thegr81234Thegr81234!
       - LOCATOR_ADMIN_KEY=${LOCATOR_ADMIN_KEY:-}
       - CLEARANCE_ENFORCE=-true
       - CLEARANCE_ENFORCE_INGEST=-true
