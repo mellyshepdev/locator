@@ -83,6 +83,43 @@ ENFORCE = os.environ.get("CLEARANCE_ENFORCE", "false").lower() in ("1", "true", 
 # than anything else here.
 ADMIN_KEY = os.environ.get("LOCATOR_ADMIN_KEY", "")
 
+# Level 9 (INFRA) identity for the AI assistant, presented as X-Locator-AI-Key.
+# Deliberately NOT the same secret as LOCATOR_ADMIN_KEY: that one mints ROOT and
+# is the human owner's. INFRA already excludes exec/shell (ROOT-only), and the
+# AI_DENIED_ENDPOINTS list below removes the destructive routes INFRA would
+# otherwise reach.
+AI_ADMIN_KEY = os.environ.get("LOCATOR_AI_ADMIN_KEY", "")
+
+# Endpoints the AI service account may never call, whatever its level and
+# whatever ENFORCE says. Destroying state is a human decision.
+#
+# This is a guardrail on our OWN automation, not a security boundary: while
+# CLEARANCE_ENFORCE is off an unauthenticated caller can still reach these
+# routes. What it guarantees is that an automated caller holding the AI key
+# cannot delete something without a human doing it instead.
+# Every identity the AI assistant can present. The static key is one of them;
+# the Keycloak service account `ai-admin` (realm role clearance-9) is the other
+# and arrives as via="oidc", so keying the deny on via alone silently exempted
+# it — the guarantee has to follow the ACTOR, not the transport.
+AI_PRINCIPAL_NAMES = frozenset({"service:ai-admin", "service-account-ai-admin"})
+
+
+def is_ai_principal(principal):
+    """True for any identity belonging to the AI assistant."""
+    return (principal.via == "ai-admin-key"
+            or principal.name in AI_PRINCIPAL_NAMES)
+
+
+AI_DENIED_ENDPOINTS = frozenset({
+    "delete_compose_file",   # DELETE /api/compose/<name>
+    "secrets_quarantine",    # rewrites compose files on other units
+    "delete_schedule",       # DELETE /api/schedule/<job_id>
+    "deregister_service",    # DELETE /deregister/<name>
+    "queue_exec", "exec",    # ROOT already, listed so the denial is explicit
+    "admin_set_clearance",   # granting privilege is never automated
+    "admin_pending_users",
+})
+
 # Heartbeats arrive from agents that may not carry the admin key yet. Leaving
 # this false keeps /register and the node/metric push open, exactly as today,
 # so turning ENFORCE on does not silently black-hole the mesh's telemetry.
@@ -105,6 +142,10 @@ PUBLIC = {
     "static",             # Flask's built-in static file server
     "whoami",             # tells the caller what it is; safe pre-auth
     "report_client_error",
+    # Broker liveness. Values are never in this response, only reachable /
+    # sealed / configured / token_ok — and it has to answer before a caller
+    # can be told why a deploy failed.
+    "secrets_status",
 }
 
 # Ingest endpoints — written to by unattended agents. Gated by ENFORCE_INGEST
@@ -114,6 +155,10 @@ INGEST = {
     "update_nodes",
     "update_node_metrics",
     "idle_report",
+    # Read by lokey on the same tick as idle_report; if this were left
+    # unlisted, turning ENFORCE on would 403 it and idle-stop would quietly
+    # stop working with no other symptom.
+    "idle_policy",
     "commands_pending",
     "get_policy_for_unit",
     "commands_complete",
@@ -161,6 +206,9 @@ ROUTE_CLEARANCE = {
     "list_compose_files":    ENGINEER,
     "get_compose_file":      ENGINEER,
     "list_yamls":            ENGINEER,
+    # Reading WHICH credentials exist and where — never their values.
+    "secrets_refs":          ENGINEER,
+    "secrets_scan":          ENGINEER,
     "get_yaml":              ENGINEER,
     "get_policy":            ENGINEER,
     "get_policy_locked":     ENGINEER,
@@ -192,6 +240,12 @@ ROUTE_CLEARANCE = {
 
     # ── Root: arbitrary code execution ──────────────────────────────────
     "queue_exec":            ROOT,
+    # resolve hands back real secret VALUES (lokey trades a bao:// ref for
+    # one using the admin key). quarantine rewrites live compose files on
+    # other units. Both are owner-level, never delegated.
+    "secrets_resolve":       ROOT,
+    "secrets_refresh":       ROOT,
+    "secrets_quarantine":    ROOT,
 
     # ── Root: identity administration ───────────────────────────────────
     # Lists accounts and grants clearance levels. Whoever can reach these can
@@ -476,6 +530,10 @@ def identify():
     if supplied_key and ADMIN_KEY and hmac.compare_digest(supplied_key, ADMIN_KEY):
         return Principal(ROOT, "service:admin-key", via="admin-key")
 
+    ai_key = request.headers.get("X-Locator-AI-Key", "")
+    if ai_key and AI_ADMIN_KEY and hmac.compare_digest(ai_key, AI_ADMIN_KEY):
+        return Principal(INFRA, "service:ai-admin", via="ai-admin-key")
+
     auth = request.headers.get("Authorization", "")
     if auth[:7].lower() == "bearer ":
         token = auth[7:].strip()
@@ -538,6 +596,18 @@ def install(app):
         endpoint = request.endpoint
         principal = identify()
         g.principal = principal
+
+        # Deliberately ABOVE the ENFORCE check. Everything below is a grant
+        # decision and is correctly skipped when enforcement is off; this is a
+        # denial, so skipping it would make the guardrail inert -- configured
+        # but doing nothing, which is the failure mode we keep hitting.
+        if is_ai_principal(principal) and endpoint in AI_DENIED_ENDPOINTS:
+            return jsonify({
+                "error": "destructive action requires a human",
+                "endpoint": endpoint,
+                "principal": principal.name,
+                "hint": "ask the owner to run this, or use the ROOT admin key",
+            }), 403
 
         if not ENFORCE:
             return None

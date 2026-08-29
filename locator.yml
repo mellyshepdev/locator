@@ -70,7 +70,62 @@ Service:
     instances: 1
 
   # ── Stationary: bound to a unit's identity or network position ─────────
+  # ── DNS + reverse proxy: the fleet's front door ────────────────────────
+  # Filled out 2026-08-28. Verified live against every unit on that date:
+  #   unit8  pdns, mariadb-pdns-primary, dnsdist, traefik, traefik-certs-dumper
+  #   unit7  traefik
+  #   unit9  pdns, mariadb-pdns-replica9, mariadb-pdns
+  #
+  # Every entry here is stationary AND carries a units: list that names each
+  # unit it really runs on. Both matter, for different reasons:
+  #   - stationary keeps the rebalancer from moving a compose file away from
+  #     the volume holding the zone data.
+  #   - units: is what _is_multi_unit_service() reads, and that is the ONLY
+  #     thing that exempts a service from _enforce_dedup. traefik was declared
+  #     units: "8" while a second traefik has been running on unit7 for days,
+  #     which is exactly the shape that produced the nasa eviction loop above.
+  #
+  # QUOTE every underscore form. A bare 8_9 is the integer 89 (YAML 1.1 digit
+  # separators) and matches no unit at all.
   traefik:
+    deployment_type: essential
+    location_type: stationary
+    units: "7_8"
+    instances: 1
+
+  # Writes the ACME cert bundle out of acme.json for the services that read
+  # PEMs off disk. Bound to unit8 because that is where acme.json lives.
+  traefik-certs-dumper:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
+  # Authoritative DNS. unit8 is primary, unit9 is the AXFR secondary - both
+  # answer on :53, so losing either is a real outage, not a degraded read.
+  pdns:
+    deployment_type: essential
+    location_type: stationary
+    units: "8_9"
+    instances: 1
+
+  # pdns's backing store. These are NOT interchangeable: the primary holds the
+  # writable copy that pdnsutil edits, the replica9 copy is fed by replication.
+  # Migrating either moves the compose file and leaves the volume behind.
+  mariadb-pdns-primary:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
+  mariadb-pdns-replica9:
+    deployment_type: essential
+    location_type: stationary
+    units: "9"
+    instances: 1
+
+  # The :53 front end on unit8 that fans queries out to pdns.
+  dnsdist:
     deployment_type: essential
     location_type: stationary
     units: "8"
@@ -167,3 +222,42 @@ Service:
     location_type: stationary
     units: "3_4_5_6_7_8_9"
     instances: 1
+
+  # ── Idle auto-stop ─────────────────────────────────────────────────────
+  # Both live on unit4 and are why its disk keeps filling: ollama holds model
+  # blobs, and the pair of them are what get stopped by hand whenever the box
+  # runs short. Declaring it here makes that automatic instead of manual.
+  #
+  # deployment_type MUST NOT be essential — locator refuses idle_stop on an
+  # essential service even when the flag is set. Neither name appears in
+  # lokey NEVER_STOP (substring match), so this policy is the only gate.
+  #
+  # CAVEAT: neither has a wake-on-request path. Sablier runs on unit8 and
+  # cannot start a container on unit4, so once these stop they stay stopped
+  # until someone starts them or POSTs /api/idle/wake/<container>.
+  ollama:
+    deployment_type: optional
+    location_type: stationary
+    units: "4"
+    instances: 1
+    idle_stop: true
+    idle_timeout: 15m
+
+  agent-0:
+    deployment_type: optional
+    location_type: stationary
+    units: "4"
+    instances: 1
+    idle_stop: true
+    idle_timeout: 15m
+
+  # rasa lives on unit8, not unit4. Wake-on-request is wired in unit8s Traefik
+  # (dynamic-config/rasa.yml) and starts rasa AND ollama, since rasa reaches
+  # ollama directly rather than through a proxy.
+  rasa:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    idle_stop: true
+    idle_timeout: 15m

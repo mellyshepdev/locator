@@ -9,3 +9,15 @@ registry_data/
 *.bak2-*
 *.bak3-*
 *.bak4-*
+.aider*
+
+# Credentials. The refresh cron commits with `git add -A`, so anything not
+# listed here gets committed AND pushed to the shared remote on its next run.
+.ai-admin-client-secret
+secrets/
+*.keytab
+*.token
+UNSEAL-*.json
+
+# Vendored clone that landed under templates/ - never belongs in this repo.
+templates/llama.cpp/

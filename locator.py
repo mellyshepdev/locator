@@ -62,6 +62,8 @@ import notifier
 import db
 import clearance
 import kc_admin
+import bao
+import secretscan
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -2729,6 +2731,42 @@ def balance_status():
     })
 
 
+@app.route("/api/idle/policy", methods=["GET"])
+def idle_policy():
+    """Which containers a unit is ALLOWED to idle-stop, straight from locator.yml.
+
+    lokey calls this each tick instead of reading the locator.idle.stop label.
+    The label still works and is unioned in on the agent side, but this is the
+    path that makes the policy file authoritative.
+
+    Two floors, both deliberate:
+      * opt-in only — a service is returned solely because it carries
+        idle_stop: true, so an undeclared service is never eligible;
+      * deployment_type: essential is refused even when idle_stop is set, so
+        the two keys cannot contradict each other into stopping a critical
+        service.
+    """
+    unit = (request.args.get("unit") or "").strip().lower()
+    if unit and not unit.startswith("unit"):
+        unit = "unit" + unit
+    out = {}
+    for name, cfg in load_policy().items():
+        if not cfg.get("idle_stop"):
+            continue
+        if cfg.get("deployment_type") == "essential":
+            continue
+        spec = cfg.get("units") or ""
+        if unit and spec not in ("", "all", "current_unit"):
+            if unit not in _expand_unit_spec(spec, []):
+                continue
+        out[name] = {"timeout": cfg.get("idle_timeout") or ""}
+    return jsonify({
+        "unit": unit,
+        "containers": out,
+        "default_timeout": IDLE_DEFAULT_TIMEOUT,
+    })
+
+
 @app.route("/api/idle/status", methods=["GET"])
 def idle_status():
     """Idle auto-shutdown state: watched containers, idle time, and time remaining."""
@@ -3206,6 +3244,20 @@ def load_policy():
                 # here or load_policy() silently drops it like any other
                 # unknown key, and the setting looks configured but is not.
                 "restart_when_stopped": bool(cfg.get("restart_when_stopped", False)),
+                # Idle auto-stop, decided HERE rather than by a per-container
+                # docker label. A label can only be changed by recreating the
+                # container; locator.yml is editable from the dashboard and is
+                # the fleet's stated source of truth, so the policy lives with
+                # the rest of the policy.
+                #
+                # STRICTLY OPT-IN. A service becomes eligible only by saying
+                # idle_stop: true here, so anything absent from this file can
+                # never be stopped by omission — which is the whole point:
+                # unit8 alone runs ~40 containers against far fewer policies.
+                "idle_stop": bool(cfg.get("idle_stop", False)),
+                # Optional per-service override, same spelling the label took
+                # ("15m", "2h", "5400"). Empty means use IDLE_DEFAULT_TIMEOUT.
+                "idle_timeout": str(cfg.get("idle_timeout", "")),
                 # Needed to deploy onto a unit that has never hosted the
                 # service — a queued command carries only a container name,
                 # so without these there is nothing to check out there.
@@ -4031,6 +4083,384 @@ def _queue_exec_command(unit, script, source="manual", label=None, job_id=None):
     return queued
 
 
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  SECRETS BROKER  —  locator is the only holder of the OpenBao token
+# ═══════════════════════════════════════════════════════════════════════
+# locator.yml's env: block holds bao:// REFERENCES, never values. Deploy
+# commands carry the reference (a path is not a secret); lokey exchanges it
+# here for the value using LOCATOR_ADMIN_KEY. That split exists because
+# /api/commands/pending is unauthenticated and Traefik's locator-api router
+# bypasses Keycloak for /api/ — anything queued is world-readable.
+
+@app.route("/api/secrets/status", methods=["GET"])
+def secrets_status():
+    """Broker health. Never returns secret values.
+
+    Ungated but redacted, so the Keycloak-protected dashboard (whose browser
+    session carries no admin key) can still show whether the broker is alive.
+    Send the admin key to get the full picture.
+    """
+    try:
+        full = bao.status()
+    except Exception as e:
+        return jsonify({"reachable": False, "error": str(e)}), 200
+    if request.headers.get("X-Locator-Admin-Key") and not _require_admin_key():
+        return jsonify(full)
+    return jsonify({k: full.get(k) for k in
+                    ("reachable", "sealed", "configured", "token_ok",
+                     "token_ttl_seconds", "cached_secrets", "version")})
+
+
+@app.route("/api/secrets/resolve", methods=["POST"])
+def secrets_resolve():
+    """Exchange bao:// references for values. Admin key required.
+
+    Two body shapes:
+      {"service": "reech", "unit": "unit8"}  -> that service's whole env block
+                                                from locator.yml, resolved
+      {"refs": ["bao://secret/reech#client_secret", ...]} -> ref -> value
+
+    Returns 502 and resolves NOTHING on any failure. A partially resolved env
+    map is worse than none: it seeds a blank into .env and surfaces days later
+    as an auth error nobody can trace back to here.
+    """
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+
+    if data.get("refs"):
+        refs = data["refs"]
+        if not isinstance(refs, list):
+            return jsonify({"error": "refs must be a list"}), 400
+        out = {}
+        try:
+            for ref in refs:
+                out[ref] = bao.resolve_ref(ref)
+        except bao.BaoError as e:
+            return jsonify({"error": str(e)}), 502
+        return jsonify({"resolved": out, "count": len(out)})
+
+    service = (data.get("service") or "").strip().lower()
+    if not service:
+        return jsonify({"error": "body needs 'service' or 'refs'"}), 400
+    pol = _policy_for(service)
+    if not pol:
+        return jsonify({"error": f"no policy for '{service}' in locator.yml"}), 404
+    env_cfg = pol.get("env") or {}
+    unit = (data.get("unit") or "").strip().lower()
+    env_map = {**(env_cfg.get("common") or {}), **(env_cfg.get(unit) or {})}
+    if not env_map:
+        return jsonify({"service": service, "unit": unit, "env": {}, "refs_used": []})
+    try:
+        resolved, used = bao.resolve_env_map(env_map)
+    except bao.BaoError as e:
+        emit_event("secrets", action="resolve_failed", service=service, error=str(e))
+        return jsonify({"error": str(e), "service": service}), 502
+    return jsonify({"service": service, "unit": unit,
+                    "env": resolved, "refs_used": used})
+
+
+@app.route("/api/secrets/refresh", methods=["POST"])
+def secrets_refresh():
+    """Drop cached secrets so the next resolve re-reads OpenBao. Post-rotation."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    prefix = (request.get_json(silent=True) or {}).get("prefix")
+    dropped = bao.invalidate(prefix)
+    return jsonify({"dropped": dropped, "prefix": prefix})
+
+
+@app.route("/api/secrets/refs", methods=["GET"])
+def secrets_refs():
+    """Every bao:// reference locator.yml mentions, per service.
+
+    Paths only, never values — this is the map you check after rotating a
+    secret to see which services need a redeploy.
+    """
+    out = {}
+    for name, pol in (load_policy() or {}).items():
+        env_cfg = pol.get("env") or {}
+        refs = {}
+        for scope, block in env_cfg.items():
+            if not isinstance(block, dict):
+                continue
+            for k, v in block.items():
+                if bao.is_ref(v):
+                    refs.setdefault(scope, {})[str(k)] = str(v)
+        if refs:
+            out[name] = refs
+    return jsonify({"services": out, "count": len(out)})
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  COMPOSE SECRET SWEEP  —  find plaintext credentials, then vault them
+# ═══════════════════════════════════════════════════════════════════════
+# lokey uploads every unit's docker-compose.yml into COMPOSE_DIR and the store
+# is committed and pushed, so a password typed into an environment: block is
+# both readable on the unit and permanent in git history. The sweeper reports;
+# quarantine is a deliberate, admin-keyed act because it edits live compose
+# files on units and a bad rewrite takes a stack down.
+
+SECRETSCAN_INTERVAL = int(os.environ.get("SECRETSCAN_INTERVAL", "900"))
+SECRETSCAN_ENABLED = os.environ.get("SECRETSCAN_ENABLED", "true").lower() in ("1", "true", "yes")
+# Where a quarantined credential is filed. One secret per compose file keeps
+# the bao:// reference readable and the blast radius of a rotation small.
+SECRETSCAN_MOUNT = os.environ.get("SECRETSCAN_MOUNT", "secret")
+SECRETSCAN_PREFIX = os.environ.get("SECRETSCAN_PREFIX", "compose")
+
+_scan_cache = {"at": None, "findings": [], "files": 0}
+_scan_lock = threading.Lock()
+
+
+def _compose_store_files():
+    """(name, path) for every compose file in the store."""
+    out = []
+    try:
+        for fname in sorted(os.listdir(COMPOSE_DIR)):
+            if fname.endswith((".yml", ".yaml")):
+                out.append((os.path.splitext(fname)[0], os.path.join(COMPOSE_DIR, fname)))
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def _scan_store():
+    """Scan every stored compose file. Findings keep their raw values, so this
+    result must be passed through secretscan.public() before it leaves here."""
+    findings, files = [], 0
+    for name, path in _compose_store_files():
+        try:
+            with open(path, errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        files += 1
+        findings.extend(secretscan.scan_text(text, source=name))
+    return findings, files
+
+
+@app.route("/api/secrets/scan", methods=["GET"])
+def secrets_scan():
+    """Plaintext credentials found in the compose store. Values are masked.
+
+    ?fresh=1 rescans instead of serving the sweeper's last pass.
+    """
+    if request.args.get("fresh") in ("1", "true", "yes"):
+        findings, files = _scan_store()
+        with _scan_lock:
+            _scan_cache.update({"at": datetime.now(timezone.utc).isoformat(),
+                                "findings": findings, "files": files})
+    with _scan_lock:
+        findings = list(_scan_cache["findings"])
+        at, files = _scan_cache["at"], _scan_cache["files"]
+
+    by_file, by_sev = {}, {}
+    for f in findings:
+        by_file.setdefault(f["source"], []).append(f["key"])
+        by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+    return jsonify({
+        "scanned_at": at,
+        "files_scanned": files,
+        "total": len(findings),
+        "by_severity": by_sev,
+        "by_file": {k: sorted(set(v)) for k, v in sorted(by_file.items())},
+        "findings": secretscan.public(findings),
+    })
+
+
+def _bao_path_for(compose_name):
+    return f"{SECRETSCAN_PREFIX}/{compose_name}"
+
+
+@app.route("/api/secrets/quarantine", methods=["POST"])
+def secrets_quarantine():
+    """Move one compose file's plaintext credentials into OpenBao.
+
+    Body: {"file": "matomo-db", "keys": [...optional subset...],
+           "dry_run": true}
+
+    Order matters and is not negotiable: the value goes into OpenBao FIRST and
+    is read back, then the file is rewritten. Rewriting first would, on a bao
+    write failure, leave a ${VAR} with nothing behind it — the credential gone
+    from the file and never stored anywhere.
+
+    This rewrites the STORE copy and queues a redact_env command for the unit
+    that owns the container, so the real file on the unit is fixed too.
+    """
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    name = (data.get("file") or "").strip()
+    if not name:
+        return jsonify({"error": "body needs 'file'"}), 400
+    dry_run = bool(data.get("dry_run"))
+    only = set(data.get("keys") or [])
+
+    path = os.path.join(COMPOSE_DIR, f"{name}.yml")
+    if not os.path.isfile(path):
+        path = os.path.join(COMPOSE_DIR, f"{name}.yaml")
+    if not os.path.isfile(path):
+        return jsonify({"error": f"no compose file '{name}' in the store"}), 404
+    with open(path, errors="replace") as f:
+        text = f.read()
+
+    findings = secretscan.scan_text(text, source=name)
+    actionable = [f for f in findings
+                  if f["severity"] not in ("placeholder", "hashed")
+                  and (not only or f["key"] in only)]
+    skipped = [f for f in findings if f not in actionable]
+    if not actionable:
+        return jsonify({"file": name, "quarantined": [], "skipped": secretscan.public(skipped),
+                        "note": "nothing actionable"})
+
+    # Same key twice in one file (a password repeated across two services) must
+    # agree, or we cannot store one value under one field name.
+    values = {}
+    for f in actionable:
+        prev = values.get(f["key"])
+        if prev is not None and prev != f["value"]:
+            return jsonify({"error": f"'{f['key']}' appears twice in {name} with "
+                                     f"different values — resolve by hand"}), 409
+        values[f["key"]] = f["value"]
+
+    bao_path = _bao_path_for(name)
+    new_text, changed = secretscan.redact_text(text, actionable)
+    refs = {k: f"bao://{SECRETSCAN_MOUNT}/{bao_path}#{k}" for k in sorted(values)}
+
+    if dry_run:
+        return jsonify({"file": name, "dry_run": True,
+                        "would_store": sorted(values), "bao_path": f"{SECRETSCAN_MOUNT}/{bao_path}",
+                        "refs": refs, "skipped": secretscan.public(skipped),
+                        "diff_lines": sorted({f["line"] for f in actionable})})
+
+    try:
+        bao.write_secret(SECRETSCAN_MOUNT, bao_path, values)
+        # Read back before touching the file. A write that reported success but
+        # stored nothing would otherwise be discovered only after redaction.
+        stored = bao.read_secret(SECRETSCAN_MOUNT, bao_path, use_cache=False)
+        missing = [k for k, v in values.items() if stored.get(k) != v]
+        if missing:
+            raise bao.BaoError(f"read-back mismatch for {missing}")
+    except bao.BaoError as e:
+        emit_event("secrets", action="quarantine_failed", file=name, error=str(e))
+        return jsonify({"error": f"OpenBao write failed, file left untouched: {e}"}), 502
+
+    backup = f"{path}.bak-prequarantine-{int(time.time())}"
+    try:
+        with open(backup, "w") as f:
+            f.write(text)
+        with open(path, "w") as f:
+            f.write(new_text)
+    except OSError as e:
+        return jsonify({"error": f"secrets stored in OpenBao but the store file "
+                                 f"could not be rewritten: {e}"}), 500
+
+    queued = _queue_redactions(name, sorted(values), refs)
+    emit_event("secrets", action="quarantined", file=name,
+               keys=sorted(values), bao_path=f"{SECRETSCAN_MOUNT}/{bao_path}",
+               units=queued)
+    if GIT_AUTO_PUSH:
+        _git_push_event.set()
+    print(f"🔐 QUARANTINED {len(changed)} credential(s) from {name} → "
+          f"{SECRETSCAN_MOUNT}/{bao_path}; redaction queued for {queued or 'no unit'}")
+    return jsonify({"file": name, "quarantined": sorted(values),
+                    "bao_path": f"{SECRETSCAN_MOUNT}/{bao_path}", "refs": refs,
+                    "store_backup": backup, "units_queued": queued,
+                    "skipped": secretscan.public(skipped)})
+
+
+def _queue_redactions(compose_name, keys, refs):
+    """Tell whichever unit runs this container to strip the same lines locally.
+
+    The command carries only key names and bao:// references, never a value —
+    /api/commands/pending is unauthenticated.
+    """
+    units = set()
+    with lock:
+        services = dict(registry.get("services") or {})
+    for svc_name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        if (svc.get("name") or svc_name or "").lower() != compose_name.lower():
+            continue
+        # ONLINE only. The registry still carries unit1 as the host of half the
+        # estate — that laptop has been dead for months — and queuing a
+        # redaction there would park a command nobody ever collects while the
+        # unit actually running the container keeps its plaintext copy.
+        if str(svc.get("status", "")).upper() != "ONLINE":
+            continue
+        unit = svc.get("host")
+        if unit and unit != "external":
+            units.add(unit)
+    for unit in sorted(units):
+        _queue_command(unit, compose_name, "redact_env", source="secret_sweep",
+                       extra={"keys": list(keys), "refs": refs})
+    return sorted(units)
+
+
+def bao_token_renewer():
+    """Keep the broker's periodic token alive.
+
+    A periodic token never expires WHILE it is renewed, and dies without a
+    sound the moment renewal stops. Renewing at a fraction of the remaining TTL
+    means a few missed passes (a locator restart, a bao restart) cost nothing.
+    """
+    while True:
+        try:
+            st = bao.status()
+            if not st.get("token_ok"):
+                # Not configured yet is the normal state before
+                # provision-bao-broker.sh has been run; don't spam about it.
+                time.sleep(300)
+                continue
+            ttl = st.get("token_ttl_seconds") or 0
+            if ttl and ttl < 7 * 24 * 3600:
+                lease = bao.renew_self()
+                print(f"🔐 OpenBao broker token renewed — lease now {lease}s")
+            time.sleep(max(3600, min(int(ttl / 4) if ttl else 3600, 21600)))
+        except bao.BaoError as e:
+            print(f"⚠️  OpenBao token renewal failed: {e}")
+            time.sleep(600)
+        except Exception as e:
+            print(f"⚠️  token renewer error: {e}")
+            time.sleep(600)
+
+
+def secret_sweeper():
+    """Background pass over the compose store. Reports only — never edits."""
+    if not SECRETSCAN_ENABLED:
+        print("🔐 secret sweeper disabled (SECRETSCAN_ENABLED=false)")
+        return
+    known = set()
+    while True:
+        try:
+            findings, files = _scan_store()
+            with _scan_lock:
+                _scan_cache.update({"at": datetime.now(timezone.utc).isoformat(),
+                                    "findings": findings, "files": files})
+            # Alert on what is NEW since the last pass. Re-announcing 27 known
+            # findings every 15 minutes trains everyone to ignore the channel.
+            seen = {(f["source"], f["key"], f["severity"]) for f in findings}
+            fresh = seen - known
+            if fresh and known:
+                for source, key, sev in sorted(fresh):
+                    print(f"🔐 NEW plaintext credential: {source} → {key} ({sev})")
+                    emit_event("secrets", action="exposed", file=source,
+                               key=key, severity=sev)
+            elif fresh:
+                print(f"🔐 secret sweep: {len(findings)} plaintext credential(s) "
+                      f"across {files} compose file(s) — GET /api/secrets/scan")
+            known = seen
+        except Exception as e:
+            print(f"⚠️  secret sweeper error: {e}")
+        time.sleep(SECRETSCAN_INTERVAL)
+
+
 @app.route("/api/exec", methods=["POST"])
 def queue_exec():
     """Queue a shell command/script to run on a unit's lokey. Requires admin key —
@@ -4621,9 +5051,28 @@ def _find_service_entry(container):
 
     # An ONLINE instance is the one worth acting on; among equals prefer a
     # name@host key, since that names the host explicitly.
+    #
+    # Third key, freshest heartbeat first: duplicate records accumulate for one
+    # container (bare name, name@host, name_host) from different discovery
+    # paths and older hostname conventions, and they can ALL be OFFLINE - a
+    # STOPPED container has no online record anywhere, which is exactly when
+    # something wants to start it. With only the first two keys the choice
+    # among equals fell to insertion order. For ollama that picked between a
+    # record attributed to unit1 (the dead laptop) and one to the pre-rename
+    # host "BlackSheepUnit4", which no lokey polls under - either way the start
+    # command was queued somewhere nothing would ever execute it, and the wake
+    # silently did nothing while reporting success.
+    def _hb_epoch(value):
+        try:
+            return datetime.fromisoformat(str(value)).timestamp()
+        except (TypeError, ValueError):
+            return 0.0
+
     def rank(item):
         key, s = item
-        return (0 if s.get("status") == "ONLINE" else 1, 0 if "@" in key else 1)
+        return (0 if s.get("status") == "ONLINE" else 1,
+                0 if "@" in key else 1,
+                -_hb_epoch(s.get("last_heartbeat")))
 
     candidates.sort(key=rank)
     return candidates[0]
@@ -4668,7 +5117,27 @@ def shutdown_container(name):
 @app.route("/wake/<container>", methods=["GET"])
 def wake_page(container):
     """Click-to-wake: queue the start command and show a page that redirects
-    to the service once lokey reports it back ONLINE."""
+    to the service once lokey reports it back ONLINE.
+
+    Accepts a COMMA-SEPARATED list ("agent-0,ollama") so one request wakes a
+    service together with the dependencies it calls directly. agent-0 and rasa
+    both reach ollama over unit4 rather than through Traefik, so no HTTP
+    request ever passes through ollama and nothing in the request path can
+    wake it on its own. Without this, waking agent-0 after an idle period
+    gives you a live UI whose first model call fails against a stopped ollama.
+
+    The FIRST name is the primary: it is what gets displayed, polled for
+    ONLINE, and redirected to. The rest are started silently.
+    """
+    names = [n.strip() for n in str(container).split(",") if n.strip()]
+    if names:
+        container = names[0]
+    for extra in names[1:]:
+        extra_unit = _find_container_unit(extra)
+        # A dependency that is unknown to the registry must never block the
+        # primary from waking - best effort, and the primary still proceeds.
+        if extra_unit:
+            _queue_command(extra_unit, extra, "start", source="wake")
     unit = _find_container_unit(container)
     if not unit:
         return Response(f"Unknown container '{container}'", status=404)
@@ -5131,6 +5600,8 @@ def start_background_workers():
         _self_election,             # secondaries stop themselves if primary is up
         enforce_unit_placement,     # locator.yml "units:" placement
         critical_service_watchdog,  # restarts apache/lokey/locator if OFFLINE
+        secret_sweeper,             # finds plaintext credentials in the store
+        bao_token_renewer,          # a periodic OpenBao token dies silently
         traccar_feeder,             # lokey's GPS fixes into Traccar
         script_scheduler,           # recurring exec jobs from /api/schedule
         exec_run_reaper,            # ages out exec jobs that never reported back

@@ -257,8 +257,21 @@ def status():
     # Health needs no token, so an unconfigured broker still reports the server.
     try:
         req = urllib.request.Request(f"{BAO_ADDR}/v1/sys/health")
-        with urllib.request.urlopen(req, timeout=BAO_TIMEOUT) as resp:
-            health = json.loads(resp.read().decode())
+        try:
+            with urllib.request.urlopen(req, timeout=BAO_TIMEOUT) as resp:
+                health = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            # /sys/health signals state through the STATUS CODE and still
+            # returns a body: 503 sealed, 501 uninitialised, 429/472/473
+            # standby. urlopen raises on all of those, so catching only the
+            # happy path reported a sealed vault as unreachable — sending the
+            # operator after a network fault when the body already said
+            # "sealed": true. The server answered; that is reachable.
+            body = e.read().decode() or "{}"
+            try:
+                health = json.loads(body)
+            except ValueError:
+                raise
         out["reachable"] = True
         out["sealed"] = bool(health.get("sealed"))
         out["version"] = health.get("version")

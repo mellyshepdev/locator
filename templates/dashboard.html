@@ -81,7 +81,11 @@
             return;
         }
         var kc = new Keycloak({
-            url: 'https://bsco-keycloak.fly.dev',
+            // Canonical issuer. The realm itself declares https://auth.theofficialblacksheepco.com
+            // as its issuer, so the fly host and the .online alias both produce
+            // tokens locator rejects. fly is also delinquent and .online is
+            // SafeBrowse-blocked on the owner's networks.
+            url: 'https://auth.theofficialblacksheepco.com',
             realm: 'blacksheep',
             clientId: 'locator'
         });
@@ -109,10 +113,18 @@
         function applyClearance(me) {
             window.CLEARANCE = me;
             var allowed = me.views || [];
-            document.querySelectorAll('#ui-toggle .toggle-btn').forEach(function(btn) {
-                var view = btn.getAttribute('data-view');
-                if (view && allowed.indexOf(view) === -1) btn.style.display = 'none';
-            });
+            // Only hide tabs when the server is ACTUALLY enforcing clearance.
+            // whoami always reports the caller's computed level, so an
+            // unidentified caller gets views: [] even while CLEARANCE_ENFORCE
+            // is off - which hid all six tabs on a server that was letting
+            // every request straight through. switchView() already gates on
+            // me.enforced; this now matches it.
+            if (me.enforced) {
+                document.querySelectorAll('#ui-toggle .toggle-btn').forEach(function(btn) {
+                    var view = btn.getAttribute('data-view');
+                    if (view && allowed.indexOf(view) === -1) btn.style.display = 'none';
+                });
+            }
             var badge = document.getElementById('clearance-badge');
             if (badge) {
                 badge.textContent = 'CLEARANCE ' + me.clearance + ' \u2014 ' +
@@ -122,7 +134,7 @@
             }
             var active = document.querySelector('#ui-toggle .toggle-btn.active');
             var activeView = active && active.getAttribute('data-view');
-            if (activeView && allowed.indexOf(activeView) === -1) {
+            if (me.enforced && activeView && allowed.indexOf(activeView) === -1) {
                 var fallback = ['grid','map','3js','traccar','yamls','exec'].filter(function(v){return allowed.indexOf(v)!==-1;})[0];
                 if (fallback) switchView(fallback);
             }
