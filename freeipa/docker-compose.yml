@@ -1,0 +1,77 @@
+# ── FREEIPA — identity source for clearance levels ──────────────────────────
+#
+# FreeIPA holds the people and their clearance; Keycloak federates it over LDAP
+# and mints the tokens the Locator actually verifies. Nothing in the Locator
+# talks to this host directly.
+#
+# Deploy notes that are not optional:
+#   * Dedicated host. FreeIPA owns 389/636/88/464/53 and rewrites resolv.conf;
+#     it does not co-tenant politely with Traefik or with the unit agents.
+#   * The FQDN below must resolve to this host, forward AND reverse, before
+#     the first boot. FreeIPA bakes the hostname into its Kerberos realm and
+#     its CA; changing it afterwards means reinstalling from scratch.
+#   * The container needs its own cgroup mount and a real init — this image
+#     runs systemd inside.
+#   * Back up /data. It contains the CA private key. Losing it means every
+#     enrolled host has to be re-enrolled.
+#
+# First boot (interactive, once):
+#   docker compose run --rm freeipa ipa-server-install -U \
+#     --realm=THEOFFICIALBLACKSHEEPCO.ONLINE \
+#     --domain=theofficialblacksheepco.online \
+#     --ds-password="$IPA_DM_PASSWORD" --admin-password="$IPA_ADMIN_PASSWORD" \
+#     --no-ntp --setup-dns --auto-forwarders
+# Then: docker compose up -d && ./bootstrap-ipa.sh
+
+services:
+  freeipa:
+    image: freeipa/freeipa-server:rocky-9
+    container_name: freeipa
+    hostname: ipa.theofficialblacksheepco.online
+    restart: unless-stopped
+    # FreeIPA runs systemd as PID 1; without this it cannot start its services.
+    command: ["no-exit"]
+    stop_grace_period: 30s
+    dns:
+      # Point the container at itself once its own DNS is up, else install
+      # deadlocks waiting for a resolver that is not running yet.
+      - 127.0.0.1
+      - 1.1.1.1
+    environment:
+      IPA_SERVER_HOSTNAME: ipa.theofficialblacksheepco.online
+      IPA_SERVER_IP: ${IPA_SERVER_IP}
+      # Never inline these. Put them in freeipa/.env, chmod 600, git-ignored.
+      PASSWORD: ${IPA_ADMIN_PASSWORD}
+      DEBUG_TRACE: 0
+    volumes:
+      - ./data:/data:Z
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+    tmpfs:
+      - /run
+      - /tmp
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 0
+    cgroup: host
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_ADMIN
+      - SYS_TIME
+      - NET_ADMIN
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+      - "88:88/tcp"
+      - "88:88/udp"
+      - "389:389/tcp"     # LDAP  — StartTLS only, see bootstrap
+      - "443:443/tcp"
+      - "464:464/tcp"
+      - "464:464/udp"
+      - "636:636/tcp"     # LDAPS — this is what Keycloak connects on
+      - "80:80/tcp"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "kinit -k && ipa ping"]
+      interval: 60s
+      timeout: 15s
+      retries: 5
+      start_period: 900s
