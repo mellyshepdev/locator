@@ -186,6 +186,10 @@ ROUTE_CLEARANCE = {
     "balance_status":        PARTNER,
     "idle_status":           PARTNER,
     "certs_status":          PARTNER,
+    # Expiry metadata for every tracked credential — never a value. Reads
+    # like certs_status, so it sits with it; the renewal ACTION is a
+    # worker, and minting still goes through certs_issue at ROOT.
+    "renewals_status":       PARTNER,
     "dns_status":            ENGINEER,
     "list_migrations":       PARTNER,
     # Fleet refresh — status/history read like the other operational telemetry;

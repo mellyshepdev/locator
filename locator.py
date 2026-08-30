@@ -63,6 +63,7 @@ import db
 import clearance
 import kc_admin
 import bao
+import renewals
 import secretscan
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
@@ -5298,6 +5299,16 @@ def certs_issue():
     return jsonify(out)
 
 
+@app.route("/api/renewals", methods=["GET"])
+def renewals_status():
+    """Every credential the fleet tracks an expiry for, and what is due.
+
+    Read-only and unauthenticated on purpose: it carries expiry dates and
+    names, never a secret value — the same shape as /api/certs/status.
+    """
+    return jsonify(renewals.snapshot())
+
+
 @app.route("/api/certs/status", methods=["GET"])
 def certs_status():
     """All reported certs plus the flagged subset (expiring soon or broken)."""
@@ -5614,6 +5625,21 @@ _workers_lock = threading.Lock()
 _workers_started = False
 
 
+def _credential_renewer():
+    """The fleet's 7-days-before-expiry rule, over every credential we track.
+
+    Reads the live cert reports through a getter rather than a snapshot so the
+    thread always evaluates what the units reported most recently, and queues
+    node-local work through the ordinary exec queue — which means every
+    renewal shows up in the command history like any other job.
+    """
+    def _cert_state_getter():
+        with _cert_lock:
+            return {u: dict(v) for u, v in _cert_state.items()}
+
+    renewals.worker(_cert_state_getter, bao, _queue_exec_command)
+
+
 def start_background_workers():
     """Start every background thread, exactly once.
 
@@ -5665,6 +5691,7 @@ def start_background_workers():
         traccar_feeder,             # lokey's GPS fixes into Traccar
         script_scheduler,           # recurring exec jobs from /api/schedule
         exec_run_reaper,            # ages out exec jobs that never reported back
+        _credential_renewer,        # reissues every expiring credential 7 days out
     ]
     if BALANCE_ENABLED:
         workers.append(load_balancer)
