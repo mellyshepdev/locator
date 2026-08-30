@@ -56,7 +56,7 @@ import tempfile
 import qrcode
 import pandas as pd
 from datetime import datetime, timezone, timedelta
-from flask import Flask, request, jsonify, Response, render_template
+from flask import Flask, request, jsonify, Response, render_template, g
 
 import notifier
 import db
@@ -3201,6 +3201,22 @@ networks:
 _policy_cache = {"mtime": None, "data": {}}
 
 
+def _as_list(value):
+    """Normalise a YAML scalar-or-list into a list of clean strings.
+
+    locator.yml is hand-edited, so `wake_with: reech-db` and
+    `wake_with: [reech-db]` both have to mean the same thing — a schema that
+    punishes the shorter spelling just produces silently-empty policy.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        items = [value]
+    return [str(v).strip() for v in items if str(v).strip()]
+
+
 def load_policy():
     """Service policy from locator.yml, keyed by lowercase service name.
 
@@ -3268,6 +3284,33 @@ def load_policy():
                 # target needs. Gitignored on nearly every project, so a fresh
                 # clone has none and every ${VAR} resolves empty.
                 "env": cfg.get("env") if isinstance(cfg.get("env"), dict) else {},
+                # ── Wake-on-request ──────────────────────────────────────
+                # Same argument as idle_stop above, and the other half of the
+                # same feature: the thing that STOPS a container is declared
+                # here, so the thing that starts it belongs here too rather
+                # than being spread across Traefik query strings and frontend
+                # constants, which is where it used to live and why it silently
+                # rotted (a retired hostname in one place, a missing prop in
+                # another, and no single file that said what the truth was).
+                #
+                # public_wake — STRICTLY OPT-IN, exactly like idle_stop. Lets an
+                # anonymous visitor wake this one container and nothing else.
+                "public_wake": bool(cfg.get("public_wake", False)),
+                # wake_with — dependencies started alongside it. agent-0 needs
+                # ollama; reech needs its db. Declared here so a caller asks for
+                # ONE name and locator expands it, instead of every Traefik file
+                # and every link having to know the dependency list.
+                "wake_with": _as_list(cfg.get("wake_with")),
+                # wake_triggers — WHAT causes the wake, keyed by trigger kind so
+                # new kinds need no code change. `domain:` is the kind in use:
+                # the hostnames whose visit should wake this container. Serving
+                # it back over /api/wake/triggers is what lets a page ask which
+                # container its link needs rather than hardcoding a name that
+                # nobody updates when the container is renamed.
+                "wake_triggers": {
+                    str(k).lower(): _as_list(v)
+                    for k, v in cfg["wake_triggers"].items()
+                } if isinstance(cfg.get("wake_triggers"), dict) else {},
             }
     _policy_cache.update({"mtime": mtime, "data": parsed})
     print(f"📄 locator.yml loaded — {len(parsed)} service policies")
@@ -5115,10 +5158,154 @@ def shutdown_container(name):
     return jsonify({"ok": True, "command": cmd})
 
 
+# ── PUBLIC WAKE ─────────────────────────────────────────────────────────────
+# A service that has been idle-stopped answers its front door with a 502, and
+# whoever gets that 502 has no token and no way to get one — the login is
+# often BEHIND the very service that is asleep. So /wake has to answer before
+# authentication, or the whole wake-on-request design is unreachable from a
+# browser. That is exactly what it had quietly become: wake_page sat at
+# CLIENT, Traefik's errors middleware forwards only the visitor's own headers,
+# and every anonymous hit came back {"error":"insufficient clearance"}.
+#
+# Opening it wholesale is not the answer either. Opting a container in here
+# grants an anonymous caller exactly one verb — queue a `start` for a container
+# ALREADY in the registry, deduped by _queue_command so a refresh cannot pile
+# up work — and nothing else. No registry data is disclosed: see wake_page for
+# why the page no longer reads /services/<name>.
+PUBLIC_WAKE = {n.strip() for n in os.environ.get(
+    "PUBLIC_WAKE", "forge,forge-relay,agent-0,rasa,ollama").split(",") if n.strip()}
+
+# Hostnames that ARE locator. Anything else arriving at /wake got here through
+# another service's Traefik errors middleware, which serves this page under the
+# SLEEPING SERVICE's hostname, not ours. That distinction decides how the page
+# checks back — see wake_page.
+LOCATOR_HOSTS = {h.strip().lower() for h in os.environ.get(
+    "LOCATOR_HOSTS",
+    "locator.prime-quality.online,locator.theofficialblacksheepco.online",
+).split(",") if h.strip()}
+
+# Where ?to= may send a browser. prime-quality.online is here because forge
+# lives on it: forge.theofficialblacksheepco.online was retired 2026-08-14 and
+# has no cert, so without this the one hostname that answers was the one
+# hostname the redirect refused.
+WAKE_REDIRECT_RE = re.compile(
+    r"^https://[a-z0-9.-]+\.(?:theofficialblacksheepco\.(?:com|info|online|store)"
+    r"|prime-quality\.online)(?:/|$)")
+
+
+def _is_locator_origin(host):
+    """True when this request was addressed to locator itself."""
+    host = (host or "").lower()
+    bare = host.split(":")[0]
+    if host in LOCATOR_HOSTS or bare in LOCATOR_HOSTS:
+        return True
+    if bare.split(".")[0] == "locator":
+        return True
+    # Traefik reaches us at http://100.82.31.92:50500 over the tailnet.
+    return bool(bare) and bare.replace(".", "").isdigit()
+
+
+def _wake_policy(container):
+    """This container's wake stanza from locator.yml, or {}."""
+    return load_policy().get(str(container).strip().lower(), {})
+
+
+def _may_wake(container):
+    """CLIENT and above may wake anything; anonymous only the opted-in.
+
+    locator.yml is checked FIRST and is the real answer — it reloads on mtime
+    change, so opting a new service in is a YAML edit rather than a rebuild of
+    an image that has the list frozen inside it. PUBLIC_WAKE stays as the
+    escape hatch for a container with no policy stanza at all.
+    """
+    principal = getattr(g, "principal", None)
+    if principal is not None and principal.level >= clearance.CLIENT:
+        return True
+    if _wake_policy(container).get("public_wake"):
+        return True
+    return container in PUBLIC_WAKE
+
+
+def _wake_companions(container):
+    """Dependencies locator.yml says must come up with this container.
+
+    Kept here rather than in each caller so a Traefik file or a link asks for
+    ONE name: /wake/reech starts reech's database too, without reech.yml or the
+    portal's HTML having to know that the database exists.
+    """
+    return [d for d in _wake_policy(container).get("wake_with", [])
+            if d and d != container]
+
+
+@app.route("/api/wake/triggers", methods=["GET"])
+def wake_triggers():
+    """Which container a trigger should wake, straight from locator.yml.
+
+    This is the half that stops the mapping rotting. Before it, every entry
+    point hardcoded a container name and a hostname of its own — the welcome
+    card, the Traefik file, the frontend constant — and they drifted apart
+    silently: a card still pointed at a hostname retired months earlier, and
+    nothing anywhere would have told you. A page can now ASK:
+
+        GET /api/wake/triggers?domain=search.theofficialblacksheepco.com
+        -> {"domain": "...", "container": "searchsearcher-app", ...}
+
+    and then GET /wake/<container>, so renaming a container or moving a
+    hostname is a locator.yml edit and every entry point follows.
+
+    Only containers carrying public_wake are listed. Everything here is
+    already public by construction — a hostname a browser just visited and the
+    container name it is allowed to wake — so there is nothing to redact, and
+    no registry record is reachable through it.
+    """
+    # Look up by ANY trigger kind — ?domain=… or ?link=… — because the kinds
+    # live in locator.yml, not in this function. A kind added to the YAML
+    # tomorrow is queryable the same day with no code change here; hardcoding
+    # `domain` was how the previous mapping calcified in the first place.
+    query = {k.strip().lower(): v.strip().lower()
+             for k, v in request.args.items() if v and v.strip()}
+
+    # A caller passing a full URL for a domain should not have to remember to
+    # strip it first.
+    if "domain" in query:
+        d = query["domain"]
+        if "://" in d:
+            d = d.split("://", 1)[1]
+        query["domain"] = d.split("/")[0].split(":")[0]
+
+    out = {}
+    for name, cfg in load_policy().items():
+        if not cfg.get("public_wake"):
+            continue
+        triggers = cfg.get("wake_triggers") or {}
+        if query:
+            matched = any(
+                value in [t.lower() for t in triggers.get(kind, [])]
+                for kind, value in query.items()
+            )
+            if not matched:
+                continue
+            return jsonify({
+                "matched": query,
+                "container": name,
+                "wake_url": f"/wake/{name}",
+                "wake_with": cfg.get("wake_with", []),
+            })
+        out[name] = {
+            "triggers": triggers,
+            "wake_with": cfg.get("wake_with", []),
+            "wake_url": f"/wake/{name}",
+        }
+    if query:
+        return jsonify({"matched": query, "container": None,
+                        "error": "no container declares this trigger"}), 404
+    return jsonify({"containers": out, "count": len(out)})
+
+
 @app.route("/wake/<container>", methods=["GET"])
 def wake_page(container):
-    """Click-to-wake: queue the start command and show a page that redirects
-    to the service once lokey reports it back ONLINE.
+    """Click-to-wake: queue the start command and show a page that comes back
+    once the service is up.
 
     Accepts a COMMA-SEPARATED list ("agent-0,ollama") so one request wakes a
     service together with the dependencies it calls directly. agent-0 and rasa
@@ -5127,13 +5314,42 @@ def wake_page(container):
     wake it on its own. Without this, waking agent-0 after an idle period
     gives you a live UI whose first model call fails against a stopped ollama.
 
-    The FIRST name is the primary: it is what gets displayed, polled for
-    ONLINE, and redirected to. The rest are started silently.
+    The FIRST name is the primary: it is what gets displayed, waited on, and
+    redirected to. The rest are started silently.
+
+    HOW THE PAGE CHECKS BACK, and why it depends on who asked. Served through
+    a Traefik errors middleware, this HTML is returned as the body of the
+    sleeping service's OWN response — the browser's address bar still reads
+    https://forge.prime-quality.online/. A relative fetch("/services/forge")
+    from there does not reach locator at all; it goes back to forge's router,
+    which is the thing that is down. That is a second break, independent of the
+    clearance one: the old poll could not have worked from a foreign host even
+    with a token. So in that case the page simply RE-REQUESTS the original URL
+    — no cross-origin call, no CORS, no credentials, and the retry is the real
+    service answering for itself. Only when the visitor is on locator's own
+    origin (the dashboard) does it poll /services/<name> and follow `target`,
+    which is where that endpoint is same-origin and the caller is already
+    authenticated above CUSTOMER.
     """
     names = [n.strip() for n in str(container).split(",") if n.strip()]
     if names:
         container = names[0]
-    for extra in names[1:]:
+    # Gate the primary BEFORE queueing anything, so a name nobody opted in
+    # cannot be started by an anonymous caller as a side effect.
+    if not _may_wake(container):
+        return Response(f"'{container}' is not publicly wakeable",
+                        status=403, mimetype="text/plain")
+    # Explicit extras from the URL, plus whatever locator.yml says travels with
+    # this container. The policy list is the one that should grow over time —
+    # a caller naming its own dependencies has to be updated everywhere it is
+    # written down, which is the failure this whole change is undoing.
+    extras = list(names[1:])
+    for dep in _wake_companions(container):
+        if dep not in extras:
+            extras.append(dep)
+    for extra in extras:
+        if not _may_wake(extra):
+            continue
         extra_unit = _find_container_unit(extra)
         # A dependency that is unknown to the registry must never block the
         # primary from waking - best effort, and the primary still proceeds.
@@ -5145,13 +5361,13 @@ def wake_page(container):
     _queue_command(unit, container, "start", source="wake")
     # Optional explicit redirect target (?to=...), restricted to our own domains
     target = request.args.get("to", "")
-    if target and not re.match(
-            r"^https://[a-z0-9.-]+\.theofficialblacksheepco\.(com|info|online|store)(/|$)", target):
+    if target and not WAKE_REDIRECT_RE.match(target):
         target = ""
     if not target:
         with lock:
             _, svc = _find_service_entry(container)
             target = (svc or {}).get("url", "") or ""
+    own_origin = _is_locator_origin(request.host)
     html = f"""<!doctype html>
 <html><head><title>Waking {container}…</title>
 <style>
@@ -5169,22 +5385,46 @@ def wake_page(container):
 </div>
 <script>
   const target = {json.dumps(target)};
+  const ownOrigin = {json.dumps(bool(own_origin))};
+  const RETRY_MS = 5000;
+  const MAX_TRIES = 48;              // 4 minutes, then stop and say so
+  const el = document.getElementById("status");
+  let tries = 0;
+
+  function gaveUp() {{
+    el.textContent = "still starting after "
+      + Math.round(MAX_TRIES * RETRY_MS / 60000) + " min — reload to keep waiting";
+  }}
+
+  // Served under the sleeping service's own hostname: the retry IS the
+  // service answering for itself, so just ask for this URL again.
+  function retryHere() {{
+    if (++tries > MAX_TRIES) return gaveUp();
+    el.textContent = "waiting for {container} — retry " + tries + " of " + MAX_TRIES;
+    setTimeout(() => location.reload(), RETRY_MS);
+  }}
+
+  // On locator's own origin the registry is same-origin and the caller is
+  // already authenticated, so watch the record flip and follow the target.
   async function poll() {{
+    if (++tries > MAX_TRIES) return gaveUp();
     try {{
       const r = await fetch("/services/{container}");
       if (r.ok) {{
         const svc = await r.json();
         if (svc.status === "ONLINE") {{
-          document.getElementById("status").textContent = "awake — redirecting…";
+          el.textContent = "awake — redirecting…";
           if (target) {{ location.href = target; return; }}
-          document.getElementById("status").textContent = "awake ✓";
+          el.textContent = "awake ✓";
           return;
         }}
       }}
     }} catch (e) {{}}
-    setTimeout(poll, 5000);
+    el.textContent = "waiting for {container} — check " + tries + " of " + MAX_TRIES;
+    setTimeout(poll, RETRY_MS);
   }}
-  poll();
+
+  if (ownOrigin) {{ poll(); }} else {{ retryHere(); }}
 </script></body></html>"""
     return Response(html, mimetype="text/html")
 

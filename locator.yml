@@ -242,6 +242,10 @@ Service:
     instances: 1
     idle_stop: true
     idle_timeout: 15m
+    # No trigger of its own: nothing routes to ollama through Traefik, so no
+    # request can ever wake it directly. It comes up via wake_with on the two
+    # services that call it — which is precisely the CAVEAT noted above.
+    public_wake: true
 
   agent-0:
     deployment_type: optional
@@ -250,6 +254,11 @@ Service:
     instances: 1
     idle_stop: true
     idle_timeout: 15m
+    public_wake: true
+    wake_with: [ollama]
+    wake_triggers:
+      domain:
+        - a0.theofficialblacksheepco.online
 
   # rasa lives on unit8, not unit4. Wake-on-request is wired in unit8s Traefik
   # (dynamic-config/rasa.yml) and starts rasa AND ollama, since rasa reaches
@@ -261,3 +270,116 @@ Service:
     instances: 1
     idle_stop: true
     idle_timeout: 15m
+    public_wake: true
+    wake_with: [ollama]
+    wake_triggers:
+      domain:
+        - rasa.theofficialblacksheepco.online
+
+  # ── Wake-on-request ────────────────────────────────────────────────────
+  # The other half of idle auto-stop above. Everything that STARTS a container
+  # for a visitor is declared here, because it used to be spread across Traefik
+  # query strings, frontend constants and card props with no single file saying
+  # what the truth was — and it rotted exactly the way that invites: a welcome
+  # card still pointing at a hostname retired 2026-08-14, a Traefik router that
+  # vanished with its own container so nothing could route a wake, and a wake
+  # endpoint gated at CLIENT that answered every anonymous visitor with
+  # "insufficient clearance". None of those failed loudly.
+  #
+  # public_wake:    STRICTLY OPT-IN, same as idle_stop. Lets an anonymous
+  #                 visitor wake THIS container and nothing else. What they get
+  #                 is one verb — queue a start for a container already in the
+  #                 registry — and no registry data comes back.
+  # wake_with:      dependencies started alongside it, so a caller asks for one
+  #                 name and locator expands it. A Traefik file should never
+  #                 have to know that reech has a database.
+  # wake_triggers:  WHAT causes the wake, by kind. `domain:` is a hostname whose
+  #                 visit should wake it; `link:` is a named link in one of our
+  #                 own frontends. Served back over /api/wake/triggers so a page
+  #                 asks which container its link wakes instead of hardcoding a
+  #                 name nobody updates. New kinds need no code change.
+
+  forge:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    public_wake: true
+    wake_triggers:
+      domain:
+        - forge.prime-quality.online
+      link:
+        - welcome:forge
+
+  # The pad relay behind /pad and /view. A separate container, stopped
+  # independently — 2026-08-28 took down both, and waking only forge would
+  # still have left those two prefixes dead.
+  forge-relay:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    public_wake: true
+    wake_triggers:
+      domain:
+        - forge.prime-quality.online
+
+  # The search backend behind the main site's search bar. Its Postgres holds
+  # the index on local disk, hence stationary, and is named in wake_with
+  # because a search app with a stopped database answers 500, not "starting".
+  searchsearcher-app:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    public_wake: true
+    wake_with: [searchsearcher-postgres]
+    wake_triggers:
+      domain:
+        - search.theofficialblacksheepco.com
+        - www.theofficialblacksheepco.com
+        - theofficialblacksheepco.com
+      link:
+        - welcome:search
+
+  searchsearcher-postgres:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    public_wake: true
+
+  # Reech, behind the client portal.
+  #
+  # Traefik terminates on reech-oauth, NOT on reech: routing straight to
+  # reech:3000 left real mail, call logs and Matrix readable by anyone who knew
+  # the hostname, which is why that was changed on 2026-08-21. So the container
+  # a visitor's 502 comes from is reech-oauth, while the container they actually
+  # want is reech — the two name each other here so either entry point brings
+  # up both. The expansion is one level deep, so this is not a loop.
+  #
+  # There is no reech-db: reech uses the SHARED postgres on unit8, which is
+  # essential and always up. The reech-db record still in the registry is a
+  # leftover and is not a container that exists.
+  reech:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    public_wake: true
+    wake_with: [reech-oauth]
+    wake_triggers:
+      link:
+        - welcome:reech
+        - client-portal:enter
+
+  reech-oauth:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    public_wake: true
+    wake_with: [reech]
+    wake_triggers:
+      domain:
+        - reech.prime-quality.online

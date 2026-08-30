@@ -146,6 +146,22 @@ PUBLIC = {
     # sealed / configured / token_ok — and it has to answer before a caller
     # can be told why a deploy failed.
     "secrets_status",
+    # Click-to-wake. The 502 from an idle-stopped service reaches somebody who
+    # holds no token and has no way to get one — the login is often behind the
+    # service that is asleep — so this has to answer pre-auth or wake-on-request
+    # is unreachable from a browser, which is what it had become. It is NOT
+    # open: wake_page checks PUBLIC_WAKE per container and 403s anything nobody
+    # opted in, and what an anonymous caller can then do is one verb — queue a
+    # `start` for a container already in the registry. No registry data comes
+    # back in the response.
+    "wake_page",
+    # The trigger map that tells a page WHICH container its link should wake.
+    # Public for the same reason wake_page is: the caller is an anonymous
+    # browser that has just been handed a 502. It lists only containers already
+    # carrying public_wake, and only a hostname the visitor just typed against
+    # the container name they are already allowed to wake — no registry record,
+    # no addressing, nothing that is not public by construction.
+    "wake_triggers",
 }
 
 # Ingest endpoints — written to by unattended agents. Gated by ENFORCE_INGEST
@@ -203,7 +219,8 @@ ROUTE_CLEARANCE = {
     "mesh_3d":               CLIENT,
     "register_device_page":  CLIENT,
     "register_device_qr":    CLIENT,
-    "wake_page":             CLIENT,
+    # wake_page moved to PUBLIC — see the note there. The gate is now
+    # per-container inside the handler rather than blanket per-route.
 
     # ── Read: configuration ─────────────────────────────────────────────
     # Compose files and YAML carry env vars, volume paths and credentials.
