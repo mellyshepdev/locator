@@ -245,6 +245,12 @@ ROUTE_CLEARANCE = {
     # other units. Both are owner-level, never delegated.
     "secrets_resolve":       ROOT,
     "secrets_refresh":       ROOT,
+    # Mints a leaf cert from the OpenBao PKI via the locator broker. That is
+    # credential issuance, so it sits with secrets_refresh at ROOT rather than
+    # INFRA — the AI service account must not be able to mint fleet identities.
+    # Was the ONLY route in the app with no policy entry, which under the
+    # fail-closed rule would have made it 403 the moment ENFORCE went true.
+    "certs_issue":           ROOT,
     "secrets_quarantine":    ROOT,
 
     # ── Root: identity administration ───────────────────────────────────

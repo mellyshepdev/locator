@@ -67,8 +67,14 @@ services:
       # Level 9 (INFRA) service identity for the AI assistant. Separate from
       # LOCATOR_ADMIN_KEY on purpose: that one grants ROOT and must stay human.
       - LOCATOR_AI_ADMIN_KEY=${LOCATOR_AI_ADMIN_KEY:-}
-      - CLEARANCE_ENFORCE=-true
-      - CLEARANCE_ENFORCE_INGEST=-true
+      - CLEARANCE_ENFORCE=true
+      # Deliberately OFF, and spelled `false` rather than the previous `-true`
+      # (which parsed as false anyway — clearance.py tests
+      # `.lower() in ("1","true","yes")` — so enforcement was silently inert).
+      # Turning THIS on gates /register and the node/metric push behind the
+      # admin key, and per clearance.py's own warning that black-holes the
+      # mesh's telemetry until every unit agent ships a key. Flip it only then.
+      - CLEARANCE_ENFORCE_INGEST=false
       # MUST be the string the realm puts in `iss`, not an alias that merely
       # serves the realm. auth...online serves this same realm but its
       # discovery doc declares the .com issuer, so tokens failed validation.
