@@ -45,6 +45,11 @@ import json
 
 BAO_ADDR = os.environ.get("BAO_ADDR", "http://100.82.31.92:8200").rstrip("/")
 BAO_TOKEN_FILE = os.environ.get("BAO_TOKEN_FILE", "/app/secrets/bao.token")
+# PKI engine that issues the fleet's internal mTLS certs (Blacksheep Fleet Root
+# CA). A mount only, never a role: the role names the constraints (allowed
+# domains, max TTL, whether it may sign client vs server certs) and is chosen
+# per call, so one broker token can issue against several roles.
+BAO_PKI_MOUNT = os.environ.get("BAO_PKI_MOUNT", "pki").strip("/")
 BAO_CACHE_TTL = int(os.environ.get("BAO_CACHE_TTL", "300"))
 BAO_TIMEOUT = int(os.environ.get("BAO_TIMEOUT", "10"))
 
@@ -329,3 +334,52 @@ def write_secret(mount, path, data, merge=True):
         raise BaoError(f"write to {mount}/{path} failed: {resp['errors']}")
     invalidate(f"{mount}/{path}")
     return sorted(data)
+
+
+def issue_cert(role, common_name, alt_names=None, ip_sans=None, ttl=None,
+               mount=None):
+    """Issue a leaf cert+key from the fleet PKI. Never cached.
+
+    A cert is minted fresh every time on purpose — unlike a KV secret there is
+    no stable value to cache, and the private key must never be reused across
+    two issuances. Returns the OpenBao PKI `issue` payload as-is:
+
+        certificate, private_key, issuing_ca, ca_chain (list),
+        serial_number, expiration (unix seconds)
+
+    `role` decides what may be signed. The HAProxy edge presents a *client*
+    cert to the Traefik mesh, and each Traefik mesh entrypoint presents a
+    *server* cert; those are two roles with different `client_flag`/
+    `server_flag`, so the caller must name the right one — issuing a client
+    cert against the server role yields a cert Traefik will reject at the mesh
+    handshake, which looks like a network fault three hops away.
+
+    Raises BaoError on any failure (sealed vault, missing role, a CN the role's
+    allowed_domains forbids) so the caller drops the deploy rather than wiring
+    up a half-issued identity.
+    """
+    role = (role or "").strip()
+    common_name = (common_name or "").strip()
+    if not role:
+        raise BaoError("issue_cert needs a role")
+    if not common_name:
+        raise BaoError("issue_cert needs a common_name")
+    body = {"common_name": common_name}
+    # PKI wants comma-joined strings, not JSON lists.
+    if alt_names:
+        body["alt_names"] = ",".join(alt_names) if isinstance(alt_names, (list, tuple)) else str(alt_names)
+    if ip_sans:
+        body["ip_sans"] = ",".join(ip_sans) if isinstance(ip_sans, (list, tuple)) else str(ip_sans)
+    if ttl:
+        body["ttl"] = str(ttl)
+    pki = (mount or BAO_PKI_MOUNT).strip("/")
+    resp = _request(f"{pki}/issue/{urllib.parse.quote(role, safe='')}",
+                    method="POST", body=body)
+    if resp.get("errors"):
+        raise BaoError(f"PKI issue against {pki}/{role} failed: {resp['errors']}")
+    data = resp.get("data") or {}
+    if not data.get("certificate") or not data.get("private_key"):
+        raise BaoError(
+            f"PKI issue against {pki}/{role} returned no cert/key "
+            f"(got: {', '.join(sorted(data)) or 'nothing'})")
+    return data

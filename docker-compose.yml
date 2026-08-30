@@ -19,8 +19,24 @@ services:
       - ./docker-compose.yml:/app/docker-compose.yml
       - /home/swoopg111/.ssh:/root/.ssh:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # OpenBao broker token (read-only). Populated by setup-fleet-pki.sh and
+      # gitignored. Without this mount bao.py has no token and every bao://
+      # resolve and /api/certs/issue fails — which is the state before this.
+      - ./secrets:/app/secrets:ro
+    # Debug-level logging. Overrides the Dockerfile CMD rather than editing it, so
+    # this needs no --build (locator.py/bao.py are baked into the image, but the
+    # command is not). Drop back to `info` once the Varnish cutover is settled —
+    # gunicorn debug is chatty and the json-file log will grow.
+    command: ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "8",
+              "--worker-class", "gthread", "--timeout", "300", "--keep-alive", "5",
+              "--access-logfile", "-", "--error-logfile", "-", "--log-level", "debug",
+              "locator:app"]
     environment:
       - UNIT_NAME=unit4
+      # Run the fleet refresh with the script's own debug tracing on
+      # (refresh honours DEBUG=1 -> its debug() helper). Without this the
+      # per-unit run logs only its "==>" milestones.
+      - REFRESH_SCRIPT=DEBUG=1 REFRESH_NO_FANOUT=1 UNIT_NAME={unit} "$$HOME/.local/bin/refresh"
       - COMPOSE_DIR=/app/data/compose
       - BALANCE_HIGH=65
       - BALANCE_DIFF=5

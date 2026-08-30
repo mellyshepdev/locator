@@ -5238,6 +5238,66 @@ def certs_report():
     return jsonify({"ok": True, "received": len(certs)})
 
 
+@app.route("/api/certs/issue", methods=["POST"])
+def certs_issue():
+    """Mint an internal mTLS leaf from the fleet PKI. Admin key required.
+
+    This is the issue-side counterpart to /api/secrets/resolve: lokey (or a
+    node bootstrapping its edge) posts a role + CN and gets back a freshly
+    signed cert+key, so the broker token that can talk to OpenBao's PKI lives
+    ONLY here — no node ever holds it, exactly as with the KV broker.
+
+    Body:
+      {"role": "haproxy-client", "common_name": "haproxy.unit4.fleet",
+       "alt_names": ["..."], "ip_sans": ["..."], "ttl": "168h",
+       "bundle": true}
+
+    `bundle` (default true) also returns `pem_chain` = cert + issuing CA and
+    `pem_haproxy` = private key + cert + CA in the single-file order HAProxy's
+    `crt` directive wants, so the caller writes one file instead of stitching
+    three. The private key is returned exactly once, here, over the tailnet-only
+    admin channel; it is never logged or stored on this side.
+    """
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    role = (data.get("role") or "").strip()
+    cn = (data.get("common_name") or "").strip()
+    if not role or not cn:
+        return jsonify({"error": "body needs 'role' and 'common_name'"}), 400
+    try:
+        issued = bao.issue_cert(
+            role, cn,
+            alt_names=data.get("alt_names"),
+            ip_sans=data.get("ip_sans"),
+            ttl=data.get("ttl"),
+        )
+    except bao.BaoError as e:
+        emit_event("certs", action="issue_failed", role=role, cn=cn, error=str(e))
+        return jsonify({"error": str(e), "role": role}), 502
+
+    cert = issued.get("certificate", "")
+    key = issued.get("private_key", "")
+    ca = issued.get("issuing_ca", "")
+    out = {
+        "certificate": cert,
+        "private_key": key,
+        "issuing_ca": ca,
+        "ca_chain": issued.get("ca_chain", []),
+        "serial_number": issued.get("serial_number"),
+        "expiration": issued.get("expiration"),
+    }
+    if data.get("bundle", True):
+        def _nl(s):  # PKI omits the trailing newline; concatenation needs it
+            return s if s.endswith("\n") else s + "\n"
+        out["pem_chain"] = _nl(cert) + _nl(ca)
+        out["pem_haproxy"] = _nl(key) + _nl(cert) + _nl(ca)
+    emit_event("certs", action="issued", role=role, cn=cn,
+               serial=out["serial_number"])
+    return jsonify(out)
+
+
 @app.route("/api/certs/status", methods=["GET"])
 def certs_status():
     """All reported certs plus the flagged subset (expiring soon or broken)."""
