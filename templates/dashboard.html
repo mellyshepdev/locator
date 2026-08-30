@@ -241,6 +241,24 @@
         .yaml-item:hover { background: rgba(0,255,70,0.08); }
         .yaml-item.active { background: rgba(0,255,70,0.18); font-weight: bold; }
 
+        /* The list mixes three different KINDS of file -- service policy, blank
+           templates, and the uploaded compose store (77+ entries). Rendered flat
+           they all looked identical, so locator.yml sat at the top of a long list
+           and read as "not there". Headers make the policy file findable. */
+        .yaml-group-header {
+            padding: 10px 14px 4px;
+            font-size: 10px;
+            letter-spacing: 2px;
+            color: var(--neon-green);
+            opacity: 0.55;
+            border-bottom: 1px solid var(--neon-green-dim);
+            text-transform: uppercase;
+        }
+        .yaml-item.policy {
+            border-left: 3px solid var(--neon-green);
+            font-weight: bold;
+        }
+
         /* add docker container button */
 #add-docker-btn {
     z-index: 9999 !important;
@@ -1424,23 +1442,45 @@
                 }
                 const dl = document.getElementById('compose-names');
                 if (dl) dl.innerHTML = '';
-                data.forEach(item => {
-                    const div = document.createElement('div');
-                    div.className = 'yaml-item';
-                    div.textContent = item.label;
-                    div.title = item.path;
-                    // Blank templates read as starting points, not live config.
-                    if (item.readonly) div.style.opacity = '0.75';
-                    div.onclick = () => selectYaml(item.path, item.label, item.readonly);
-                    list.appendChild(div);
 
-                    // Only compose-store files are deployable — locator.yml is
-                    // policy, and the templates are not real files.
-                    if (dl && !item.readonly && item.path.indexOf('/compose/') !== -1) {
-                        const opt = document.createElement('option');
-                        opt.value = item.container;
-                        dl.appendChild(opt);
-                    }
+                // Three kinds of file share this list. Group them so the policy
+                // file is findable instead of being row 1 of 80 identical rows.
+                const groups = [
+                    { label: 'Service policy', policy: true,  items: [] },
+                    { label: 'New from template',              items: [] },
+                    { label: 'Compose store',                  items: [] },
+                ];
+                data.forEach(item => {
+                    if (item.readonly) groups[1].items.push(item);
+                    else if (item.path.indexOf('/compose/') !== -1) groups[2].items.push(item);
+                    else groups[0].items.push(item);   // locator.yml + the locator's own compose
+                });
+
+                groups.forEach(group => {
+                    if (!group.items.length) return;
+                    const head = document.createElement('div');
+                    head.className = 'yaml-group-header';
+                    head.textContent = group.label + ' (' + group.items.length + ')';
+                    list.appendChild(head);
+
+                    group.items.forEach(item => {
+                        const div = document.createElement('div');
+                        div.className = 'yaml-item' + (group.policy ? ' policy' : '');
+                        div.textContent = item.label;
+                        div.title = item.path;
+                        // Blank templates read as starting points, not live config.
+                        if (item.readonly) div.style.opacity = '0.75';
+                        div.onclick = () => selectYaml(item.path, item.label, item.readonly);
+                        list.appendChild(div);
+
+                        // Only compose-store files are deployable — locator.yml is
+                        // policy, and the templates are not real files.
+                        if (dl && !item.readonly && item.path.indexOf('/compose/') !== -1) {
+                            const opt = document.createElement('option');
+                            opt.value = item.container;
+                            dl.appendChild(opt);
+                        }
+                    });
                 });
             } catch(e) {
                 list.innerHTML = '<div style="color:var(--danger);padding:12px;">Error loading list.</div>';
