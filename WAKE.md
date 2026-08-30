@@ -157,6 +157,57 @@ router lived on the app container's labels, so with the container gone
 - `?to=` cannot be turned into an open redirect; the allowlist is a regex over
   our own domains.
 
+## Current wiring (2026-08-30)
+
+`locator.yml` policy is declared for all of these. The column that matters is
+the middleware one — policy alone wakes nothing if no route can return a 502.
+
+| container | unit | trigger | Traefik wake middleware | serving |
+| --- | --- | --- | --- | --- |
+| `forge` | 8 | `forge.prime-quality.online` | ✅ `forge.yml` | ✅ |
+| `forge-relay` | 8 | same host, `/pad` `/view` | ✅ `forge.yml` | ✅ |
+| `agent-0` (+`ollama`) | 4 | `a0.theofficialblacksheepco.online` | ✅ `agent-zero.yml` | — |
+| `rasa` (+`ollama`) | 8 | `rasa.theofficialblacksheepco.online` | ✅ `rasa.yml` | — |
+| `searchsearcher-app` (+ its postgres) | 8 | `search.…com`, `www.…com` | ❌ **not yet** | ✅ 200 |
+| `reech` / `reech-oauth` | 8 | `reech.prime-quality.online` | ❌ **not yet** | ✅ 302 |
+
+Both searchsearcher and reech were **not deployed at all** before this date — no
+container and no image, only their data. They were built and started on unit8 on
+2026-08-30. Nothing could have woken them, because there was nothing to start.
+
+searchsearcher's index is **empty** (0 rows in `servers` and `searchable_items`),
+so the search bar returns nothing until something ingests into it. That is a
+separate piece of work from waking it.
+
+### Still to wire
+
+1. **File-defined routers + wake middleware for searchsearcher and reech.**
+   searchsearcher's router is currently on the app container's *labels*, which is
+   the exact trap described above — stop the container and the route disappears,
+   so nothing can wake it. This has to move into `dynamic-config/` before its
+   wake works at all.
+2. **The frontends.** The welcome page's search and reech cards, the client
+   portal's entry, and the main site's search bar should call
+   `/api/wake/triggers?link=…` and then `/wake/<container>` — asking rather than
+   hardcoding is the whole point of the trigger map.
+3. **`locator-api-readblock.yml` blocks `PathPrefix(/wake)`** on both public
+   locator hostnames, so a browser-initiated wake from a page still gets 403.
+   That block predates wake having any auth of its own; now that the gate is
+   per-container, GET needs an exception. Wake *through an errors middleware* is
+   unaffected — that path goes over the tailnet, not through those hostnames.
+4. **`wake.theofficialblacksheepco.com` is NXDOMAIN** — the frontends' old
+   `WAKE_URL`. Either create the record or point the frontends at a live host.
+
+### Operational notes
+
+- unit8's disk is chronically tight and hit **100%** during these builds, which
+  is what failed the first reech build (`no space left on device`). `docker
+  builder prune -f` reclaimed 4.7GB. **Check `df -h /` before building there.**
+- `/home/swoopg111/server` on unit8 is **not a git repository**. Traefik configs
+  are versioned only by `.bak-<date>` copies beside them. Make one before editing.
+- The live locator source is **unit4, branch `main`**. unit8 holds a diverged
+  `clearance-levels` branch — do not edit that one and expect it to matter.
+
 ## History — the four breaks, 2026-08-30
 
 Found while fixing "the forge won't come up on its own":
