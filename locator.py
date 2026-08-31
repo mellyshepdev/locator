@@ -563,6 +563,88 @@ ELECTION_MIN_RAM_MB = float(os.environ.get("ELECTION_MIN_RAM_MB", "256"))
 ELECTION_DRY_RUN = os.environ.get("ELECTION_DRY_RUN", "true").lower() == "true"
 
 
+# ── NODE LIVENESS ────────────────────────────────────────────────────────────
+# A missing heartbeat means "lokey is not reporting", which is NOT the same
+# fact as "the machine is down" — and the registry used to record them as the
+# same thing. unit6 runs no Docker at all, so its containerised lokey can never
+# heartbeat, and the box the operator uses every single day sat permanently at
+# OFFLINE while being up for over a day. unit3 was in the same state while
+# tailscale showed it active.
+#
+# So before a node is declared OFFLINE we now ask the network. Reachable but
+# silent is AGENT_DOWN: the machine is fine, its agent is not. Only genuinely
+# unreachable nodes get OFFLINE.
+NODE_PROBE_PORTS   = [int(p) for p in
+                      os.environ.get("NODE_PROBE_PORTS", "22,5000,41641").split(",")
+                      if p.strip().isdigit()]
+NODE_PROBE_TIMEOUT = float(os.environ.get("NODE_PROBE_TIMEOUT", "2.0"))
+
+# Node is up, agent is not reporting. Deliberately NOT "ONLINE": every
+# scheduling path in this file gates on status == "ONLINE", and a node with no
+# lokey cannot execute a deploy, migration or exec command. Keeping it distinct
+# means such a node is correctly skipped for work while still being reported as
+# the live machine it is.
+NODE_STATUS_AGENT_DOWN = "AGENT_DOWN"
+
+# Nodes already sitting at OFFLINE must be re-probed too, or a machine that is
+# genuinely up can never be corrected — unit3 and unit6 were both stuck at
+# OFFLINE while running, and nothing in the old reaper would ever look at them
+# again because it only considered ONLINE nodes. Re-probed on a slower cycle
+# than live ones so long-dead hosts (unit1 has been gone 23 days) are not
+# retried every REAPER_INTERVAL.
+NODE_REPROBE_OFFLINE_SECONDS = int(os.environ.get("NODE_REPROBE_OFFLINE_SECONDS", "300"))
+_node_probe_last: dict = {}
+_node_probe_lock = threading.Lock()
+
+
+def _node_probe_due(node_id, status):
+    """Rate-limit re-probing of already-OFFLINE nodes."""
+    if status != "OFFLINE":
+        return True
+    now = time.monotonic()
+    with _node_probe_lock:
+        last = _node_probe_last.get(node_id, 0.0)
+        if now - last < NODE_REPROBE_OFFLINE_SECONDS:
+            return False
+        _node_probe_last[node_id] = now
+    return True
+
+
+def _node_probe_addr(info):
+    """The best address to probe this node on, or None if we know of none."""
+    addr = (_first_addr(info.get("tailscale_ip"))
+            or _first_addr(info.get("openvpn_ip"))
+            or _first_addr(info.get("ip"))
+            or _first_addr(info.get("private_ip")))
+    return addr if addr and addr != "unknown" else None
+
+
+def _node_reachable(info, timeout=None):
+    """Does anything answer at this node's address?
+
+    Returns True (something accepted a TCP connection), False (nothing did on
+    any probe port), or None (no address on record, so we cannot tell and must
+    not guess). A refused connection still proves the host is UP and answering,
+    which is exactly the distinction being drawn here, so ECONNREFUSED counts
+    as reachable rather than as a failure.
+
+    Must never be called while holding `lock` — it blocks on the network.
+    """
+    addr = _node_probe_addr(info)
+    if not addr:
+        return None
+    timeout = NODE_PROBE_TIMEOUT if timeout is None else timeout
+    for port in NODE_PROBE_PORTS:
+        try:
+            with socket.create_connection((addr, port), timeout=timeout):
+                return True
+        except ConnectionRefusedError:
+            return True          # host answered, just nothing on that port
+        except OSError:
+            continue
+    return False
+
+
 def _node_is_fresh(info):
     """True when the node heartbeated within HEARTBEAT_TIMEOUT."""
     raw = info.get("last_seen")
@@ -2354,10 +2436,15 @@ def update_node_metrics(node_id):
                       "mem_used_gb", "disk_free_gb", "mounts"):
             if data.get(field) is not None:
                 node[field] = data[field]
-        if data.get("ip"):
-            node["ip"] = data["ip"]
-        if data.get("tailscale_ip"):
-            node["tailscale_ip"] = data["tailscale_ip"]
+        # Addresses are stored only when present so a heartbeat that could not
+        # determine one does not erase a good value already on record.
+        # private_ip is accepted here too: _node_probe_addr() falls back to it,
+        # and lokey now reports a freshly-resolved local address every heartbeat
+        # (it previously sent none at all, which is why unit3's node record had
+        # no address and could not be probed).
+        for _addr_field in ("ip", "private_ip", "tailscale_ip", "openvpn_ip"):
+            if data.get(_addr_field):
+                node[_addr_field] = data[_addr_field]
         node["last_seen"]     = now
         node["status"]        = "ONLINE"
         registry["updated"]   = now
@@ -3052,6 +3139,7 @@ def heartbeat_reaper():
         now = datetime.now(timezone.utc)
         changed = False
         to_purge = []
+        stale_nodes = []
 
         with lock:
             for name, svc in list(registry["services"].items()):
@@ -3071,11 +3159,16 @@ def heartbeat_reaper():
                                 svc["offline_since"] = now.isoformat()
                             changed = True
                             print(f"💀 OFFLINE: {name}")
-                            if "lokey" in name.lower():
-                                node_id = svc.get("host", "")
-                                if node_id and node_id in registry["nodes"]:
-                                    registry["nodes"][node_id]["status"] = "OFFLINE"
-                                    print(f"💀 NODE OFFLINE: {node_id}")
+                            # A lokey service going quiet used to mark its NODE
+                            # OFFLINE right here. That is the conflation that
+                            # made the registry wrong: it reports that the agent
+                            # stopped, never that the machine stopped. Node
+                            # status now has exactly one owner — the staleness +
+                            # reachability probe below — so a silent agent on a
+                            # live box resolves to AGENT_DOWN instead of a flat
+                            # untrue OFFLINE. The node's own last_seen goes stale
+                            # on its own once lokey stops, which is what hands it
+                            # to that probe.
                     except (ValueError, TypeError):
                         pass
 
@@ -3102,19 +3195,70 @@ def heartbeat_reaper():
             # self-registered devices and any node with a stale-but-present last_seen
             # were previously stuck ONLINE forever with no way to expire.
             for node_id, node in registry["nodes"].items():
-                if node.get("status") != "ONLINE":
+                status = node.get("status")
+                # AGENT_DOWN nodes are re-examined too. A machine that was only
+                # silent can genuinely go down later, and it has to become
+                # OFFLINE when that happens instead of being pinned at
+                # AGENT_DOWN forever.
+                if status not in ("ONLINE", NODE_STATUS_AGENT_DOWN, "OFFLINE"):
+                    continue
+                if not _node_probe_due(node_id, status):
                     continue
                 last_seen = node.get("last_seen")
                 if not last_seen:
+                    # No heartbeat ever recorded. Previously skipped outright,
+                    # which is how a node could sit at OFFLINE with nothing ever
+                    # re-examining it. Probe it: an address is enough to tell
+                    # whether the machine is actually there.
+                    if _node_probe_addr(node):
+                        stale_nodes.append((node_id, dict(node)))
                     continue
                 try:
                     last = datetime.fromisoformat(last_seen)
-                    if (now - last).total_seconds() > HEARTBEAT_TIMEOUT:
-                        node["status"] = "OFFLINE"
-                        changed = True
-                        print(f"💀 NODE OFFLINE (stale heartbeat): {node_id}")
                 except (ValueError, TypeError):
-                    pass
+                    continue
+                if (now - last).total_seconds() > HEARTBEAT_TIMEOUT:
+                    # Only collected here. The probe runs after the lock is
+                    # released — _node_reachable blocks on the network for up to
+                    # NODE_PROBE_TIMEOUT per port, and holding the registry lock
+                    # across that would stall every API request locator serves.
+                    stale_nodes.append((node_id, dict(node)))
+
+        for node_id, info in stale_nodes:
+            reachable = _node_reachable(info)
+            if reachable:
+                new_status = NODE_STATUS_AGENT_DOWN
+                reason = f"reachable at {_node_probe_addr(info)}, agent not reporting"
+            elif reachable is None:
+                new_status = "OFFLINE"
+                reason = "stale heartbeat, no address on record to probe"
+            else:
+                new_status = "OFFLINE"
+                reason = "stale heartbeat and unreachable"
+
+            transitioned = False
+            with lock:
+                node = registry["nodes"].get(node_id)
+                if node is not None:
+                    # A heartbeat may have arrived while we were probing.
+                    if not _node_is_fresh(node) and node.get("status") != new_status:
+                        node["status"] = new_status
+                        changed = True
+                        transitioned = True
+
+            # Outside the lock, and only on an actual transition, so a node
+            # sitting in either state does not re-log or re-notify every
+            # REAPER_INTERVAL seconds.
+            if transitioned:
+                if new_status == NODE_STATUS_AGENT_DOWN:
+                    print(f"⚠️  NODE AGENT DOWN: {node_id} ({reason})")
+                    record_event("node_agent_down",
+                                 f"{node_id} is up but its agent is not reporting — {reason}",
+                                 unit=node_id)
+                else:
+                    print(f"💀 NODE OFFLINE: {node_id} ({reason})")
+                    record_event("node_offline", f"{node_id} is offline — {reason}",
+                                 unit=node_id)
 
         if changed:
             persist_registry()
@@ -5668,10 +5812,16 @@ def active_discovery_scanner():
                             node["last_seen"] = now
                             changed = True
                         elif node.get("status") == "ONLINE":
-                            node["status"] = "OFFLINE"
+                            # Traefik being unreachable says Traefik is down, not
+                            # that the machine is. Demoting straight to OFFLINE
+                            # here was the same wrong inference the lokey path
+                            # made. Park it as AGENT_DOWN and leave last_seen
+                            # stale so the reaper's reachability probe makes the
+                            # real call on the next pass.
+                            node["status"] = NODE_STATUS_AGENT_DOWN
                             node["last_seen"] = node.get("last_seen") or now
                             changed = True
-                            print(f"💀 NODE OFFLINE (traefik unreachable): {node_name}")
+                            print(f"⚠️  NODE AGENT DOWN: {node_name} (traefik unreachable)")
 
         if changed:
             persist_registry()

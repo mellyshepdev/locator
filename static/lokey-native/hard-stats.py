@@ -336,6 +336,41 @@ def get_tailscale_ip():
     except Exception:
         pass
 
+    # macOS / BSD. Every tier above is Linux-only and ALL of them fail there:
+    # the `tailscale` CLI lives inside Tailscale.app and is not on a
+    # non-interactive PATH, `nsenter` and `ip` do not exist, and the interface
+    # is a utun*, never tailscale0. unit3 reported tailscale_ip=None for exactly
+    # this reason while sitting on the tailnet at 100.78.95.13 — which left its
+    # node record with no probeable address at all and pinned it at OFFLINE in
+    # the registry while the machine was up and in daily use.
+    #
+    # ifconfig exists on macOS and most Linux, and an address inside tailscale's
+    # 100.64.0.0/10 CGNAT range is unambiguous — nothing else on these hosts
+    # uses it. Range-checked by octet rather than importing ipaddress, to keep
+    # this module's import list unchanged.
+    try:
+        result = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if not line.startswith("inet "):
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                candidate = parts[1].split("/")[0]
+                octets = candidate.split(".")
+                if len(octets) != 4:
+                    continue
+                try:
+                    first, second = int(octets[0]), int(octets[1])
+                except ValueError:
+                    continue
+                if first == 100 and 64 <= second <= 127:
+                    return candidate
+    except Exception:
+        pass
+
     return None
 
 
@@ -513,6 +548,24 @@ def push_node_metrics(stats):
         "status":            "ONLINE",
         "last_seen":         datetime.now(timezone.utc).isoformat(),
     }
+    # This is the copy the NATIVE installs run, so it is the one unit3 (macOS)
+    # is executing — and it sent no local address at all. lokey computes one via
+    # get_private_ip() and includes it in the /register metadata, so it landed
+    # on the SERVICE record and never the node: unit3's 10.68.117.30 sat in
+    # lokey-client@unit3.metadata.private_ip while unit3's NODE record carried
+    # no address of any kind and was therefore impossible to probe. locator's
+    # handler has always read data["ip"]; nothing ever sent it.
+    #
+    # tailscale_ip compounds it — detection fails on the macOS native install,
+    # so unit3 reported None despite being active on the tailnet at
+    # 100.78.95.13, leaving it with zero usable addresses.
+    #
+    # Resolved per heartbeat, not reused from the module-level _private_ip that
+    # is computed once at startup and goes stale when the address changes.
+    local_ip = get_private_ip()
+    if local_ip:
+        metrics["ip"] = local_ip
+        metrics["private_ip"] = local_ip
     ts_ip = get_tailscale_ip()
     if ts_ip:
         metrics["tailscale_ip"] = ts_ip
@@ -575,12 +628,32 @@ def register_stats():
     if _geolocation:
         metadata.update(_geolocation)
 
+    # This copy is the one NATIVE installs download and run, and it still
+    # hardcoded type="container" — so the native build was the loudest source of
+    # the wrong answer. unit6 (no docker binary) and unit3 (macOS, no docker on
+    # the non-interactive PATH) both landed in the registry as "docker
+    # containers" with zero containers running. locator cannot correct it:
+    # /register defaults a missing type to "container" and _infer_category()
+    # sends anything unrecognised to "docker containers".
+    _self_is_container = os.path.isfile("/.dockerenv")
+    _host_has_docker   = _ensure_docker() is not None
     payload = {
         "name": "lokey-client",
         "host": UNIT_NAME,
-        "type": "container",
+        "type": "container" if _self_is_container else "native",
+        # Explicit: _infer_category() maps type=native to "devices", which is
+        # for phones and tablets, not a native daemon on a workstation.
+        "category": "docker containers" if _self_is_container else "native services",
         "status": "ONLINE",
-        "metadata": metadata,
+        "metadata": {
+            **metadata,
+            # `type` is what this agent runs as; docker_available describes the
+            # HOST. A native lokey on a box that does have Docker is a different
+            # case from one on a box with none, and collapsing the two is what
+            # produced the wrong registry.
+            "docker_available": _host_has_docker,
+            "runtime": "docker" if _self_is_container else "native",
+        },
     }
 
     headers = {"Host": LOCATOR_HOST_HEADER}
