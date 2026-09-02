@@ -67,7 +67,11 @@
       return;
     }
     var kc = new Keycloak({
-      url: 'https://bsco-keycloak.fly.dev',
+      // Canonical issuer — must match dashboard.html and OIDC_ISSUER. The realm
+      // declares https://auth.theofficialblacksheepco.com as its issuer, so the
+      // fly host and the .online alias both mint tokens locator rejects. This
+      // page was left on the dead fly host when dashboard.html was corrected.
+      url: 'https://auth.theofficialblacksheepco.com',
       realm: 'blacksheep',
       clientId: 'locator'
     });

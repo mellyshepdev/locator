@@ -80,8 +80,15 @@ services:
       # discovery doc declares the .com issuer, so tokens failed validation.
       - OIDC_ISSUER=${OIDC_ISSUER:-https://auth.theofficialblacksheepco.com/realms/blacksheep}
       - OIDC_AUDIENCE=${OIDC_AUDIENCE:-locator,client-portal}
-      - KC_ADMIN_CLIENT_ID=${KC_ADMIN_CLIENT_ID:-clearance-admin}
-      - KC_ADMIN_CLIENT_SECRET=${KC_ADMIN_CLIENT_SECRET:-}
+      # Host for kc_admin.py's admin REST calls. Was unset, so it fell back to
+      # its own default of https://bsco-keycloak.fly.dev — admin calls went to
+      # the dead fly host while tokens validated against the .com issuer above.
+      # These two must name the same Keycloak.
+      - KC_BASE=${KC_BASE:-https://auth.theofficialblacksheepco.com}
+      - KC_admin-cli_CLIENT_ID=${KC_ADMIN_CLIENT_ID:-clearance-admin}
+      - KC_admin-cli_CLIENT_SECRET=${KC_ADMIN_CLIENT_SECRET:-}
+      - LOCATOR_CLIENT_SECRET=${LOCATOR_CLIENT_SECRET}
+      - LOCATOR_CLIENT_ID=${LOCATOR_CLIENT_ID}
     labels:
       - "traefik.enable=true"
       # UI router — protected by Keycloak (catch-all, lower priority)
