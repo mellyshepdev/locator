@@ -3423,6 +3423,20 @@ def load_policy():
                 # Optional per-service override, same spelling the label took
                 # ("15m", "2h", "5400"). Empty means use IDLE_DEFAULT_TIMEOUT.
                 "idle_timeout": str(cfg.get("idle_timeout", "")),
+                # Migration prerequisites: service names (or "name@unit" for a
+                # specific instance) that must have an ONLINE instance somewhere
+                # before this service may be migrated. Read by
+                # resolve_migration_order(), which gates POST /api/migrations.
+                #
+                # Whitelisted here for the reason stated above restart_when_stopped:
+                # an un-whitelisted key is dropped without a word, so declaring
+                # depends_on in locator.yml would look configured and do nothing.
+                # That is not hypothetical — it is exactly what happened on
+                # 2026-09-03, when a test dependency was declared, silently
+                # discarded here, and the migration it should have blocked went
+                # through and stopped the service.
+                "depends_on": (cfg.get("depends_on")
+                               if isinstance(cfg.get("depends_on"), list) else []),
                 # Needed to deploy onto a unit that has never hosted the
                 # service — a queued command carries only a container name,
                 # so without these there is nothing to check out there.
@@ -3562,7 +3576,44 @@ def resolve_migration_order(svc_id, services_snap):
     """
     svc = services_snap.get(svc_id, {})
     deps = svc.get("depends_on", []) or []
-    missing = [d for d in deps if services_snap.get(d, {}).get("status") != "ONLINE"]
+
+    # Fall back to locator.yml when the registry record carries nothing, which
+    # is every record today: depends_on only ever reaches the registry through
+    # the /register payload, and no agent sends it -- 0 of 415 services had it
+    # populated on 2026-09-03. That made this gate vacuously pass for every
+    # migration, which reads as "dependencies satisfied" and is really
+    # "dependencies never declared".
+    #
+    # Policy is the right home for it rather than a per-unit file on each agent:
+    # locator.yml is already the single source of truth for placement, already
+    # hot-reloads on mtime, is already editable from the dashboard's YAMLs tab,
+    # and already expresses this exact shape as wake_with. A file on each unit
+    # would scatter the truth across nine boxes and go unreadable precisely when
+    # a unit is down, which is when you most need to know what it carried.
+    #
+    # The registry still wins when set, so an agent that starts sending
+    # depends_on keeps overriding policy without a code change here.
+    if not deps:
+        deps = list((_policy_for(svc.get("name") or "") or {}).get("depends_on") or [])
+
+    # A dependency may be written either way, and both are useful:
+    #   "pdns@unit8" — that exact instance, on that node
+    #   "pdns"       — any ONLINE instance anywhere, which is the common case and
+    #                  the only form policy can express, since locator.yml is
+    #                  keyed on bare service names and says nothing about hosts.
+    # The bare form matches the co-location rule above: services reach each other
+    # over the tailnet, so where a dependency runs does not matter, only that it
+    # is up somewhere.
+    def _dep_online(dep):
+        if "@" in dep:
+            return services_snap.get(dep, {}).get("status") == "ONLINE"
+        low = dep.lower()
+        return any(
+            (v.get("name") or "").lower() == low and v.get("status") == "ONLINE"
+            for v in services_snap.values()
+        )
+
+    missing = [d for d in deps if not _dep_online(d)]
     return deps, missing
 
 
