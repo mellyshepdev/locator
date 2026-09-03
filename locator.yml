@@ -299,15 +299,46 @@ Service:
   #                 asks which container its link wakes instead of hardcoding a
   #                 name nobody updates. New kinds need no code change.
 
+  # The Ecosystem Hub SPA on unit4, published on the tailnet at :8091 and
+  # fronted by unit8's Traefik. Stopped cleanly on 2026-09-02 and stayed down
+  # for 31 hours, during which welcome.theofficialblacksheepco.com served a bare
+  # 502 - nothing was watching, and nothing could bring it back, because it had
+  # no wake policy at all. It does now: the same errors-middleware path forge
+  # and rasa use, which is the one mechanism that works when the container a
+  # visitor actually asked for is the one that is down.
+  welcome-hub:
+    deployment_type: optional
+    location_type: stationary
+    units: "4"
+    instances: 1
+    public_wake: true
+    wake_triggers:
+      domain:
+        - welcome.theofficialblacksheepco.com
+
   forge:
     deployment_type: optional
     location_type: stationary
     units: "8"
     instances: 1
     public_wake: true
+    # /pad and /view are a separate container that stops independently —
+    # 2026-08-28 took down both, and waking only forge left those two prefixes
+    # dead. Naming it here means one /wake/forge starts the pair, and it also
+    # keeps the welcome-hub trigger below unambiguous: /api/wake/triggers
+    # returns the FIRST container declaring a match, so two containers sharing
+    # a domain would make the second unreachable through the trigger map.
+    wake_with: [forge-relay]
     wake_triggers:
       domain:
         - forge.prime-quality.online
+        # The welcome hub pre-warms forge on page load, so the card is live by
+        # the time it is clicked. This is a SECOND, independent path from the
+        # hub's own wake below: the errors middleware can only ever wake the
+        # container the visitor asked for, and forge is a different one on a
+        # different unit. So the hub's page calls /__wake/forge itself once it
+        # has rendered; see welcome-hub.yml on unit8.
+        - welcome.theofficialblacksheepco.com
       link:
         - welcome:forge
 
@@ -322,6 +353,9 @@ Service:
     public_wake: true
     wake_triggers:
       domain:
+        # Its own 502 path stays: forge.yml gives /pad and /view a middleware
+        # of their own, so a request straight to a stopped relay still wakes it.
+        # The hub pre-warm reaches it via forge's wake_with, not from here.
         - forge.prime-quality.online
 
   # The search backend behind the main site's search bar. Its Postgres holds

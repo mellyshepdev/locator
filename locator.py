@@ -4112,7 +4112,13 @@ def _queue_command(unit, container, action, source="idle", extra=None):
     """
     with command_lock:
         for cmd in command_queue.values():
-            if (cmd["unit"] == unit and cmd["container"] == container
+            # .get, not [], because _queue_exec_command shares this queue and
+            # its entries carry no "container" at all - they are {action:"exec",
+            # script:...}. Subscripting blew up with KeyError the moment any exec
+            # job was pending, and since wake_page queues through here, that made
+            # EVERY /wake/<name> return 500 - the whole wake-on-request feature,
+            # fleet-wide, silently dependent on the exec queue being empty.
+            if (cmd["unit"] == unit and cmd.get("container") == container
                     and cmd["action"] == action and cmd["status"] in ("PENDING", "DISPATCHED")):
                 return cmd
         cmd_id = str(uuid.uuid4())[:8]
