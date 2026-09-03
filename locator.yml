@@ -339,6 +339,17 @@ Service:
     # returns the FIRST container declaring a match, so two containers sharing
     # a domain would make the second unreachable through the trigger map.
     wake_with: [forge-relay]
+    # The same relationship, for migration rather than wake. App.tsx opens
+    # `wss://${window.location.host}/view/default` — the pad relay, reached on
+    # forge's OWN hostname through the /pad and /view routers in unit8's
+    # forge.yml. So the tablet cursor is dead whenever forge-relay is not
+    # running, and moving forge to a unit where it is absent ships a half-broken
+    # app. This is forge's only real dependency: the card editor makes no other
+    # backend call of any kind, and the segmentation assets come from a CDN.
+    #
+    # Bare name, not forge-relay@unit8, deliberately — the relay only has to be
+    # up SOMEWHERE, since it is reached over the tailnet like everything else.
+    depends_on: [forge-relay]
     wake_triggers:
       domain:
         - forge.prime-quality.online
@@ -413,6 +424,14 @@ Service:
     public_wake: true
     wake_with: [reech-oauth]
     wake_triggers:
+      # Visiting the client portal wakes reech, because the portal Messages tab
+      # fetches reech cross-origin - by the time that fetch runs, a stopped
+      # reech is a network error the portal cannot tell apart from "signed out".
+      # The portal itself is always up and answers 200, so no errors middleware
+      # can ever fire on that host: the portal page asks for this wake itself
+      # via /__wake/ (see client-portal.yml on unit8, and WAKE.md item 2).
+      domain:
+        - portal.theofficialblacksheepco.com
       link:
         - welcome:reech
         - client-portal:enter

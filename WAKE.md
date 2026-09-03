@@ -169,7 +169,8 @@ the middleware one — policy alone wakes nothing if no route can return a 502.
 | `agent-0` (+`ollama`) | 4 | `a0.theofficialblacksheepco.online` | ✅ `agent-zero.yml` | — |
 | `rasa` (+`ollama`) | 8 | `rasa.theofficialblacksheepco.online` | ✅ `rasa.yml` | — |
 | `searchsearcher-app` (+ its postgres) | 8 | `search.…com`, `www.…com` | ❌ **not yet** | ✅ 200 |
-| `reech` / `reech-oauth` | 8 | `reech.prime-quality.online` | ❌ **not yet** | ✅ 302 |
+| `reech` (+`reech-oauth`) | 8 | `portal.theofficialblacksheepco.com` visit | ✅ page-driven, `client-portal.yml` (2026-09-03) | ✅ 302 |
+| `reech-oauth` itself | 8 | `reech.prime-quality.online` | ❌ **still none** — its router is a container LABEL, so stopping it deletes the route and the host 404s with nothing to wake | ✅ 302 |
 
 Both searchsearcher and reech were **not deployed at all** before this date — no
 container and no image, only their data. They were built and started on unit8 on
@@ -186,10 +187,18 @@ separate piece of work from waking it.
    the exact trap described above — stop the container and the route disappears,
    so nothing can wake it. This has to move into `dynamic-config/` before its
    wake works at all.
-2. **The frontends.** The welcome page's search and reech cards, the client
-   portal's entry, and the main site's search bar should call
-   `/api/wake/triggers?link=…` and then `/wake/<container>` — asking rather than
-   hardcoding is the whole point of the trigger map.
+2. **The frontends.** DONE for the welcome hub (→ forge, 2026-09-03) and the
+   client portal (→ reech, 2026-09-03): both carry a script that calls
+   `/__wake/triggers?domain=…` then `/__wake/<container>`, same-origin paths
+   proxied to locator by `welcome-hub.yml` / `client-portal.yml` on unit8.
+   Asking rather than hardcoding is the whole point of the trigger map.
+
+   **A page-driven wake is the ONLY option when the visited host is healthy.**
+   An `errors` middleware needs a 502/503/504 to fire, and a hub or portal that
+   answers 200 never produces one, so it can never wake a sibling container.
+   Use the middleware to wake the host being visited, the page to wake others.
+
+   Still to do: the main site's search bar (→ searchsearcher-app).
 3. **`locator-api-readblock.yml` blocks `PathPrefix(/wake)`** on both public
    locator hostnames, so a browser-initiated wake from a page still gets 403.
    That block predates wake having any auth of its own; now that the gate is
