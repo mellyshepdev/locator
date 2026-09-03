@@ -1450,7 +1450,7 @@ def _write_policy_field(service, key, value):
 
         ind = " " * (entry_indent or 2)
         fields = {
-            "deployment_type": "optional",
+            "deployment_type": DEPLOYMENT_NON_ESSENTIAL,
             "location_type":   "mobile",
             "units":           "current_unit",
             "instances":       1,
@@ -1496,7 +1496,7 @@ def get_policy():
     out = {}
     for name, cfg in load_policy().items():
         out[name] = {
-            "essential": cfg.get("deployment_type") == "essential",
+            "essential": is_essential(cfg),
             "stationary": cfg.get("location_type") == "stationary",
             "units": cfg.get("units", ""),
             "instances": cfg.get("instances", 1),
@@ -1572,7 +1572,7 @@ def set_policy():
     service = service.split("@")[0]
 
     if "essential" in data:
-        key, value = "deployment_type", "essential" if data["essential"] else "optional"
+        key, value = "deployment_type", DEPLOYMENT_ESSENTIAL if data["essential"] else DEPLOYMENT_NON_ESSENTIAL
     elif "stationary" in data:
         key, value = "location_type", "stationary" if data["stationary"] else "mobile"
         if not data["stationary"] and _is_name_locked(service):
@@ -1622,7 +1622,7 @@ def set_policy_bulk():
             continue
 
         if "essential" in entry:
-            key, value = "deployment_type", "essential" if entry["essential"] else "optional"
+            key, value = "deployment_type", DEPLOYMENT_ESSENTIAL if entry["essential"] else DEPLOYMENT_NON_ESSENTIAL
         elif "stationary" in entry:
             key, value = "location_type", "stationary" if entry["stationary"] else "mobile"
             if not entry["stationary"] and _is_name_locked(service):
@@ -2841,7 +2841,7 @@ def idle_policy():
     for name, cfg in load_policy().items():
         if not cfg.get("idle_stop"):
             continue
-        if cfg.get("deployment_type") == "essential":
+        if is_essential(cfg):
             continue
         spec = cfg.get("units") or ""
         if unit and spec not in ("", "all", "current_unit"):
@@ -3285,7 +3285,11 @@ YAML_TEMPLATES = {
 #                  disk, since migration moves the compose file and NOT the
 #                  volume). mobile = may be rebalanced between units.
 # deployment_type: essential = must always be running; the locator restarts it
-#                  as soon as it is seen OFFLINE. optional = left alone.
+#                  as soon as it is seen OFFLINE. non-essential = left alone,
+#                  and the only kind idle_stop will ever act on.
+#                  ONLY "essential" is matched; every other value, typo included,
+#                  reads as non-essential. "optional" is a legacy alias, still
+#                  accepted but no longer written.
 # units:           current_unit (default) | all | 8 | "7_8_9"
 #                  ALWAYS QUOTE the underscore form — YAML 1.1 reads a bare
 #                  7_8_9 as the integer 789 and the policy matches nothing.
@@ -3300,7 +3304,7 @@ YAML_TEMPLATES = {
 
 Service:
   my-service:
-    deployment_type: optional
+    deployment_type: non-essential
     location_type: stationary
     units: current_unit
     instances: 1
@@ -4101,6 +4105,31 @@ def _parse_duration(value, default):
         return int(value)
     except (ValueError, TypeError):
         return default
+
+
+# deployment_type has exactly two meanings, and only one of them was ever
+# written down. Every check in this file is `== "essential"`, so ANY other
+# string -- including a typo -- silently reads as not-essential and makes the
+# service eligible for idle_stop and eviction. "optional" was never a keyword
+# the code recognised; it was just the label the toggle path happened to write,
+# which made the vocabulary look richer than it is.
+#
+# The accurate word for "not essential" is NON-ESSENTIAL, so that is now what
+# the toggle writes and what the template documents. "optional" stays accepted
+# as a legacy alias -- there are existing entries carrying it and they must keep
+# working -- but nothing emits it any more.
+DEPLOYMENT_ESSENTIAL = "essential"
+DEPLOYMENT_NON_ESSENTIAL = "non-essential"
+DEPLOYMENT_ALIASES = {"optional", "nonessential", "non_essential"}
+
+
+def is_essential(cfg):
+    """True only for an explicitly essential service.
+
+    Kept as one function so the 'anything not essential is non-essential'
+    reading lives in exactly one place instead of four scattered == comparisons.
+    """
+    return str(cfg.get("deployment_type", "")).strip().lower() == DEPLOYMENT_ESSENTIAL
 
 
 def _queue_command(unit, container, action, source="idle", extra=None):
@@ -5986,7 +6015,7 @@ def critical_service_watchdog():
             # locator.yml's "essential" flag is the editable half of this list.
             # The hardcoded set stays as a floor, so a broken or missing policy
             # file cannot leave the agents themselves unwatched.
-            if (_policy_for(base).get("deployment_type") != "essential"
+            if (not is_essential(_policy_for(base))
                     and not any(w == base for w in _WATCHDOG_SERVICES)):
                 continue
             if svc.get("status") != "OFFLINE":

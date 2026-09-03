@@ -317,11 +317,21 @@ Service:
         - welcome.theofficialblacksheepco.com
 
   forge:
-    deployment_type: optional
+    deployment_type: non-essential
     location_type: stationary
     units: "8"
     instances: 1
     public_wake: true
+    # Idle-stopped after 15m of no traffic. Safe to do here and not elsewhere
+    # because forge is the one service with a COMPLETE wake path: a file-defined
+    # router in unit8's forge.yml that survives the container, an errors
+    # middleware on it, and public_wake below — so a visitor's own request
+    # brings it back. Its compose sets restart:"no" for the same reason; a
+    # restart policy would resurrect it behind the idle policy's back.
+    # deployment_type stays 'optional': locator refuses idle_stop outright on an
+    # essential service, and forge is not one.
+    idle_stop: true
+    idle_timeout: 15m
     # /pad and /view are a separate container that stops independently —
     # 2026-08-28 took down both, and waking only forge left those two prefixes
     # dead. Naming it here means one /wake/forge starts the pair, and it also
