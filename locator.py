@@ -954,6 +954,34 @@ def get_service(name):
     return jsonify({"error": f"Service '{name}' not found"}), 404
 
 
+# Images whose containers hold state on local disk. Matched against the IMAGE
+# a unit actually reported, not the container's name: kc-pg-node walked straight
+# through the "postgres"/"postgresql" entries in _PINNED_NAMES on 2026-09-04
+# because it is spelled "pg", and the dedup worker queued six evictions against
+# one half of the Keycloak HA database pair. A name is a human label; the image
+# is what the thing IS.
+_STATEFUL_IMAGE_MARKERS = (
+    "postgres", "postgis", "pg-autofailover", "pgpool", "pgbouncer", "timescale",
+    "mysql", "mariadb", "maxscale", "percona",
+    "redis", "valkey", "memcached",
+    "mongo", "cassandra", "elasticsearch", "opensearch", "influxdb", "clickhouse",
+    "etcd", "consul", "vault", "openbao", "minio", "rabbitmq", "kafka", "zookeeper",
+)
+
+
+def _looks_stateful(instances):
+    """True when any reported instance runs a known data-holding image.
+
+    Migration moves the compose file and NOT the volume, so evicting one of
+    these silently separates a database from its data.
+    """
+    for svc in instances or []:
+        img = str((svc.get("metadata") or {}).get("image") or "").lower()
+        if img and any(m in img for m in _STATEFUL_IMAGE_MARKERS):
+            return True
+    return False
+
+
 def _is_multi_unit_service(name):
     """True when locator.yml assigns this service to more than one unit.
 
@@ -992,6 +1020,26 @@ def _enforce_dedup(new_name, new_host):
     hosts = {svc.get("host") for svc in instances if svc.get("host")}
     if len(hosts) <= 1:
         return  # nothing to evict
+
+    # ── The default is to do NOTHING. ──────────────────────────────────────
+    # This worker used to evict any duplicate that was not explicitly exempt,
+    # so a service running on two nodes was ASSUMED to be a mistake and intent
+    # had to be declared in advance. A forgotten locator.yml line was therefore
+    # enough to tear down half of a working HA pair — which is exactly what it
+    # tried to do to the Keycloak database on 2026-09-04, six times.
+    # Destroying something is now the case that must be justified, not the
+    # default. Everything else is reported and left alone; a real accidental
+    # duplicate still shows up in the log, it just no longer acts unsupervised.
+    if _looks_stateful(instances):
+        print(f"🛡️  DEDUP SKIPPED: '{new_name}' on {sorted(hosts)} holds data "
+              f"(image looks stateful) — migration moves the compose file, not "
+              f"the volume. Declare it in locator.yml if this is wrong.")
+        return
+    if not _policy_for(new_name):
+        print(f"🛡️  DEDUP SKIPPED: '{new_name}' running on {sorted(hosts)} with "
+              f"no locator.yml policy. Not evicting on a guess — add an entry "
+              f"with 'instances:'/'units:' if one of these should be removed.")
+        return
 
     # Oldest-first by last_heartbeat; the newest (just registered) survives
     instances.sort(key=lambda s: s.get("last_heartbeat", ""))
@@ -2693,7 +2741,12 @@ def create_migration():
         svc = registry["services"].get(svc_id)
         if not svc:
             return jsonify({"error": f"unknown service '{svc_id}'"}), 404
-        if svc.get("name") in _PINNED_NAMES:
+        # _is_pinned(), not `in _PINNED_NAMES`: set membership only catches
+        # exact names, so "mariadb" was protected while "mariadb-11.4" was
+        # freely migratable by hand, and locator.yml's location_type:stationary
+        # was ignored entirely on this path. The balancer already uses
+        # _is_pinned(); this makes the manual path agree with it.
+        if _is_pinned(svc.get("name")):
             return jsonify({"error": f"'{svc['name']}' is pinned — never auto/manually migrated"}), 400
 
         deps, missing = resolve_migration_order(svc_id, registry["services"])
@@ -5689,6 +5742,71 @@ CERT_WARN_DAYS = int(os.environ.get("CERT_WARN_DAYS", 21))
 _cert_state: dict = {}   # unit -> {"reported_at": iso, "certs": [...]}
 _cert_lock = threading.Lock()
 
+# Cert state is the ONLY input to renewals.py's mTLS inventory, and lokey only
+# pushes it every CERT_CHECK_TICKS (~6h). Held purely in memory, every locator
+# restart blanked it and the hourly credential renewer then saw zero mesh
+# leaves for up to six hours -- which is how unit8-mesh reached 2 days from
+# expiry under a rule that is supposed to reissue at 7. Persist it like the
+# registry and the schedule.
+CERT_STATE_FILE = os.path.join(DATA_DIR, "cert_state.json")
+# A report older than this is not trustworthy enough to renew from; the unit
+# has almost certainly changed since. Dropped on load rather than aged.
+CERT_STATE_MAX_AGE_DAYS = 7
+
+
+def persist_cert_state():
+    """Write _cert_state to disk so the renewal inventory survives a restart."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with _cert_lock:
+            snapshot = json.dumps(_cert_state, indent=2)
+        tmp = CERT_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(snapshot)
+        os.replace(tmp, CERT_STATE_FILE)
+    except Exception as e:
+        print(f"WARN Failed to persist cert state: {e}")
+
+
+def load_cert_state():
+    """Reload cert state on startup, ageing days_left by the time we were down.
+
+    days_left is a snapshot taken when the unit reported, so a stale entry
+    overstates the remaining life by exactly the time since reported_at. Ageing
+    it here keeps the 7-day renewal decision honest instead of resetting the
+    clock on every restart. Entries too old to trust are dropped, and the next
+    lokey report replaces them wholesale anyway.
+    """
+    if not os.path.exists(CERT_STATE_FILE):
+        return
+    try:
+        with open(CERT_STATE_FILE) as f:
+            saved = json.load(f)
+        now = datetime.now(timezone.utc)
+        loaded = aged = 0
+        with _cert_lock:
+            for unit, info in (saved or {}).items():
+                try:
+                    reported = datetime.fromisoformat(info["reported_at"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                days_down = (now - reported).total_seconds() / 86400.0
+                if days_down > CERT_STATE_MAX_AGE_DAYS:
+                    continue
+                certs = []
+                for c in info.get("certs") or []:
+                    c = dict(c)
+                    if isinstance(c.get("days_left"), (int, float)):
+                        c["days_left"] = int(c["days_left"] - days_down)
+                        aged += 1
+                    certs.append(c)
+                _cert_state[unit] = {"reported_at": info["reported_at"], "certs": certs}
+                loaded += 1
+        if loaded:
+            print(f"cert state restored: {loaded} unit(s), {aged} cert(s) aged forward")
+    except Exception as e:
+        print(f"WARN Failed to load cert state: {e}")
+
 
 @app.route("/api/certs/report", methods=["POST"])
 def certs_report():
@@ -5702,6 +5820,7 @@ def certs_report():
             "reported_at": datetime.now(timezone.utc).isoformat(),
             "certs": certs,
         }
+    persist_cert_state()
     for c in certs:
         if c.get("error") or (c.get("days_left") is not None and c["days_left"] < CERT_WARN_DAYS):
             print(f"🔐 CERT WARNING [{unit}] {c.get('host')}: "
@@ -6204,6 +6323,7 @@ def main():
     load_seed()
     persist_registry()
     load_schedule()
+    load_cert_state()
 
     start_background_workers()
 
@@ -6226,6 +6346,7 @@ else:
         load_seed()
         persist_registry()
         load_schedule()
+        load_cert_state()
         start_background_workers()
         beast_log("🔦 LOCATOR online (Gunicorn) — registry loaded, telemetry forwarder active")
     except Exception as e:
