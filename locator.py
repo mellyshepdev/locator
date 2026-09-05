@@ -6170,6 +6170,16 @@ _watchdog_cooldown: dict = {}   # key: (unit, container) → datetime of last re
 WATCHDOG_INTERVAL  = 15         # seconds between watchdog scans
 WATCHDOG_COOLDOWN  = 90         # seconds before re-queuing restart for same service
 WATCHDOG_MAX_AGE   = 3 * 86400  # ignore services OFFLINE for more than 3 days (stale entries)
+# locator.yml calls deployment_type "(informational)" in its own header comment,
+# yet is_essential() read it and the watchdog restarted on it - which is why
+# synapse/chatwoot-rails/traefik/databases were being "restarted" while running.
+# Default off until registry liveness can be trusted.
+WATCHDOG_TRUST_ESSENTIAL = os.environ.get("WATCHDOG_TRUST_ESSENTIAL", "false").lower() == "true"
+# A target that can never succeed (a service name with no matching container,
+# e.g. lokey-client where the container is lokey) otherwise loops forever.
+WATCHDOG_MAX_ATTEMPTS = int(os.environ.get("WATCHDOG_MAX_ATTEMPTS", "5"))
+_watchdog_attempts: dict = {}
+_watchdog_gaveup: set = set()
 
 def critical_service_watchdog():
     """Immediately queues a start command when a critical service goes OFFLINE."""
@@ -6185,8 +6195,8 @@ def critical_service_watchdog():
             # locator.yml's "essential" flag is the editable half of this list.
             # The hardcoded set stays as a floor, so a broken or missing policy
             # file cannot leave the agents themselves unwatched.
-            if (not is_essential(_policy_for(base))
-                    and not any(w == base for w in _WATCHDOG_SERVICES)):
+            in_floor = any(w == base for w in _WATCHDOG_SERVICES)
+            if not in_floor and not (WATCHDOG_TRUST_ESSENTIAL and is_essential(_policy_for(base))):
                 continue
             if svc.get("status") != "OFFLINE":
                 continue
@@ -6209,9 +6219,19 @@ def critical_service_watchdog():
             last = _watchdog_cooldown.get(key)
             if last and (now - last).total_seconds() < WATCHDOG_COOLDOWN:
                 continue
+            if key in _watchdog_gaveup:
+                continue
+            attempts = _watchdog_attempts.get(key, 0) + 1
+            _watchdog_attempts[key] = attempts
+            if attempts > WATCHDOG_MAX_ATTEMPTS:
+                _watchdog_gaveup.add(key)
+                print(f"🛑 WATCHDOG: giving up on '{name}' on {unit} after "
+                      f"{WATCHDOG_MAX_ATTEMPTS} attempts — check that a container "
+                      f"by that name exists on {unit}")
+                continue
             _watchdog_cooldown[key] = now
             _queue_command(unit, name.split("@")[0], "start", source="watchdog")
-            print(f"🚨 WATCHDOG: queued restart for '{name}' on {unit}")
+            print(f"🚨 WATCHDOG: queued restart for '{name}' on {unit} (attempt {attempts})")
 
 
 # ── STARTUP ─────────────────────────────────────────────────────────────────
