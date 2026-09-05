@@ -30,7 +30,7 @@ Server environment:
   BALANCE_ENABLED, IDLE_ENABLED, GIT_AUTO_PUSH
 
 Client environment:
-  LOCATOR_URL      Registry URL (default: https://locator.theofficialblacksheepco.online)
+  LOCATOR_URL      Registry URL (default: https://locator.prime-quality.online)
 """
 
 # Handle -h/--help before the heavy imports so help works without deps installed
@@ -133,19 +133,20 @@ DNS_SSH_HOST = os.environ.get("DNS_SSH_HOST", "ns2.theofficialblacksheepco.onlin
 DNS_SSH_USER = os.environ.get("DNS_SSH_USER", "root")
 DNS_ZONES = [z.strip() for z in os.environ.get(
     "DNS_ZONES",
+    "prime-quality.online"
     "theofficialblacksheepco.com,theofficialblacksheepco.info,"
     "theofficialblacksheepco.online,theofficialblacksheepco.store",
 ).split(",") if z.strip()]
 
 # Load-balancer config
 BALANCE_ENABLED  = os.environ.get("BALANCE_ENABLED", "true").lower() == "true"
-BALANCE_HIGH     = float(os.environ.get("BALANCE_HIGH", "70"))   # % — node is overloaded above this
+BALANCE_HIGH     = float(os.environ.get("BALANCE_HIGH", "50"))   # % — node is overloaded above this
 BALANCE_LOW      = float(os.environ.get("BALANCE_LOW",  "30"))   # % — node is a migration target below this
 BALANCE_INTERVAL = int(os.environ.get("BALANCE_INTERVAL", "120"))  # seconds between balance checks
 BALANCE_COOLDOWN = int(os.environ.get("BALANCE_COOLDOWN", "300"))  # seconds before re-migrating from same node
-BALANCE_DIFF     = float(os.environ.get("BALANCE_DIFF", "40"))     # % spread between busiest/least busy to trigger balance
-BALANCE_STRIKES  = int(os.environ.get("BALANCE_STRIKES", "2"))      # consecutive overloaded checks before migrating
-OOM_THRESHOLD    = float(os.environ.get("OOM_THRESHOLD", "90"))     # % mem — emergency migration, bypasses anti-flap/cooldown
+BALANCE_DIFF     = float(os.environ.get("BALANCE_DIFF", "25"))     # % spread between busiest/least busy to trigger balance
+BALANCE_STRIKES  = int(os.environ.get("BALANCE_STRIKES", "1"))      # consecutive overloaded checks before migrating
+OOM_THRESHOLD    = float(os.environ.get("OOM_THRESHOLD", "80"))     # % mem — emergency migration, bypasses anti-flap/cooldown
 
 # Proactive pre-staging: watch nodes trending toward BALANCE_HIGH *before* they
 # get there, and validate (not execute) a migration ahead of time so the real
@@ -157,7 +158,7 @@ BALANCE_PRESTAGE_MARGIN  = float(os.environ.get("BALANCE_PRESTAGE_MARGIN", "15")
 PRESTAGE_STALE_SECONDS   = int(os.environ.get("PRESTAGE_STALE_SECONDS", "600"))    # re-validate if older than this
 
 UNIT_NAME             = os.environ.get("UNIT_NAME", "unknown")
-LOCATOR_CANONICAL_URL = os.environ.get("LOCATOR_CANONICAL_URL", "https://locator.theofficialblacksheepco.online")
+LOCATOR_CANONICAL_URL = os.environ.get("LOCATOR_CANONICAL_URL", "https://locator.prime-quality.online")
 
 # ── ALERT / TELEMETRY CONFIG ─────────────────────────────────────────────────
 TELEMETRY_URL     = os.environ.get("TELEMETRY_URL", "http://beast-telemetry:8087")
