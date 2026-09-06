@@ -43,6 +43,17 @@ services:
       - BALANCE_STRIKES=2
       - BALANCE_COOLDOWN=300
       - OOM_THRESHOLD=90
+      # Heartbeat grace. The default is 90s against lokey TICK_RATE=60 — only
+      # 30s of slack. A unit sends its OWN heartbeat first, then registers each
+      # container in a SEQUENTIAL loop, one POST per container at timeout=5.
+      # On unit8 (52 containers, 100+ round trips) a handful of slow calls
+      # pushes that loop past 90s, so every container the loop had not reached
+      # yet went stale and the reaper marked it OFFLINE — then the next tick put
+      # it back. That is the endless "OFFLINE: <container>@unit8" with the unit
+      # itself never going down. 300s is 5x the tick.
+      # This stops the false alarms; it does not fix the cause — the
+      # per-container loop should not be racing the reaper at all.
+      - HEARTBEAT_TIMEOUT=300
       # Idle auto-shutdown fires at 15 minutes of no traffic, not the 1h default.
       # Only containers labelled locator.idle.stop=true are eligible.
       - IDLE_DEFAULT_TIMEOUT=900
