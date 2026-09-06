@@ -4604,6 +4604,133 @@ def _bao_path_for(compose_name):
     return f"{SECRETSCAN_PREFIX}/{compose_name}"
 
 
+# ── INGEST: a unit hands us its .env, we file the credentials in OpenBao ──────
+#
+# The gap this closes: lokey only ever uploaded docker-compose.yml, and
+# secretscan only understood `environment:` blocks — so a credential living in a
+# unit's .env was invisible to the sweeper, to /api/secrets/scan and to
+# quarantine alike. That is where most of them are. Compose interpolates ${KEY}
+# from the .env beside it precisely so the value is NOT in the yaml, which means
+# the store scan reads clean exactly where the real secret sits on disk.
+#
+# This is the ONLY inbound route that carries raw credential values, so unlike
+# /api/compose — open by design, and its store is committed and auto-pushed —
+# it is admin-keyed and fails closed. Nothing is written to disk here and
+# nothing but key NAMES is logged: values go to OpenBao and are then dropped.
+#
+# It deliberately stops at storing. It does NOT rewrite the unit's .env and does
+# NOT queue a redaction. Filing a value is additive, idempotent and reversible;
+# editing a live service's config is none of those. Getting the secret INTO
+# OpenBao is the half that is safe to automate — taking it back out of the file
+# stays the explicit, admin-keyed act it already is in quarantine below.
+INGEST_MAX_BYTES = int(os.environ.get("SECRETSCAN_INGEST_MAX", "65536"))
+# Verbose tracing for the ingest path. Default ON: this is the only route that
+# carries raw credential values, and a rollout of it needs to be watchable in
+# live-logger rather than guessed at from a silent 200. Set SECRETSCAN_DEBUG=0
+# once it is boring. Every line below is names-and-counts only — a value must
+# never reach a log, and beast_log forwards to beast-telemetry.
+SECRETSCAN_DEBUG = os.environ.get("SECRETSCAN_DEBUG", "true").lower() in ("1", "true", "yes")
+
+
+def _ingest_log(line):
+    if SECRETSCAN_DEBUG:
+        beast_log(f"\U0001f510 ingest: {line}")
+_INGEST_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+@app.route("/api/secrets/ingest", methods=["POST"])
+def secrets_ingest():
+    """File a unit's .env credentials into OpenBao.
+
+    Body: {"unit": "unit8", "source": "pdns",
+           "path": "/home/.../pdns/.env", "content": "<raw .env text>",
+           "dry_run": false}
+
+    Returns the bao:// refs to paste into locator.yml, what was skipped, and
+    masked values only — the response is safe to log and to show in an event.
+    """
+    denied = _require_admin_key()
+    if denied:
+        return denied
+
+    body = request.get_json(silent=True) or {}
+    unit = str(body.get("unit") or "").strip() or "unknown"
+    source = str(body.get("source") or "").strip()
+    origin = str(body.get("path") or "").strip()
+    content = body.get("content")
+
+    if not source:
+        return jsonify({"error": "source (the compose project name) is required"}), 400
+    # `source` becomes a path segment in OpenBao, so it gets the same charset
+    # discipline as a stored compose name — a '../' here would write outside
+    # the prefix the broker policy allows.
+    if not _INGEST_NAME_RE.match(source):
+        return jsonify({"error": f"invalid source name {source!r}"}), 400
+    if not isinstance(content, str) or not content.strip():
+        return jsonify({"error": "empty content"}), 400
+    if len(content) > INGEST_MAX_BYTES:
+        return jsonify({"error": f"content exceeds {INGEST_MAX_BYTES} bytes"}), 413
+
+    _ingest_log(f"{unit} offered {source} ({len(content)} bytes) from {origin or 'unknown path'}")
+
+    findings = secretscan.scan_env_text(content, source=source)
+    actionable = [f for f in findings if f["severity"] not in ("placeholder", "hashed")]
+    skipped = [f for f in findings if f["severity"] in ("placeholder", "hashed")]
+    # Names and severities only. This is the line that tells you, mid-rollout,
+    # whether the scanner is seeing what you expect it to see on that unit.
+    _ingest_log(f"{source}: {len(findings)} finding(s) — "
+                f"store {[f['key'] for f in actionable] or 'nothing'}, "
+                f"skip {[(f['key'], f['severity']) for f in skipped] or 'nothing'}")
+
+    if not actionable:
+        # Not an error: most .env files are ports and flags. Reported so a unit
+        # can tell "nothing to file" apart from "the call never landed".
+        _ingest_log(f"{source}: nothing storable — not calling OpenBao")
+        return jsonify({"unit": unit, "source": source, "path": origin,
+                        "stored": [], "refs": {},
+                        "skipped": secretscan.public(skipped),
+                        "note": "no storable credential found"})
+
+    values = {f["key"]: f["value"] for f in actionable}
+    bao_path = _bao_path_for(source)
+    refs = {k: f"bao://{SECRETSCAN_MOUNT}/{bao_path}#{k}" for k in sorted(values)}
+    masked = {f["key"]: f["masked"] for f in actionable}
+
+    if body.get("dry_run"):
+        return jsonify({"unit": unit, "source": source, "path": origin, "dry_run": True,
+                        "would_store": sorted(values), "refs": refs, "masked": masked,
+                        "bao_path": f"{SECRETSCAN_MOUNT}/{bao_path}",
+                        "skipped": secretscan.public(skipped)})
+
+    try:
+        _ingest_log(f"{source}: writing {sorted(values)} -> {SECRETSCAN_MOUNT}/{bao_path}")
+        bao.write_secret(SECRETSCAN_MOUNT, bao_path, values)
+        # Read back for the same reason quarantine does: a write that reports
+        # success but stored nothing must never be reported as success, or the
+        # next step redacts a file against a secret that is not there.
+        stored = bao.read_secret(SECRETSCAN_MOUNT, bao_path, use_cache=False)
+        mismatch = sorted(k for k, v in values.items() if stored.get(k) != v)
+        _ingest_log(f"{source}: read-back {'OK' if not mismatch else 'MISMATCH ' + str(mismatch)} "
+                    f"({len(stored)} field(s) now at {SECRETSCAN_MOUNT}/{bao_path})")
+        if mismatch:
+            raise bao.BaoError(f"read-back mismatch for {mismatch}")
+    except bao.BaoError as e:
+        beast_log(f"\U0001f510 INGEST FAILED for {unit}:{source} — {e}")
+        emit_event("secrets", action="ingest_failed", unit=unit, source=source,
+                   path=origin, error=str(e))
+        return jsonify({"error": f"OpenBao write failed: {e}"}), 502
+
+    emit_event("secrets", action="ingested", unit=unit, source=source, path=origin,
+               keys=sorted(values), bao_path=f"{SECRETSCAN_MOUNT}/{bao_path}")
+    beast_log(f"\U0001f510 INGESTED {len(values)} credential(s) from "
+              f"{unit}:{origin or source} \u2192 {SECRETSCAN_MOUNT}/{bao_path} "
+              f"({', '.join(sorted(values))})")
+    return jsonify({"unit": unit, "source": source, "path": origin,
+                    "stored": sorted(values), "refs": refs, "masked": masked,
+                    "bao_path": f"{SECRETSCAN_MOUNT}/{bao_path}",
+                    "skipped": secretscan.public(skipped)})
+
+
 @app.route("/api/secrets/quarantine", methods=["POST"])
 def secrets_quarantine():
     """Move one compose file's plaintext credentials into OpenBao.

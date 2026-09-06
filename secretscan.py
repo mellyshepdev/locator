@@ -191,6 +191,12 @@ def redact_text(text, findings):
         idx = f["line"] - 1
         if idx < 0 or idx >= len(lines):
             continue
+        if f.get("form") not in ("map", "list"):
+            # A .env finding has no compose line to rewrite. Rewriting one as
+            # "KEY: ${KEY}" would turn an assignment into YAML and blank the
+            # variable, so forms this function does not understand are skipped
+            # rather than guessed at.
+            continue
         line = lines[idx]
         key = f["key"]
         indent = line[:len(line) - len(line.lstrip())]
@@ -200,6 +206,64 @@ def redact_text(text, findings):
             lines[idx] = f"{indent}{key}: ${{{key}}}"
         changed.append(key)
     return "\n".join(lines) + ("\n" if text.endswith("\n") else ""), changed
+
+
+# A .env assignment. `export ` is accepted because a file that is both sourced
+# by a shell and read by compose is written that way.
+ENV_ASSIGN_RE = re.compile(
+    r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_.]*)\s*=(?P<value>.*)$")
+
+
+def scan_env_text(text, source=""):
+    """Findings for one .env file. Same finding shape as scan_text().
+
+    WHY THIS IS A SEPARATE FUNCTION
+    -------------------------------
+    scan_text walks compose block structure so it knows when it is inside a
+    service's `environment:`. A .env has no blocks — every line is a bare
+    assignment — so the compose scanner runs over one and finds nothing at all.
+    That silence is the dangerous part: compose interpolates ${KEY} from the
+    .env beside it *precisely so the value is not in the yaml*, which means the
+    store scan reads clean exactly where the real credential lives. A fleet can
+    therefore report zero findings while every unit has a password on disk.
+
+    Findings carry raw values, same as scan_text — pass through public() before
+    any of this leaves the process.
+    """
+    findings = []
+    for i, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        m = ENV_ASSIGN_RE.match(line)
+        if not m:
+            continue
+        key = m.group("key")
+        # _strip_value only treats " #" (space-hash) as a comment, which is what
+        # keeps a value like *E>e#Dma!w#Rk7@ intact — '#' is a perfectly ordinary
+        # character in a generated password and truncating there would file a
+        # silently wrong secret.
+        value, quote = _strip_value(m.group("value"))
+        hit, severity, reason = classify(key, value)
+        if not hit:
+            continue
+        # classify() is shared with the compose scanner and words its generic
+        # reason for that context. Restate it here so a .env report does not
+        # send someone hunting for an environment: block that does not exist.
+        if reason == "literal credential in an environment block":
+            reason = "literal credential in a .env file"
+        findings.append({
+            "source": source,
+            "line": i,
+            "key": key,
+            "form": "dotenv",
+            "quote": quote,
+            "severity": severity,
+            "reason": reason,
+            "masked": mask(value),
+            "value": value,      # callers MUST NOT serialise this outward
+        })
+    return findings
 
 
 def public(findings):
