@@ -565,9 +565,17 @@ def identify():
     if ai_key and AI_ADMIN_KEY and hmac.compare_digest(ai_key, AI_ADMIN_KEY):
         return Principal(INFRA, "service:ai-admin", via="ai-admin-key")
 
+    token = ""
     auth = request.headers.get("Authorization", "")
     if auth[:7].lower() == "bearer ":
         token = auth[7:].strip()
+    if not token:
+        # EventSource cannot set request headers, so the dashboard keeps the
+        # same Keycloak token in a SameSite=Strict cookie purely so the SSE
+        # events stream can authenticate. Strict means no cross-site sending,
+        # which keeps the CSRF surface a cookie would otherwise open closed.
+        token = request.cookies.get("kc_token", "")
+    if token:
         try:
             claims = verify_token(token)
         except ClearanceError as exc:

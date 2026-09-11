@@ -102,7 +102,13 @@
                 return kc.updateToken(30).catch(function(){}).then(function() {
                     var opts = Object.assign({}, init || {});
                     var headers = new Headers((init && init.headers) || {});
-                    if (kc.token) headers.set('Authorization', 'Bearer ' + kc.token);
+                    if (kc.token) {
+                        headers.set('Authorization', 'Bearer ' + kc.token);
+                        // SameSite=Strict + Secure so the token rides same-origin
+                        // requests that cannot set headers — the EventSource feed
+                        // — without ever being sent cross-site.
+                        document.cookie = 'kc_token=' + kc.token + '; path=/; SameSite=Strict; Secure';
+                    }
                     opts.headers = headers;
                     return raw(input, opts);
                 });
@@ -970,8 +976,27 @@
             <div class="refresh-strip-head">
                 <span class="grid-title" style="margin:0;font-size:0.8rem;">FLEET REFRESH</span>
                 <span id="refresh-summary"></span>
+                <button id="refresh-run-all" onclick="runRefresh(null)"
+                        title="Queue a refresh run on every enabled unit"
+                        style="margin-left:auto; background:var(--neon-green); color:#000; border:none; padding:4px 14px; font-family:inherit; font-size:10px; font-weight:bold; letter-spacing:1px; cursor:pointer; border-radius:3px;">RUN ALL</button>
             </div>
             <div class="refresh-chips" id="refresh-chips"></div>
+        </div>
+
+        <!-- Refresh run detail — what each run did and where it failed.
+             Opens from a chip click; output comes from /api/refresh/runs,
+             which is admin-key gated because captured output names paths
+             and repo state. -->
+        <div id="refresh-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:20000; justify-content:center; align-items:center;">
+            <div style="background:#000510; border:1px solid var(--neon-green); box-shadow:0 0 30px var(--neon-green); padding:24px; width:min(860px, 92vw); max-height:84vh; display:flex; flex-direction:column; font-family:'Courier New',monospace;">
+                <h3 id="refresh-modal-title" style="color:var(--neon-green); margin:0 0 6px; letter-spacing:3px;">REFRESH RUNS</h3>
+                <div style="color:#777; font-size:11px; margin-bottom:12px;">newest first — click a run to expand its output</div>
+                <div id="refresh-runs-list" style="overflow-y:auto; min-height:80px;"></div>
+                <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:14px;">
+                    <button onclick="closeRefreshModal()" style="background:#222; color:#ccc; border:1px solid #444; padding:8px 18px; font-family:inherit; cursor:pointer;">CLOSE</button>
+                    <button id="refresh-modal-run-btn" onclick="runRefresh(window._refreshModalUnit)" style="background:var(--neon-green); color:#000; border:none; padding:8px 18px; font-family:inherit; font-weight:bold; cursor:pointer;">RUN NOW</button>
+                </div>
+            </div>
         </div>
 
         <!-- BLUE RECTANGLE: DEVICES -->
@@ -2793,11 +2818,22 @@
                     ? ` exit ${run.exit_code}` : '';
                 const el = document.createElement('div');
                 el.className = 'refresh-chip ' + cls;
-                el.title = run.error || run.status || 'no run recorded yet';
+                el.title = (run.error || run.status || 'no run recorded yet') +
+                           ' — click for run history';
+                el.style.cursor = 'pointer';
                 el.innerHTML =
                     `<div class="rc-unit">${u.unit}</div>` +
                     `<div>${run.status || 'NO RUNS'}${exit} ${secs}</div>` +
                     `<div class="rc-meta">${fmtAgo(run.queued_at)} · next ${fmtNext(u.next_run)}</div>`;
+                // Inline run trigger; stopPropagation keeps it from opening
+                // the detail modal the rest of the chip opens.
+                const runBtn = document.createElement('button');
+                runBtn.textContent = '▶ run';
+                runBtn.title = 'Queue a refresh on ' + u.unit + ' now';
+                runBtn.style.cssText = 'margin-top:5px;background:none;border:1px solid var(--neon-green);color:var(--neon-green);font-family:inherit;font-size:9px;letter-spacing:1px;padding:2px 8px;cursor:pointer;border-radius:3px;';
+                runBtn.onclick = function (e) { e.stopPropagation(); runRefresh(u.unit); };
+                el.appendChild(runBtn);
+                el.onclick = function () { openRefreshRuns(u.unit); };
                 chips.appendChild(el);
             });
         }
@@ -2810,26 +2846,128 @@
         pollRefreshStrip();
         setInterval(pollRefreshStrip, 30000);
 
-        fetch('/api/events')
-            .then(res => res.json())
-            .then(events => {
-                if (Array.isArray(events)) events.forEach(renderEvent);
-            })
-            .catch(err => console.error('Failed to load initial event log:', err));
+        // ── Refresh run trigger + run detail ─────────────────────────────
+        // runRefresh queues through /api/refresh/run; openRefreshRuns reads
+        // /api/refresh/runs, which carries captured stdout/stderr — both are
+        // admin-key gated, so they ride the same localStorage key + prompt
+        // flow the Exec tab uses (execFetch/execHeaders).
+        window._refreshModalUnit = null;
 
-        // Server-Sent Events, not WebSocket — this app runs under gunicorn's
-        // gthread worker class, which doesn't support WS upgrades. SSE works
-        // over plain HTTP and reconnects automatically on drop.
-        if (window.EventSource) {
-            const eventStream = new EventSource('/api/events/stream');
-            eventStream.onmessage = function(e) {
-                try {
-                    renderEvent(JSON.parse(e.data));
-                } catch (err) {
-                    renderEvent({ message: e.data });
-                }
-            };
+        async function runRefresh(unit) {
+            if (!getExecKey()) promptExecKey();
+            try {
+                const body = unit ? { unit } : { all: true };
+                const res = await execFetch('/api/refresh/run', {
+                    method: 'POST', headers: execHeaders(), body: JSON.stringify(body)
+                });
+                const n = (res.commands || []).length;
+                notify(unit ? `Refresh queued on ${unit}` : `Refresh queued on ${n} units`);
+                pollRefreshStrip();
+                // Show the run landing: open the unit's history if we have one
+                // unit in view, then keep re-fetching while it is in flight.
+                if (unit) openRefreshRuns(unit);
+            } catch (err) {
+                notify(`Refresh failed to queue: ${err.message}`, 'error');
+            }
         }
+
+        function closeRefreshModal() {
+            document.getElementById('refresh-modal').style.display = 'none';
+            window._refreshModalUnit = null;
+        }
+
+        function _runStatusColor(run) {
+            if (run.status === 'DONE' && run.success) return 'var(--success)';
+            if (run.status === 'PENDING' || run.status === 'DISPATCHED') return 'var(--accent)';
+            return 'var(--danger)';
+        }
+
+        function _runRowHtml(run) {
+            const secs = run.duration_ms ? Math.round(run.duration_ms / 1000) + 's' : '—';
+            const exit = (run.exit_code !== null && run.exit_code !== undefined) ? ` exit ${run.exit_code}` : '';
+            const out = [run.error ? `error: ${run.error}` : null,
+                         run.stdout ? `--- stdout ---\n${run.stdout}` : null,
+                         run.stderr ? `--- stderr ---\n${run.stderr}` : null]
+                        .filter(Boolean).join('\n\n') || '(no captured output)';
+            return `<div style="border:1px solid rgba(0,255,0,0.18); border-left:3px solid ${_runStatusColor(run)}; margin-bottom:8px;">
+                <div style="padding:8px 10px; cursor:pointer; display:flex; gap:14px; flex-wrap:wrap; font-size:12px;"
+                     onclick="var p=this.nextElementSibling; p.style.display = p.style.display === 'none' ? 'block' : 'none';">
+                    <strong style="color:${_runStatusColor(run)};">${run.status}${exit}</strong>
+                    <span style="color:#aaa;">${fmtAgo(run.queued_at)} · ${secs}</span>
+                    <span style="color:#666;">${run.source || ''}${run.id ? ' · ' + run.id : ''}</span>
+                </div>
+                <pre style="display:none; margin:0; padding:10px; max-height:300px; overflow:auto; background:#000; color:#ccc; font-size:11px; white-space:pre-wrap; border-top:1px solid rgba(0,255,0,0.15);">${out.replace(/</g, '&lt;')}</pre>
+            </div>`;
+        }
+
+        async function openRefreshRuns(unit) {
+            window._refreshModalUnit = unit;
+            const list = document.getElementById('refresh-runs-list');
+            document.getElementById('refresh-modal-title').innerText = 'REFRESH RUNS — ' + unit;
+            document.getElementById('refresh-modal').style.display = 'flex';
+            list.innerHTML = '<div style="color:#555; padding:10px;">Loading…</div>';
+            if (!getExecKey()) promptExecKey();
+            try {
+                const runs = await execFetch(`/api/refresh/runs?unit=${encodeURIComponent(unit)}&limit=8`,
+                                             { headers: execHeaders() });
+                if (!Array.isArray(runs) || !runs.length) {
+                    list.innerHTML = '<div style="color:#555; padding:10px;">No runs recorded for this unit.</div>';
+                    return;
+                }
+                list.innerHTML = runs.map(_runRowHtml).join('');
+                // A queued or in-flight run should visibly finish — re-poll
+                // the list until nothing is pending.
+                if (runs.some(r => r.status === 'PENDING' || r.status === 'DISPATCHED')) {
+                    setTimeout(function () {
+                        if (window._refreshModalUnit === unit) openRefreshRuns(unit);
+                    }, 4000);
+                }
+            } catch (err) {
+                list.innerHTML = `<div style="color:var(--danger); padding:10px;">${err.message}</div>`;
+            }
+        }
+
+        // The events fetch MUST wait for kc.authenticated — it used to fire at
+        // parse time, before kc.init resolved, so installAuthedFetch passed it
+        // through with no Bearer, the 401 JSON body failed the Array.isArray
+        // check, and the panel stayed empty forever. The registry grid never
+        // showed the same bug only because it re-polls every 10s and the retry
+        // lands after auth.
+        function whenAuthed(cb, attempts) {
+            attempts = attempts || 0;
+            if (window.kc && kc.authenticated) return cb();
+            if (attempts > 240) return;             // ~2min; authFailed shows by then
+            setTimeout(function () { whenAuthed(cb, attempts + 1); }, 500);
+        }
+
+        whenAuthed(function () {
+            // Seed the cookie before the stream connects: EventSource cannot
+            // set Authorization, so this is how it authenticates (see
+            // installAuthedFetch and clearance.identify's kc_token fallback).
+            if (kc.token) {
+                document.cookie = 'kc_token=' + kc.token + '; path=/; SameSite=Strict; Secure';
+            }
+            fetch('/api/events')
+                .then(res => res.ok ? res.json() : [])
+                .then(events => {
+                    if (Array.isArray(events)) events.forEach(renderEvent);
+                })
+                .catch(err => console.error('Failed to load initial event log:', err));
+
+            // Server-Sent Events, not WebSocket — this app runs under gunicorn's
+            // gthread worker class, which doesn't support WS upgrades. SSE works
+            // over plain HTTP and reconnects automatically on drop.
+            if (window.EventSource) {
+                const eventStream = new EventSource('/api/events/stream');
+                eventStream.onmessage = function(e) {
+                    try {
+                        renderEvent(JSON.parse(e.data));
+                    } catch (err) {
+                        renderEvent({ message: e.data });
+                    }
+                };
+            }
+        });
 
         // ── STATIC "CLOUD & NATIVE PLATFORMS" TABLE — also clickable, same data-sheet modal ──
         // These rows are hand-authored reference entries, not live registry data, so their
