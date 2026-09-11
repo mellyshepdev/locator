@@ -212,6 +212,24 @@ still owns the router, middleware and TLS; only the upstream moves.
 - One `edge_port` per service name. Multi-port stacks (odoo, puffbase,
   traccar) still need per-name stanzas or a richer key before they can join.
 
+Three optional keys shape the emitted service:
+
+```yaml
+error-pages:
+  edge_host: apache        # borrow apache's registry placement — a logical
+                           # edge name with no container of its own
+  edge_port: 8080
+  edge_pass_host: false    # emitted as loadBalancer.passHostHeader
+aegis-server:
+  edge_port: 8090
+  edge_healthcheck: /healthz   # emitted as loadBalancer.healthCheck,
+                             # path only — interval/timeout are fixed 15s/5s
+```
+
+`edge_host` also covers one backend serving several routes that need
+different load-balancer options — `error-pages` and `apache` share the same
+upstream but only error-pages rewrites the Host header.
+
 Both searchsearcher and reech were **not deployed at all** before this date — no
 container and no image, only their data. They were built and started on unit8 on
 2026-08-30. Nothing could have woken them, because there was nothing to start.
