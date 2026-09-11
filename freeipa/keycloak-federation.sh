@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-KC_URL="${KC_URL:-https://bsco-keycloak.fly.dev}"
+KC_URL="${KC_URL:-https://auth.theofficialblacksheepco.com}"
 REALM="${KC_REALM:-blacksheep}"
 CLIENT_ID="${KC_CLIENT_ID:-locator}"
 KCADM="${KCADM:-kcadm.sh}"

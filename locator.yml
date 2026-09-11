@@ -87,6 +87,108 @@ Service:
   #
   # QUOTE every underscore form. A bare 8_9 is the integer 89 (YAML 1.1 digit
   # separators) and matches no unit at all.
+  # ── Control plane, identity and secrets — never migratable ────────────
+  # Added 2026-09-11: these were ONLINE but undeclared, which left them
+  # migratable and — for the multi-unit ones — exposed to dedup eviction.
+  # locator dying mid-migration strands the whole fleet; the lokeys execute
+  # every queued command, so stopping one blinds that unit entirely.
+
+  locator:
+    deployment_type: essential
+    location_type: stationary
+    units: "4"
+    instances: 1
+
+  # One per reporting unit — the agents that run the command queue.
+  lokey-client:
+    deployment_type: essential
+    location_type: stationary
+    units: "3_4_5_8_9"
+    instances: 1
+
+  # SSO. One node per unit, a cluster by design - units lists all three so
+  # _is_multi_unit_service() keeps dedup from "cleaning up" two of them.
+  keycloak:
+    deployment_type: essential
+    location_type: stationary
+    units: "4_7"
+    instances: 1
+
+  # Fleet PKI / secrets broker. Mints the mTLS leaves everything else uses.
+  openbao:
+    deployment_type: essential
+    location_type: stationary
+    units: "4"
+    instances: 1
+
+  # Kerberos/LDAP identity for the fleet.
+  freeipa:
+    deployment_type: essential
+    location_type: stationary
+    units: "4"
+    instances: 1
+
+  # ── Edge + state services — pinned 2026-09-11 ─────────────────────────
+  # unit4's front-of-house pair: varnish caches in front of apache, haproxy
+  # terminates/steers on :443-adjacent paths. Both are bound to unit4 by the
+  # routes that point at them.
+  varnish:
+    deployment_type: essential
+    location_type: stationary
+    units: "4"
+    instances: 1
+
+  varnish-log:
+    deployment_type: essential
+    location_type: stationary
+    units: "4"
+    instances: 1
+
+  haproxy:
+    deployment_type: essential
+    location_type: stationary
+    units: "4"
+    instances: 1
+
+  # The redis HA set on unit7: primary + 2 replicas + 3 sentinels, one
+  # failure domain by design. Sentinels hold quorum state, replicas hold
+  # data — moving any one of them splits the cluster's brain.
+  redis-ha-primary:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+
+  redis-ha-replica-1:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+
+  redis-ha-replica-2:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+
+  redis-ha-sentinel-1:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+
+  redis-ha-sentinel-2:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+
+  redis-ha-sentinel-3:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+
   traefik:
     deployment_type: essential
     location_type: stationary
@@ -154,6 +256,35 @@ Service:
     location_type: stationary
     units: "8"
     instances: 1
+
+  # unit4s public Apache front door. unit8 Traefik upstreams tech-estate and
+  # friends to 100.82.31.92:8080 and the docroot lives on /mnt/omv_storage, so
+  # a migration strands the route AND the content. No policy entry meant it
+  # was migratable - found exposed 2026-09-11 while auditing the pin set.
+  apache:
+    deployment_type: essential
+    location_type: stationary
+    units: "4"
+    instances: 1
+
+
+  # The public store is separate from the main site so it can be migrated
+  # independently and stopped when it has been idle for 15 minutes.
+  store-site:
+    deployment_type: optional
+    location_type: mobile
+    units: "8"
+    instances: 1
+    idle_stop: true
+    idle_timeout: 15m
+    public_wake: true
+    project_dir: /home/swoopg111/server/networking/store-site
+    wake_triggers:
+      domain:
+        - theofficialblacksheepco.com
+        - www.theofficialblacksheepco.com
+        - theofficialblacksheepco.store
+        - www.theofficialblacksheepco.store
 
 
   # ── STOP-GAP, added 2026-08-23 ─────────────────────────────────────────
@@ -279,7 +410,7 @@ Service:
   # (dynamic-config/rasa.yml) and starts rasa AND ollama, since rasa reaches
   # ollama directly rather than through a proxy.
   rasa:
-    deployment_type: optional
+    deployment_type: essential
     location_type: stationary
     units: "8"
     instances: 1
@@ -296,6 +427,53 @@ Service:
     wake_triggers:
       domain:
         - rasa.theofficialblacksheepco.online
+
+  # ── Communication stack — all unit8, all pinned 2026-09-11 ────────────
+  # The customer-chat chain is widget -> Chatwoot -> webhook-relay -> rasa ->
+  # site-chat; break any link and the site chat goes dark. mailserver/mail-admin
+  # run the domain's mail; synapse/element/matrix-relay are the Matrix homeserver
+  # trio. Migrating any of these strands credentials, volumes and DNS MX/A.
+  chatwoot-sidekiq:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
+  webhook-relay:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
+  rasa-actions:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
+  mailserver:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
+  mail-admin:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
+  matrix-relay:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
+  element:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
 
   # ── Wake-on-request ────────────────────────────────────────────────────
   # The other half of idle auto-stop above. Everything that STARTS a container
@@ -338,9 +516,11 @@ Service:
         - welcome.theofficialblacksheepco.com
 
   forge:
+    # Tailnet publish port edges reach this on; /api/traefik follows it.
+    edge_port: 8090
     deployment_type: non-essential
     location_type: stationary
-    units: "8"
+    units: "7"
     instances: 1
     public_wake: true
     # Idle-stopped after 15m of no traffic. Safe to do here and not elsewhere
