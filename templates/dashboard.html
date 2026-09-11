@@ -2843,8 +2843,10 @@
                 .then(d => { if (d) renderRefreshStrip(d); })
                 .catch(() => {});
         }
-        pollRefreshStrip();
-        setInterval(pollRefreshStrip, 30000);
+        // Same pre-auth race as the events fetch — /api/refresh/status is
+        // clearance-gated, so firing before kc.init resolves just 401s.
+        whenAuthed(pollRefreshStrip);
+        setInterval(function () { if (window.kc && kc.authenticated) pollRefreshStrip(); }, 30000);
 
         // ── Refresh run trigger + run detail ─────────────────────────────
         // runRefresh queues through /api/refresh/run; openRefreshRuns reads
