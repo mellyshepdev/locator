@@ -680,3 +680,63 @@ Service:
     wake_triggers:
       domain:
         - reech.prime-quality.online
+
+  # ── Ops dashboard (ops.theofficialblacksheepco.com) ─────────────────────
+  # The dashboard itself is always-up (restart: unless-stopped, no idle_stop),
+  # so its wake policy exists almost entirely to PRE-WARM the tools its cards
+  # open. The page calls /__wake/triggers?domain=ops…, gets this entry back,
+  # then /__wake/ops-dashboard expands wake_with server-side — pgAdmin plus the
+  # three inventory backends. Container names stay out of the page: a rename or
+  # a move is a policy edit here, not a rebuild of the dashboard.
+  ops-dashboard:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    public_wake: true
+    wake_with: [pgadmin_ui, inventory-server, inventory-api, inventory-inventory-1]
+    wake_triggers:
+      domain:
+        - ops.theofficialblacksheepco.com
+
+  # Sablier stops pgAdmin 30m after its last proxied request; a wake only
+  # STARTS it (docker start), it does not fight that schedule. Stationary on
+  # unit8 because the edge reaches it by docker-network name, not tailnet.
+  pgadmin_ui:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    public_wake: true
+
+  # scanner.theofficialblacksheepco.online backend — the web scanner page and
+  # the Inventory Backend 1 card both land here.
+  inventory-server:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    public_wake: true
+
+  # inventory-api.theofficialblacksheepco.online — Inventory Backend 2.
+  inventory-api:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    public_wake: true
+
+  # The Vite/React inventory app on unit7 (inventory.theofficialblacksheepco.
+  # online). Its edge file routes to a tailnet-published 8082.
+  inventory-inventory-1:
+    deployment_type: optional
+    location_type: stationary
+    units: "7"
+    instances: 1
+    public_wake: true
+
+  # The edge's name for that app — borrows the container's registry placement
+  # so inventory-app.yml can point at inventory-app@http and follow a move.
+  inventory-app:
+    edge_host: inventory-inventory-1
+    edge_port: 8082

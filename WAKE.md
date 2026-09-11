@@ -171,6 +171,7 @@ unit8 on 2026-09-11).
 | `forge` | `forge.prime-quality.online` | ✅ `forge.yml` | `forge@http` (dynamic) | ✅ |
 | `forge-relay` | same host, `/pad` `/view` | ✅ `forge.yml` | `forge-relay@http` (dynamic) | ✅ |
 | `welcome-hub` | `welcome.theofficialblacksheepco.com` | ✅ `welcome-hub.yml` | `welcome-hub@http` (dynamic) | ✅ |
+| `ops-dashboard` (+`pgadmin_ui`, `inventory-server`, `inventory-api`, `inventory-inventory-1`) | `ops.theofficialblacksheepco.com` visit | ✅ page-driven, `ops-dashboard.yml` (2026-09-11) — own 502 path too | `ops-dashboard` local docker-net (stationary); `inventory-app@http` (dynamic) | ✅ |
 | `agent-0` (+`ollama`) | `a0.theofficialblacksheepco.online` | ✅ `agent-zero.yml` | static file | — |
 | `rasa` (+`ollama`) | `rasa.theofficialblacksheepco.online` | ✅ `rasa.yml` | static file | — |
 | `searchsearcher-app` (+ its postgres) | `search.…com`, `www.…com` | ❌ **not yet** | static file | ✅ 200 |
