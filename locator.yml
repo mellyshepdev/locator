@@ -271,6 +271,21 @@ Service:
     # the upstream with the registry instead of stranding a hardcoded tailnet IP.
     edge_port: 8080
 
+  # Same backend as apache — a second emitted service only because the edge's
+  # errors middleware needs passHostHeader off while every sibling router wants
+  # the default. edge_host points the placement lookup at apache's registry
+  # entry; no container named error-pages ever exists.
+  error-pages:
+    edge_host: apache
+    edge_port: 8080
+    edge_pass_host: false
+
+  # aegis-server (mfa.theofficialblacksheepco.com) — real container, keeps the
+  # /healthz probe its file service always had.
+  aegis-server:
+    edge_port: 8090
+    edge_healthcheck: /healthz
+
   # The public store is separate from the main site so it can be migrated
   # independently and stopped when it has been idle for 15 minutes.
   store-site:

@@ -971,13 +971,21 @@ def _edge_upstream(name, cfg, port):
 
     Order: live registry host → node tailnet address → the policy's declared
     `units:` spec (where a wake would land it) → dead upstream.
+
+    `edge_host` redirects the lookup to another service's registry entry: an
+    edge file may need several service objects over one backend (error-pages
+    carries passHostHeader: false where the sibling routers carry true), and
+    only the backend's name exists in the registry.
     """
-    key, svc = _find_service_entry(name)
+    cfg = cfg or {}
+    lookup = cfg.get("edge_host") or name
+    key, svc = _find_service_entry(lookup)
     host = (svc or {}).get("host") or ((svc or {}).get("hosts") or [None])[0]
     node = registry["nodes"].get(host or "") or {}
     ip = _node_probe_addr(node)
     if not ip:
-        for fallback in _expand_unit_spec((cfg or {}).get("units"), []):
+        units = (_policy_for(lookup) if lookup != name else cfg).get("units")
+        for fallback in _expand_unit_spec(units, []):
             ip = _node_probe_addr(registry["nodes"].get(fallback) or {})
             if ip:
                 break
@@ -1002,8 +1010,18 @@ def traefik_all_services():
             port = cfg.get("edge_port")
             if not port:
                 continue
-            out[name] = {"loadBalancer": {"servers": [
-                {"url": _edge_upstream(name, cfg, port)}]}}
+            lb = {"servers": [{"url": _edge_upstream(name, cfg, port)}]}
+            pass_host = cfg.get("edge_pass_host")
+            if pass_host is not None:
+                # YAML gives a bool; a quoted "false" would arrive as a
+                # truthy string and silently invert the intent.
+                if isinstance(pass_host, str):
+                    pass_host = pass_host.strip().lower() == "true"
+                lb["passHostHeader"] = bool(pass_host)
+            if cfg.get("edge_healthcheck"):
+                lb["healthCheck"] = {"path": cfg["edge_healthcheck"],
+                                     "interval": "15s", "timeout": "5s"}
+            out[name] = {"loadBalancer": lb}
     return jsonify({"http": {"services": out}})
 
 
@@ -3574,6 +3592,18 @@ def load_policy():
                 # IS, and this says on which port. Same opt-in shape as the
                 # rest of the policy - undeclared means not edge-routed.
                 "edge_port": cfg.get("edge_port"),
+                # Resolve this service's placement through ANOTHER service's
+                # registry entry. Several edge file-services can sit on one
+                # backend — error-pages carries passHostHeader:false where its
+                # siblings carry true — and only the backend's name ever
+                # registers a container.
+                "edge_host": str(cfg.get("edge_host", "")),
+                # loadBalancer options the emitted service carries.
+                # edge_pass_host: None leaves Traefik's default (true);
+                # edge_healthcheck is a path, emitted with the fleet's usual
+                # 15s/5s probe.
+                "edge_pass_host": cfg.get("edge_pass_host"),
+                "edge_healthcheck": str(cfg.get("edge_healthcheck", "")),
                 # ── Wake-on-request ──────────────────────────────────────
                 # Same argument as idle_stop above, and the other half of the
                 # same feature: the thing that STOPS a container is declared
