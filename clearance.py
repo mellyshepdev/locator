@@ -194,6 +194,10 @@ ROUTE_CLEARANCE = {
     "get_service":           CUSTOMER,
     "get_nodes":             CUSTOMER,
     "download_registry":     CUSTOMER,
+    # Edge proxies poll this for live upstreams; same bar as the registry
+    # reads it derives from.
+    "traefik_service":       CUSTOMER,
+    "traefik_all_services":  CUSTOMER,
 
     # ── Read: operational telemetry ─────────────────────────────────────
     "list_events_route":     CLIENT,

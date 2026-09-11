@@ -955,6 +955,75 @@ def get_service(name):
     return jsonify({"error": f"Service '{name}' not found"}), 404
 
 
+# A service that cannot be placed right now still gets emitted, pointing at a
+# guaranteed-dead upstream: the discard port on the edge itself. Dropping the
+# service instead is the worse failure — every router referencing name@http
+# becomes invalid, Traefik removes it, and its errors middleware dies with it,
+# which turns "registry hiccup" into "the wake path is gone and nothing can
+# bring it back". A dead upstream 502s, which is precisely the signal the wake
+# middleware exists to catch.
+EDGE_DEAD_UPSTREAM = "http://127.0.0.1:9"
+
+
+def _edge_upstream(name, cfg, port):
+    """The tailnet URL an edge should proxy this service to, or the dead
+    placeholder when nothing can be resolved yet.
+
+    Order: live registry host → node tailnet address → the policy's declared
+    `units:` spec (where a wake would land it) → dead upstream.
+    """
+    key, svc = _find_service_entry(name)
+    host = (svc or {}).get("host") or ((svc or {}).get("hosts") or [None])[0]
+    node = registry["nodes"].get(host or "") or {}
+    ip = _node_probe_addr(node)
+    if not ip:
+        for fallback in _expand_unit_spec((cfg or {}).get("units"), []):
+            ip = _node_probe_addr(registry["nodes"].get(fallback) or {})
+            if ip:
+                break
+    if not ip:
+        return EDGE_DEAD_UPSTREAM
+    return f"http://{ip}:{port}"
+
+
+@app.route("/api/traefik", methods=["GET"])
+def traefik_all_services():
+    """Traefik HTTP-provider view of every edge-routed service in the fleet.
+
+    A service joins by declaring edge_port in locator.yml; its upstream then
+    follows the registry, so a migration between units needs no file edit on
+    any edge. The single /api/traefik/<name>?port= form below stays for
+    services that never declare policy.
+    """
+    out = {}
+    policy = load_policy()
+    with lock:
+        for name, cfg in policy.items():
+            port = cfg.get("edge_port")
+            if not port:
+                continue
+            out[name] = {"loadBalancer": {"servers": [
+                {"url": _edge_upstream(name, cfg, port)}]}}
+    return jsonify({"http": {"services": out}})
+
+
+@app.route("/api/traefik/<name>", methods=["GET"])
+def traefik_service(name):
+    """Traefik HTTP-provider view of a service's live upstream.
+
+    Edges poll this and get the upstream for wherever the container actually
+    is, so moving a service between units never means editing a dynamic file.
+    The port stays a caller convention (?port=, default 80) - what moves is
+    the unit. A stopped service still resolves to its unit: the edge then
+    502s, which is exactly what the wake errors-middleware watches for.
+    """
+    port = request.args.get("port", "80")
+    with lock:
+        url = _edge_upstream(name, _policy_for(name), port)
+    return jsonify({"http": {"services": {
+        name: {"loadBalancer": {"servers": [{"url": url}]}}}}})
+
+
 # Images whose containers hold state on local disk. Matched against the IMAGE
 # a unit actually reported, not the container's name: kc-pg-node walked straight
 # through the "postgres"/"postgresql" entries in _PINNED_NAMES on 2026-09-04
@@ -3500,6 +3569,11 @@ def load_policy():
                 # target needs. Gitignored on nearly every project, so a fresh
                 # clone has none and every ${VAR} resolves empty.
                 "env": cfg.get("env") if isinstance(cfg.get("env"), dict) else {},
+                # Tailnet publish port an edge should reach this service on.
+                # Read by /api/traefik: the locator answers where the service
+                # IS, and this says on which port. Same opt-in shape as the
+                # rest of the policy - undeclared means not edge-routed.
+                "edge_port": cfg.get("edge_port"),
                 # ── Wake-on-request ──────────────────────────────────────
                 # Same argument as idle_stop above, and the other half of the
                 # same feature: the thing that STOPS a container is declared
@@ -5780,19 +5854,31 @@ def wake_page(container):
             target = (svc or {}).get("url", "") or ""
     own_origin = _is_locator_origin(request.host)
     html = f"""<!doctype html>
-<html><head><title>Waking {container}…</title>
+<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Service starting</title>
 <style>
-  body {{ background:#0a0e14; color:#e6e6e6; font-family:monospace;
+  :root {{ color-scheme:dark; --ink:#eef7f1; --muted:#a6b8ad; --accent:#7de0b0; }}
+  * {{ box-sizing:border-box; }}
+  body {{ background:linear-gradient(145deg,#10251d,#172c27 52%,#0b1512);
+         color:var(--ink); font-family:system-ui,-apple-system,Segoe UI,sans-serif;
          display:flex; align-items:center; justify-content:center;
-         height:100vh; margin:0; }}
-  .box {{ text-align:center; }}
-  .pulse {{ font-size:3rem; animation:p 1.2s infinite; }}
-  @keyframes p {{ 50% {{ opacity:.3; }} }}
+         min-height:100vh; margin:0; padding:24px; }}
+  .box {{ width:min(560px,100%); text-align:center; border:1px solid rgba(125,224,176,.35);
+          border-radius:24px; padding:42px 30px; background:rgba(8,18,14,.68);
+          box-shadow:0 24px 80px rgba(0,0,0,.3); }}
+  .mark {{ width:58px; height:58px; margin:0 auto 20px; border-radius:18px;
+           display:grid; place-items:center; color:#10251d; background:var(--accent);
+           font-size:27px; font-weight:800; animation:p 1.4s ease-in-out infinite; }}
+  h1 {{ margin:0; font-size:25px; letter-spacing:-.03em; }}
+  p {{ color:var(--muted); line-height:1.6; font-size:14px; }}
+  .status {{ margin-top:22px; padding:11px 14px; border-radius:12px;
+             background:rgba(125,224,176,.1); color:var(--accent); font-size:12px; }}
+  @keyframes p {{ 50% {{ transform:translateY(-5px); opacity:.65; }} }}
 </style></head>
 <body><div class="box">
-  <div class="pulse">💤 → 🟢</div>
-  <h2>Waking {container} on {unit}…</h2>
-  <p id="status">start command queued — usually under a minute</p>
+  <div class="mark">↗</div>
+  <h1>Service starting</h1>
+  <p>{container} is starting on {unit}. You will be returned automatically when it is ready.</p>
+  <div class="status" id="status">Start command queued — usually under a minute</div>
 </div>
 <script>
   const target = {json.dumps(target)};
@@ -6503,3 +6589,68 @@ else:
         traceback.print_exc()
 
 
+LLAMA_CPP_ENDPOINT = os.environ.get("LLAMA_CPP_ENDPOINT", "http://100.99.131.20:8080/v1/chat/completions")
+
+def alert_llama_llm(event_kind: str, details: dict):
+    """
+    Alert the llama.cpp LLM at Tailscale IP 100.99.131.20 on unknown migration errors
+    or 3-retry attempt exhaustion.
+    """
+    try:
+        payload = {
+            "model": "llama-2.5-coder-14b",
+            "messages": [
+                {"role": "system", "content": "You are Locator's migration diagnostic and auto-remediation AI agent."},
+                {"role": "user", "content": f"RED FLAG MIGRATION ALERT [{event_kind}]: {json.dumps(details, indent=2)}"}
+            ]
+        }
+        res = requests.post(LLAMA_CPP_ENDPOINT, json=payload, timeout=5)
+        beast_log(f"🤖 LLM ALERTED ({LLAMA_CPP_ENDPOINT}): HTTP {res.status_code}")
+    except Exception as err:
+        beast_log(f"⚠️ Could not alert LLM at {LLAMA_CPP_ENDPOINT}: {err}")
+
+
+def _evaluate_candidate_node(node_id: str, node_info: dict, container_name: str, req_ram_gb: float = 0.5, req_disk_gb: float = 1.0) -> tuple:
+    """
+    Verbose step-by-step evaluation of candidate node capacity.
+    Emits granular DEBUG logs to stdout (live logger) and Web UI event stream long before migration.
+    """
+    beast_log(f"🔍 DEBUG [EVAL]: Evaluating candidate host '{node_id}' for container '{container_name}'...")
+    emit_event("eval_candidate", unit=node_id, container=container_name, message=f"Evaluating candidate node {node_id}")
+
+    if node_info.get("status") != "ONLINE":
+        beast_log(f"❌ DEBUG [EVAL]: Host '{node_id}' is NOT ONLINE (Status={node_info.get('status')}) -> REJECTED")
+        return False, f"Host {node_id} is not ONLINE"
+
+    # Exact Memory Calculation
+    mem_total = _node_ram_total_mb(node_info) or 1024.0
+    mem_avail_mb = float(node_info.get("mem_available_mb") or (mem_total * (100.0 - float(node_info.get("mem_percent") or 50.0)) / 100.0))
+    avail_ram_gb = round(mem_avail_mb / 1024.0, 2)
+    
+    # Exact Disk Storage Calculation
+    disk_total = float(node_info.get("disk_total_gb") or 10.0)
+    disk_free_gb = float(node_info.get("disk_free_gb") or (disk_total * (100.0 - float(node_info.get("disk_percent") or 50.0)) / 100.0))
+    disk_free_gb = round(disk_free_gb, 2)
+
+    # CPU Headroom Calculation
+    cpu_usage = float(node_info.get("cpu_percent") or 0.0)
+    cpu_headroom = round(100.0 - cpu_usage, 2)
+
+    beast_log(f"📊 DEBUG [CAPACITY CHECK] Node '{node_id}': Avail RAM = {avail_ram_gb} GB (Req = {req_ram_gb} GB) | "
+              f"Free Disk = {disk_free_gb} GB (Req = {req_disk_gb} GB) | CPU Headroom = {cpu_headroom}%")
+
+    if avail_ram_gb < req_ram_gb:
+        msg = f"Insufficient RAM on {node_id}: {avail_ram_gb} GB available < {req_ram_gb} GB required"
+        beast_log(f"❌ DEBUG [EVAL]: {msg} -> REJECTED")
+        emit_event("eval_fail", unit=node_id, container=container_name, reason=msg)
+        return False, msg
+
+    if disk_free_gb < req_disk_gb:
+        msg = f"Insufficient Storage on {node_id}: {disk_free_gb} GB free < {req_disk_gb} GB required"
+        beast_log(f"❌ DEBUG [EVAL]: {msg} -> REJECTED")
+        emit_event("eval_fail", unit=node_id, container=container_name, reason=msg)
+        return False, msg
+
+    beast_log(f"✅ DEBUG [EVAL]: Node '{node_id}' PASSED all capacity checks for container '{container_name}'")
+    emit_event("eval_pass", unit=node_id, container=container_name, message=f"Node {node_id} passed capacity checks")
+    return True, "PASSED"

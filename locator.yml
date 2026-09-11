@@ -266,7 +266,10 @@ Service:
     location_type: stationary
     units: "4"
     instances: 1
-
+    # The unit4-published web stack (aegis / -apache / tech-estate / error-pages
+    # routers on the edge). Edges reach it as apache@http so a migration moves
+    # the upstream with the registry instead of stranding a hardcoded tailnet IP.
+    edge_port: 8080
 
   # The public store is separate from the main site so it can be migrated
   # independently and stopped when it has been idle for 15 minutes.
@@ -497,6 +500,14 @@ Service:
   #                 own frontends. Served back over /api/wake/triggers so a page
   #                 asks which container its link wakes instead of hardcoding a
   #                 name nobody updates. New kinds need no code change.
+  # edge_port:      the tailnet port this service publishes on its hosting
+  #                 unit. /api/traefik turns it into a Traefik service upstream
+  #                 (http://<hosting unit's tailnet IP>:<edge_port>) that edges
+  #                 poll, so a migration moves the route with the registry —
+  #                 no file edit on any edge. The service is ALWAYS emitted:
+  #                 when the host cannot be resolved it points at a dead
+  #                 placeholder, which 502s into the wake middleware instead of
+  #                 dropping the router and the wake path with it.
 
   # The Ecosystem Hub SPA on unit4, published on the tailnet at :8091 and
   # fronted by unit8's Traefik. Stopped cleanly on 2026-09-02 and stayed down
@@ -511,6 +522,9 @@ Service:
     units: "4"
     instances: 1
     public_wake: true
+    # Tailnet publish port edges reach this on; /api/traefik follows it, so the
+    # hub can move off its current unit without a file edit on the edge.
+    edge_port: 8091
     wake_triggers:
       domain:
         - welcome.theofficialblacksheepco.com
@@ -525,7 +539,7 @@ Service:
     public_wake: true
     # Idle-stopped after 15m of no traffic. Safe to do here and not elsewhere
     # because forge is the one service with a COMPLETE wake path: a file-defined
-    # router in unit8's forge.yml that survives the container, an errors
+    # router in the edge's forge.yml that survives the container, an errors
     # middleware on it, and public_wake below — so a visitor's own request
     # brings it back. Its compose sets restart:"no" for the same reason; a
     # restart policy would resurrect it behind the idle policy's back.
@@ -542,7 +556,7 @@ Service:
     wake_with: [forge-relay]
     # The same relationship, for migration rather than wake. App.tsx opens
     # `wss://${window.location.host}/view/default` — the pad relay, reached on
-    # forge's OWN hostname through the /pad and /view routers in unit8's
+    # forge's OWN hostname through the /pad and /view routers in the edge's
     # forge.yml. So the tablet cursor is dead whenever forge-relay is not
     # running, and moving forge to a unit where it is absent ships a half-broken
     # app. This is forge's only real dependency: the card editor makes no other
@@ -559,7 +573,7 @@ Service:
         # hub's own wake below: the errors middleware can only ever wake the
         # container the visitor asked for, and forge is a different one on a
         # different unit. So the hub's page calls /__wake/forge itself once it
-        # has rendered; see welcome-hub.yml on unit8.
+        # has rendered; see welcome-hub.yml on the edge.
         - welcome.theofficialblacksheepco.com
       link:
         - welcome:forge
@@ -573,6 +587,10 @@ Service:
     units: "8"
     instances: 1
     public_wake: true
+    # Tailnet publish port; the /pad and /view routers reach it as
+    # forge-relay@http so its upstream follows the registry on a migration
+    # instead of staying glued to whichever edge it happened to share.
+    edge_port: 8791
     wake_triggers:
       domain:
         # Its own 502 path stays: forge.yml gives /pad and /view a middleware

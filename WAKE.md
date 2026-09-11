@@ -161,16 +161,56 @@ router lived on the app container's labels, so with the container gone
 
 `locator.yml` policy is declared for all of these. The column that matters is
 the middleware one — policy alone wakes nothing if no route can return a 502.
+No unit column: upstreams are resolved live (see "Edge upstreams" below), so
+where a container is standing right now is a registry fact, not a file fact —
+a static unit listed here was already wrong within days (forge moved off
+unit8 on 2026-09-11).
 
-| container | unit | trigger | Traefik wake middleware | serving |
+| container | trigger | Traefik wake middleware | upstream | serving |
 | --- | --- | --- | --- | --- |
-| `forge` | 8 | `forge.prime-quality.online` | ✅ `forge.yml` | ✅ |
-| `forge-relay` | 8 | same host, `/pad` `/view` | ✅ `forge.yml` | ✅ |
-| `agent-0` (+`ollama`) | 4 | `a0.theofficialblacksheepco.online` | ✅ `agent-zero.yml` | — |
-| `rasa` (+`ollama`) | 8 | `rasa.theofficialblacksheepco.online` | ✅ `rasa.yml` | — |
-| `searchsearcher-app` (+ its postgres) | 8 | `search.…com`, `www.…com` | ❌ **not yet** | ✅ 200 |
-| `reech` (+`reech-oauth`) | 8 | `portal.theofficialblacksheepco.com` visit | ✅ page-driven, `client-portal.yml` (2026-09-03) | ✅ 302 |
-| `reech-oauth` itself | 8 | `reech.prime-quality.online` | ❌ **still none** — its router is a container LABEL, so stopping it deletes the route and the host 404s with nothing to wake | ✅ 302 |
+| `forge` | `forge.prime-quality.online` | ✅ `forge.yml` | `forge@http` (dynamic) | ✅ |
+| `forge-relay` | same host, `/pad` `/view` | ✅ `forge.yml` | `forge-relay@http` (dynamic) | ✅ |
+| `welcome-hub` | `welcome.theofficialblacksheepco.com` | ✅ `welcome-hub.yml` | `welcome-hub@http` (dynamic) | ✅ |
+| `agent-0` (+`ollama`) | `a0.theofficialblacksheepco.online` | ✅ `agent-zero.yml` | static file | — |
+| `rasa` (+`ollama`) | `rasa.theofficialblacksheepco.online` | ✅ `rasa.yml` | static file | — |
+| `searchsearcher-app` (+ its postgres) | `search.…com`, `www.…com` | ❌ **not yet** | static file | ✅ 200 |
+| `reech` (+`reech-oauth`) | `portal.theofficialblacksheepco.com` visit | ✅ page-driven, `client-portal.yml` (2026-09-03) | static file | ✅ 302 |
+| `reech-oauth` itself | `reech.prime-quality.online` | ❌ **still none** — its router is a container LABEL, so stopping it deletes the route and the host 404s with nothing to wake | static file | ✅ 302 |
+
+### Edge upstreams — `/api/traefik`
+
+An edge's Traefik polls locator's HTTP provider
+(`--providers.http.endpoint=http://<locator tailnet>:50500/api/traefik`,
+`pollInterval=30s`) and gets back `http.services` for every service declaring
+`edge_port` in `locator.yml`:
+
+```yaml
+forge:
+  edge_port: 8090     # the port the container publishes on its unit's tailnet IP
+```
+
+Locator resolves the service's current host out of the registry and emits
+`http://<hosting unit's tailnet IP>:<edge_port>`. A file-provider router that
+wants this uses the cross-provider reference `service: forge@http` — the file
+still owns the router, middleware and TLS; only the upstream moves.
+
+- **Migration-safe by construction**: a container moved by locator registers
+  its new host, and every edge follows within one poll interval. Nobody edits
+  a YAML on the edge.
+- **Wake-safe when unresolvable**: the service is emitted even when the host
+  cannot be resolved (dead `127.0.0.1:9` placeholder, or the policy `units:`
+  hint as fallback). Dropping it would invalidate every router pointing at it
+  and take the wake middleware down with the route.
+- **The container side must publish on the tailnet** wherever it lands:
+  `ports: ["${TAILNET_IP}:<edge_port>:<internal>"]`. lokey injects
+  `TAILNET_IP` into `.env` on deploy (hard-stats.py), so the compose file
+  itself never names a unit.
+- **Locator itself is the bootstrap exception**: `locator-wake`,
+  `locator-prime` and `locator-online` stay static — the provider endpoint is
+  a literal address in the edge's static config, so locator's own upstream
+  cannot be resolved by a service it might not be running to answer.
+- One `edge_port` per service name. Multi-port stacks (odoo, puffbase,
+  traccar) still need per-name stanzas or a richer key before they can join.
 
 Both searchsearcher and reech were **not deployed at all** before this date — no
 container and no image, only their data. They were built and started on unit8 on

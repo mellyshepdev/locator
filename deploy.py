@@ -1,3 +1,4 @@
+1. Updated deploy.py (Locator Deployment & Capacity Scoring)
 import os
 import yaml
 import subprocess
@@ -9,9 +10,10 @@ SSH_USER = os.environ.get("SSH_USER", "swoopg111")
 SSH_KEY = os.environ.get("SSH_KEY", "")  # Optional path to id_rsa / private key
 
 
-def get_best_unit(preferred_servers=None):
+def get_best_unit(preferred_servers=None, req_ram_gb=0.5, req_disk_gb=1.0):
     """
     Returns (node_id, ip) for the ONLINE node with the most headroom.
+    Calculates exact available RAM (total - used), exact available storage, and CPU capacity.
     """
     data_dir = os.environ.get("DATA_DIR", "/app/data")
     registry_path = os.path.join(data_dir, "registry.json")
@@ -37,32 +39,44 @@ def get_best_unit(preferred_servers=None):
                 or "127.0.0.1"
             )
 
-            cpu  = info.get("cpu_percent")
-            mem  = info.get("mem_percent")
-            disk = info.get("disk_percent")
+            cpu = float(info.get("cpu_percent") or 0.0)
+            mem = float(info.get("mem_percent") or 50.0)
+            disk = float(info.get("disk_percent") or 50.0)
 
-            if cpu is not None and mem is not None:
-                divisor = 3 if disk is not None else 2
-                score = (cpu + mem + (disk or 0)) / divisor
-            else:
-                ram_str = info.get("metadata", {}).get("ram", "0").lower()
-                try:
-                    ram_gb = int(''.join(filter(str.isdigit, ram_str)))
-                except Exception:
-                    ram_gb = 1
-                score = max(0, 100 - ram_gb)
+            # Exact RAM calculation in GB
+            mem_total_mb = float(info.get("mem_total_mb") or 1024.0)
+            mem_avail_mb = float(info.get("mem_available_mb") or (mem_total_mb * (100.0 - mem) / 100.0))
+            avail_ram_gb = mem_avail_mb / 1024.0
+
+            # Exact Disk Storage calculation in GB
+            disk_total_gb = float(info.get("disk_total_gb") or 10.0)
+            disk_free_gb = float(info.get("disk_free_gb") or (disk_total_gb * (100.0 - disk) / 100.0))
+
+            # Capacity Guard Checks
+            if avail_ram_gb < req_ram_gb:
+                print(f"⚠️ Rejecting candidate node {node_id}: Avail RAM ({avail_ram_gb:.2f} GB) < Required ({req_ram_gb:.2f} GB)")
+                continue
+
+            if disk_free_gb < req_disk_gb:
+                print(f"⚠️ Rejecting candidate node {node_id}: Free Disk ({disk_free_gb:.2f} GB) < Required ({req_disk_gb:.2f} GB)")
+                continue
+
+            # Load score calculation (Lower score = more available headroom)
+            score = (cpu + mem + disk) / 3.0
 
             # Preferred nodes get a 20-point load reduction priority
             if preferred_servers and node_id in preferred_servers:
                 score -= 20
 
-            candidates.append({"id": node_id, "ip": ip, "score": score})
+            candidates.append({"id": node_id, "ip": ip, "score": score, "avail_ram_gb": avail_ram_gb})
 
         if not candidates:
+            print("⚠️ No candidate nodes passed capacity checks; falling back to default node")
             return "unit1", "127.0.0.1"
 
         candidates.sort(key=lambda x: x["score"])
         best = candidates[0]
+        print(f"✅ Selected target node {best['id']} ({best['ip']}) with {best['avail_ram_gb']:.2f} GB available RAM")
         return best["id"], best["ip"]
 
     except Exception as e:
@@ -116,7 +130,6 @@ def deploy_from_browse(folder_path, target_servers=None, join_networks=None):
                 text=True
             )
             if result.returncode != 0:
-                # Fallback for systems running legacy docker-compose v1
                 result = subprocess.run(
                     ["docker-compose", "up", "-d"],
                     cwd=folder_path,
