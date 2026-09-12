@@ -18,6 +18,12 @@ secrets/
 *.keytab
 *.token
 UNSEAL-*.json
+*.bak-prequarantine-*
+
+# FreeIPA — the directory's own state and its secrets. /data holds the CA
+# private key; .env holds the admin and LDAP bind passwords.
+freeipa/data/
+freeipa/.env
 
 # Vendored clone that landed under templates/ - never belongs in this repo.
 templates/llama.cpp/
