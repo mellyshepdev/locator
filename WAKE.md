@@ -344,8 +344,17 @@ blacksheep realm, add a `glances-gate` oauth2-proxy to `edge-gate`/
 `oauth2-guards` compose (or one forwardAuth proxy + shared cookie-domain), and
 swap `glances-auth` for it in `glances.yml`. The routers and DNS don't change.
 
-**Enabling on another unit:** install that unit file (change `-B` to its own
+**Enabling on another unit:** install the systemd unit (change `-B` to its own
 tailnet IP), `systemctl enable --now glances-web`, add the router + service in
-`glances.yml`, and the A record on unit8's pdns. unit7 already has the router
-and record — it just needs `glances-web.service` enabled (its SSH was
-unreachable when this shipped).
+`glances.yml`, and the A record on unit8's pdns. If the distro package lacks
+the built web bundle (Debian strips `outputs/static/public` — unit7 hits
+this), run the official image instead; that's what unit7 does:
+
+```bash
+docker run -d --name glances-web --restart unless-stopped \
+  -p <tailnet ip>:61208:61208 \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -v /etc/os-release:/etc/os-release:ro \
+  --pid host -e GLANCES_OPT="-w" \
+  nicolargo/glances:latest-full
+```
