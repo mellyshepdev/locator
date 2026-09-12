@@ -308,3 +308,44 @@ in two files, a container renamed in one place only. Putting `public_wake`,
 the truth is, reloads without a restart, and can be *queried* by the pages that
 need it via `/api/wake/triggers` — so a rename is one edit and every entry point
 follows.
+
+## Per-unit Glances web view (2026-09-12)
+
+Clicking a `unitN` node in the dashboard's device modal shows an "Online Views"
+section with a Glances link: `https://glances-<unit>.theofficialblacksheepco.com`.
+
+The chain:
+
+- Each unit runs **`glances-web.service`** (systemd) — `glances -w -B <unit
+  tailnet IP> -p 61208 --disable-plugin docker`. It binds the tailnet address
+  only, so nothing off-tailnet can reach it directly. The existing
+  `glances.service` (`-s` on 127.0.0.1:61209, the `glances -c` API) is
+  untouched — the web unit runs alongside it.
+  - `docker` plugin is disabled because two *running* containers on unit8
+    (`dashboard-server`, `upc-receiver`) reference pruned images, and the
+    plugin's image lookup crashes before the web server binds — the same
+    phantom-image bug family that broke lokey's enumeration. Re-enable it once
+    those containers are rebuilt with real images.
+- The edge publishes it via `networking/traefik/dynamic-config/glances.yml`:
+  `glances-unitN.*` routers → `http://<tailnet>:61208`, behind the
+  `glances-auth` basicAuth middleware. Upstream IPs are literal tailnet
+  addresses on purpose — units are stationary, same convention as the
+  locator-* and keycloak services.
+- DNS A records (`glances-unit4|7|8` → the edge IP) live in the
+  `theofficialblacksheepco.com` zone — the **primary is unit8's
+  `mariadb-pdns-primary`** (`docker exec pdns pdnsutil add-record ...` runs
+  there); unit9's pdns is a read-only replica. Adding a new unit's record on
+  the replica fails with `--read-only=ON` — write on unit8.
+
+**Auth note:** the gate is edge basicAuth, not Keycloak — every oauth2-proxy
+gate needs its own Keycloak client and no working realm-admin credential was
+available when this shipped. To upgrade: create a `glances-gate` client in the
+blacksheep realm, add a `glances-gate` oauth2-proxy to `edge-gate`/
+`oauth2-guards` compose (or one forwardAuth proxy + shared cookie-domain), and
+swap `glances-auth` for it in `glances.yml`. The routers and DNS don't change.
+
+**Enabling on another unit:** install that unit file (change `-B` to its own
+tailnet IP), `systemctl enable --now glances-web`, add the router + service in
+`glances.yml`, and the A record on unit8's pdns. unit7 already has the router
+and record — it just needs `glances-web.service` enabled (its SSH was
+unreachable when this shipped).
