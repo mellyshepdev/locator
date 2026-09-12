@@ -698,6 +698,8 @@ Service:
     wake_triggers:
       domain:
         - ops.theofficialblacksheepco.com
+      link:
+        - welcome:scanner
 
   # Sablier stops pgAdmin 30m after its last proxied request; a wake only
   # STARTS it (docker start), it does not fight that schedule. Stationary on
