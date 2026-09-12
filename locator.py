@@ -1188,6 +1188,8 @@ def _infer_category(svc_type, url=""):
         return "serverless"
     if svc_type == "website":
         return "websites"
+    if svc_type == "external":
+        return "cloud platforms"
     if url and SERVERLESS_URL_PATTERN.search(str(url)):
         return "serverless"
     return "docker containers"
@@ -1299,6 +1301,27 @@ def deregister_service(name):
     print(f"📴 MARKED OFFLINE (90-day retention): {name}")
     return jsonify({"result": "marked_offline", "retained_for": "90 days", "service": name}), 200
 
+
+@app.route("/api/registry/<kind>/<path:entry_id>", methods=["DELETE"])
+def delete_registry_entry(kind, entry_id):
+    """Hard-delete a registry row — unlike /deregister/<name>, which only marks
+    a service OFFLINE for the 90-day reaper. Exists for stale node rows and
+    orphaned service entries that will never heartbeat again; the dashboard's
+    device sheet exposes it as the Delete button. If the thing is still alive
+    it simply re-registers on its next heartbeat."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    if kind not in ("services", "nodes"):
+        return jsonify({"error": "kind must be 'services' or 'nodes'"}), 400
+    with lock:
+        if entry_id not in registry.get(kind, {}):
+            return jsonify({"error": f"'{entry_id}' not found in {kind}"}), 404
+        del registry[kind][entry_id]
+        registry["updated"] = datetime.now(timezone.utc).isoformat()
+    persist_registry()
+    print(f"🗑️ DELETED {kind[:-1]}: {entry_id}")
+    return jsonify({"result": "deleted", "kind": kind, "id": entry_id}), 200
 
 
 @app.route("/api/container/toggle", methods=["POST"])

@@ -1151,7 +1151,7 @@
             <button class="grid-maximize-btn" onclick="toggleGridMaximize(this)" title="Maximize section">⛶</button>
             <h1 class="grid-title" style="color: #00ccff; border-bottom: 2px solid #00ccff; text-shadow: 0 0 10px #00ccff;">Cloud &amp; Native Platforms</h1>
             <div class="status-header">
-                <div style="color: #00ccff;">EXTERNAL INFRASTRUCTURE: <span style="color:#00ccff;">Active</span></div>
+                <div style="color: #00ccff;">EXTERNAL INFRASTRUCTURE: <span id="count-cloud" style="color:#00ccff;">Active</span></div>
                 <div>STATUS: <span class="status-dot online" style="background-color: #00ccff; box-shadow: 0 0 8px #00ccff;"></span> MONITORED</div>
             </div>
             <div class="table-scroll">
@@ -1610,7 +1610,13 @@
         <div class="modal-box">
             <h3 id="device-modal-title">DEVICE</h3>
             <table id="device-sheet-rows"></table>
-            <button id="device-modal-close" onclick="closeDeviceModal()">Close</button>
+            <div style="display:flex; gap:14px; justify-content:center; margin-top:20px;">
+                <button id="device-modal-delete" onclick="deleteDeviceEntry()"
+                        style="display:none; padding:10px 28px; border:1px solid #ff003c; border-radius:4px;
+                               font-family:inherit; font-size:14px; font-weight:bold; cursor:pointer;
+                               letter-spacing:1px; background:rgba(255,0,60,0.15); color:#ff003c;">Delete</button>
+                <button id="device-modal-close" onclick="closeDeviceModal()" style="margin:0;">Close</button>
+            </div>
         </div>
     </div>
 
@@ -2276,10 +2282,36 @@
             updateExecUnitOptions(registryData);
             const nodes = applyColumnSort('devices', allNodes.filter(n => nodeMatchesFilter(n.id, n)));
 
-            const dockerList = applyColumnSort('docker', services.filter(s => s.category === 'docker containers'));
-            const websiteList = applyColumnSort('websites', services.filter(s => s.category === 'websites'));
-            const vmList = applyColumnSort('vms', services.filter(s => s.category === 'virtual machines'));
-            const serverlessList = applyColumnSort('serverless', services.filter(s => s.category === 'serverless'));
+            // Services registered before categories existed (and any path that
+            // still doesn't set one) used to fall through every filter below
+            // and render nowhere. Mirror locator.py's _infer_category so each
+            // service lands in the same section the server would file it under.
+            const SERVERLESS_URL_RE = /(fly\.dev|vercel\.app|netlify\.app|onrender\.com|supabase\.co|pages\.dev|workers\.dev|railway\.app|herokuapp\.com|gitlab\.io|github\.io|web\.app|firebaseapp\.com)/i;
+            const catOf = s => {
+                const c = (s.category || '').toLowerCase();
+                if (c) return c;
+                const t = (s.type || '').toLowerCase();
+                if (t === 'vm') return 'virtual machines';
+                if (t === 'serverless' || t === 'paas' || (s.url && SERVERLESS_URL_RE.test(s.url))) return 'serverless';
+                if (t === 'website') return 'websites';
+                if (t === 'native') return 'native services';
+                if (t === 'external') return 'cloud platforms';
+                return 'docker containers';
+            };
+            const TABLE_CATS = ['docker containers', 'websites', 'virtual machines', 'serverless'];
+
+            const dockerList = applyColumnSort('docker', services.filter(s => catOf(s) === 'docker containers'));
+            const websiteList = applyColumnSort('websites', services.filter(s => catOf(s) === 'websites'));
+            const vmList = applyColumnSort('vms', services.filter(s => catOf(s) === 'virtual machines'));
+            const serverlessList = applyColumnSort('serverless', services.filter(s => catOf(s) === 'serverless'));
+            // Cloud & Native catches every service the named tables don't —
+            // 'cloud platforms' and 'native services' explicitly, anything
+            // unrecognised as a safety net. 'devices' is excluded: those
+            // entries are already first-class nodes in the top section.
+            const cloudList = applyColumnSort('cloud', services.filter(s => {
+                const c = catOf(s);
+                return c !== 'devices' && !TABLE_CATS.includes(c);
+            }));
 
             document.getElementById('count-devices').innerText = allNodes.length;
             document.getElementById('count-docker').innerText = dockerList.length;
@@ -2490,6 +2522,42 @@
                 tr.addEventListener('click', () => openDeviceModal(item));
                 tbodyServerless.appendChild(tr);
             });
+
+            // --- CLOUD & NATIVE PLATFORMS TABLE ---
+            // Fed from the registry like every other section — the static rows
+            // shipped in the HTML are only a pre-load fallback and are replaced
+            // the first time real 'cloud platforms'/'native services' entries
+            // (or anything unclassified) arrive.
+            const tbodyCloud = document.getElementById('tbody-cloud-platforms');
+            const cloudCount = document.getElementById('count-cloud');
+            if (cloudCount) cloudCount.innerText = cloudList.length ? `${cloudList.length} TRACKED` : 'Active';
+            if (cloudList.length) {
+                tbodyCloud.innerHTML = '';
+                cloudList.forEach(item => {
+                    const tr = document.createElement('tr');
+                    tr.className = 'clickable-row';
+                    tr.title = 'Click for full data sheet';
+                    const meta = item.metadata || {};
+                    const hostList = item.hosts || [item.host || 'cloud'];
+                    const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:${hostColor(h)};color:${hostColor(h)}">${h}</span>`).join('');
+                    const software = meta.description || meta.services || meta.image || item.type || '-';
+                    const dashboard = meta.dashboard || meta.admin_url || '';
+                    const notes = meta.notes || meta.server_info || '';
+                    const isOnline = item.status === 'ONLINE';
+                    tr.innerHTML = `
+                        <td style="color:#00ccff; font-weight:bold">
+                            <span class="status-dot ${isOnline ? 'online' : 'offline'}"></span>${item.name}
+                        </td>
+                        <td class="col-host">${hostBadges}</td>
+                        <td>${software}</td>
+                        <td>${item.url ? `<a href="${item.url}" target="_blank" style="color:#00ccff" onclick="event.stopPropagation()">${item.url}</a>` : '—'}</td>
+                        <td>${dashboard ? `<a href="${dashboard}" target="_blank" style="color:#00ccff" onclick="event.stopPropagation()">${dashboard.replace(/^https?:\/\//, '')}</a>` : '—'}</td>
+                        <td style="font-size:12px;color:#888">${notes}</td>
+                    `;
+                    tr.addEventListener('click', () => openDeviceModal(item));
+                    tbodyCloud.appendChild(tr);
+                });
+            }
         }
 
 
@@ -3254,7 +3322,46 @@
                 rows.appendChild(tr);
             }
 
+            // Delete is only offered when the row resolves to a live registry
+            // entry — the static Cloud & Native reference rows have no key.
+            window._deviceModalItem = item;
+            const delBtn = document.getElementById('device-modal-delete');
+            if (delBtn) delBtn.style.display = deviceRegistryRef(item) ? 'block' : 'none';
+
             document.getElementById('device-modal').style.display = 'flex';
+        }
+
+        // Resolve a data-sheet item back to its registry collection + key.
+        // Nodes arrive tagged category:'devices' from renderGrid; services
+        // carry their name@host id. A name match against the other collection
+        // is only a fallback, never the first guess.
+        function deviceRegistryRef(item) {
+            const reg = lastRegistryData || {};
+            const id = item.id || '';
+            if (!id) return null;
+            if (item.category === 'devices' && reg.nodes && reg.nodes[id]) return { kind: 'nodes', id };
+            if (reg.services && reg.services[id]) return { kind: 'services', id };
+            if (reg.nodes && reg.nodes[id]) return { kind: 'nodes', id };
+            return null;
+        }
+
+        async function deleteDeviceEntry() {
+            const item = window._deviceModalItem;
+            const ref = item && deviceRegistryRef(item);
+            if (!ref) return;
+            const label = item.name || ref.id;
+            if (!window.confirm(
+                `Delete ${ref.kind === 'nodes' ? 'node' : 'service'} '${label}' (${ref.id}) from the registry?\n\n` +
+                `This removes the entry outright — unlike deregister there is no 90-day retention. ` +
+                `If it is still alive it will re-register on its next heartbeat.`)) return;
+            try {
+                await execFetch(`/api/registry/${ref.kind}/${encodeURIComponent(ref.id)}`,
+                                { method: 'DELETE', headers: execHeaders() });
+                closeDeviceModal();
+                loadRegistryData();
+            } catch (e) {
+                alert('Delete failed: ' + (e && e.message));
+            }
         }
 
         function closeDeviceModal() {

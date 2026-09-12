@@ -115,6 +115,7 @@ AI_DENIED_ENDPOINTS = frozenset({
     "secrets_quarantine",    # rewrites compose files on other units
     "delete_schedule",       # DELETE /api/schedule/<job_id>
     "deregister_service",    # DELETE /deregister/<name>
+    "delete_registry_entry", # DELETE /api/registry/<kind>/<id> — hard delete
     "queue_exec", "exec",    # ROOT already, listed so the denial is explicit
     "admin_set_clearance",   # granting privilege is never automated
     "admin_pending_users",
@@ -277,6 +278,9 @@ ROUTE_CLEARANCE = {
     # fail-closed rule would have made it 403 the moment ENFORCE went true.
     "certs_issue":           ROOT,
     "secrets_quarantine":    ROOT,
+    # Hard-removes a registry row (the reaper's soft-delete is
+    # deregister_service at OPERATOR). Destroying state stays owner-level.
+    "delete_registry_entry": ROOT,
 
     # ── Root: identity administration ───────────────────────────────────
     # Lists accounts and grants clearance levels. Whoever can reach these can
