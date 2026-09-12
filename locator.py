@@ -2224,7 +2224,16 @@ def emit_event(event_type, **data):
         event = db.insert_event(event_type, data)
     except Exception as e:
         print(f"⚠️  Failed to persist event to Postgres: {e}")
+        event = None
+    if not event:
+        # insert_event returns None (does not raise) when there's no
+        # DATABASE_URL or the DB is down — this branch used to push literal
+        # "null" frames to SSE clients and leave /api/events permanently empty.
+        # The in-memory ring keeps the event box alive without Postgres.
         event = {"type": event_type, "timestamp": datetime.now(timezone.utc).isoformat(), **data}
+    with _event_lock:
+        _event_log.append(event)
+        del _event_log[:-EVENT_LOG_MAX]
     with _event_stream_lock:
         for q in _event_stream_queues:
             q.put(event)
@@ -2251,10 +2260,16 @@ def list_events_route():
         return jsonify({"result": "recorded", "timestamp": (event or {}).get("created_at")})
 
     try:
-        return jsonify(db.list_events(200))
+        events = db.list_events(200)
     except Exception as e:
         print(f"⚠️  Failed to read events from Postgres: {e}")
-        return jsonify([])
+        events = []
+    if not events:
+        # No DB (or an empty events table): serve the in-memory ring so the
+        # dashboard isn't blank on a fresh/DB-less deploy.
+        with _event_lock:
+            events = list(_event_log)
+    return jsonify(events)
 
 
 @app.route("/api/events/stream", methods=["GET"])
@@ -2325,9 +2340,19 @@ def _traccar_get(path):
 @app.route("/api/traccar-devices", methods=["GET"])
 def traccar_devices():
     """Devices + their latest position, merged, for the 3D mesh's device layer."""
+    if not TRACCAR_PASS:
+        return jsonify({"error": "TRACCAR_PASS is not set on the locator — the Traccar API needs a login",
+                        "devices": []}), 200
     try:
-        devices = _traccar_get("/api/devices").json()
-        positions = {p["deviceId"]: p for p in _traccar_get("/api/positions").json()}
+        dev_res = _traccar_get("/api/devices")
+        if dev_res.status_code != 200:
+            return jsonify({"error": f"traccar /api/devices -> HTTP {dev_res.status_code} "
+                                     "(bad login or user lacks device read)",
+                            "devices": []}), 200
+        devices = dev_res.json()
+        pos_res = _traccar_get("/api/positions")
+        positions = ({p["deviceId"]: p for p in pos_res.json()}
+                     if pos_res.status_code == 200 else {})
     except Exception as e:
         return jsonify({"error": str(e), "devices": []}), 200
 

@@ -577,14 +577,16 @@
         #toggle-cancel-btn  { background: #333; color: #fff; }
         .node-badge {
             background: var(--neon-green-dim);
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 11px;
+            padding: 8px 14px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: bold;
+            letter-spacing: 1px;
             border: 1px solid var(--neon-green);
             color: var(--neon-green);
             white-space: nowrap;
             display: inline-block;
-            margin: 2px;
+            margin: 3px;
         }
 
         /* Node/Host column shouldn't get squeezed onto multiple lines */
@@ -965,7 +967,7 @@
        </span>
       </div>
       <div class="event-box-body" id="event-box-body">
-       <p id="event-empty">System events and client errors will appear here.</p>
+       <p id="event-empty">No events yet — elections, migrations, DNS syncs, exec runs and client errors will appear here.</p>
       </div>
       </div>
 
@@ -1353,12 +1355,27 @@
             setTimeout(() => traccarMap.invalidateSize(), 100); // container was hidden on first load
         }
 
+        let _traccarFitted = false;
+
         async function refreshTraccarDevices() {
             try {
                 const res = await fetch('/api/traccar-devices');
                 const data = await res.json();
                 const devices = data.devices || [];
                 const seen = new Set();
+                // Scope fix: `nodes` is read again below for the count line, so
+                // it has to live outside the inner try — it used to die there
+                // and the ReferenceError silently killed the count + cleanup.
+                let nodes = {};
+
+                // The proxy returns 200 with {error} when Traccar itself can't
+                // be reached or logged into — surface that instead of showing
+                // a healthy-looking empty map.
+                const countEl = document.getElementById('traccar-count');
+                if (data.error) {
+                    countEl.textContent = 'TRACCAR: ' + data.error;
+                    countEl.style.color = '#ff4444';
+                }
 
                 // Show GPS-based locations (phones with precise GPS)
                 devices.forEach((d) => {
@@ -1382,7 +1399,7 @@
                 // Show IP-geolocation based locations (laptops/desktops with soft circles)
                 try {
                     const registryRes = await fetch('/nodes');
-                    const nodes = await registryRes.json();
+                    nodes = await registryRes.json();
                     Object.entries(nodes).forEach(([hostKey, node]) => {
                         const meta = node.metadata || {};
                         if (!meta.lat || !meta.lon) return; // Skip if no geolocation
@@ -1413,8 +1430,21 @@
                 // Count online devices
                 const onlineCount = devices.filter(d => d.status === 'online').length +
                     Object.values(nodes || {}).filter(n => n.status === 'ONLINE' && n.metadata?.lat && n.metadata?.lon).length;
-                document.getElementById('traccar-count').textContent =
-                    `${onlineCount} online / ${devices.length + Object.keys(nodes || {}).filter(n => n.metadata?.lat && n.metadata?.lon).length} total`;
+                if (!data.error) {
+                    countEl.textContent =
+                        `${onlineCount} online / ${devices.length + Object.keys(nodes || {}).filter(n => n.metadata?.lat && n.metadata?.lon).length} total`;
+                    countEl.style.color = '#888';
+                }
+
+                // First time markers exist, frame them — the default world view
+                // made a working feed look broken.
+                if (!_traccarFitted && seen.size) {
+                    const pts = Object.values(traccarMarkers).map(m => m.getLatLng());
+                    if (pts.length) {
+                        traccarMap.fitBounds(L.latLngBounds(pts).pad(0.3));
+                        _traccarFitted = true;
+                    }
+                }
 
                 // Drop markers for devices no longer reporting
                 Object.keys(traccarMarkers).forEach((id) => {
@@ -2805,6 +2835,7 @@
         };
 
         function renderEvent(event) {
+            if (!event) return;  // SSE can deliver a literal null frame
             // The scrollable body, not the panel root: entries must land below
             // the fixed header, inside the region that scrolls.
             const eventBox = document.getElementById('event-box-body');
