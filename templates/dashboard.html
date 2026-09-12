@@ -3227,6 +3227,33 @@
                 });
             }
 
+            // Glances live view — unitN nodes get a link to that unit's
+            // public glances-web UI (glances-<unit>.theofficialblacksheepco.com,
+            // basicAuth-gated at the edge; the unit serves `glances -w` bound
+            // to its own tailnet IP via glances-web.service). Devices never
+            // match /^unit\d+$/ so the link only shows on real units.
+            const _unitName = (item.id || item.name || '').toLowerCase();
+            if (/^unit\d+$/.test(_unitName)) {
+                const sep = document.createElement('tr');
+                sep.innerHTML = '<td colspan="2" style="padding-top:14px;color:var(--neon-green);text-transform:uppercase;letter-spacing:2px;font-size:11px;">Online Views</td>';
+                rows.appendChild(sep);
+                const tr = document.createElement('tr');
+                const tdLabel = document.createElement('td');
+                tdLabel.innerText = 'Glances';
+                const tdVal = document.createElement('td');
+                const a = document.createElement('a');
+                a.href = `https://glances-${_unitName}.theofficialblacksheepco.com`;
+                a.target = '_blank';
+                a.rel = 'noopener';
+                a.innerText = 'open live view ↗';
+                a.style.color = 'var(--accent)';
+                a.title = `glances -w on ${_unitName} (tailnet-bound, edge-published; asks for the glances basic-auth login)`;
+                tdVal.appendChild(a);
+                tr.appendChild(tdLabel);
+                tr.appendChild(tdVal);
+                rows.appendChild(tr);
+            }
+
             document.getElementById('device-modal').style.display = 'flex';
         }
 
