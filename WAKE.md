@@ -174,7 +174,7 @@ unit8 on 2026-09-11).
 | `ops-dashboard` (+`pgadmin_ui`, `inventory-server`, `inventory-api`, `inventory-inventory-1`) | `ops.theofficialblacksheepco.com` visit | ✅ page-driven, `ops-dashboard.yml` (2026-09-11) — own 502 path too | `ops-dashboard` local docker-net (stationary); `inventory-app@http` (dynamic) | ✅ |
 | `agent-0` (+`ollama`) | `a0.theofficialblacksheepco.online` | ✅ `agent-zero.yml` | static file | — |
 | `rasa` (+`ollama`) | `rasa.theofficialblacksheepco.online` | ✅ `rasa.yml` | static file | — |
-| `searchsearcher-app` (+ its postgres) | `search.…com`, `www.…com` | ❌ **not yet** | static file | ✅ 200 |
+| `searchsearcher-app` (+ its postgres) | `search.…com`, `www.…com` | ✅ `searchsearcher.yml` (2026-09-13) | static file | ✅ 200 |
 | `reech` (+`reech-oauth`) | `portal.theofficialblacksheepco.com` visit | ✅ page-driven, `client-portal.yml` (2026-09-03) | static file | ✅ 302 |
 | `reech-oauth` itself | `reech.prime-quality.online` | ❌ **still none** — its router is a container LABEL, so stopping it deletes the route and the host 404s with nothing to wake | static file | ✅ 302 |
 
@@ -242,10 +242,14 @@ separate piece of work from waking it.
 ### Still to wire
 
 1. **File-defined routers + wake middleware for searchsearcher and reech.**
-   searchsearcher's router is currently on the app container's *labels*, which is
-   the exact trap described above — stop the container and the route disappears,
-   so nothing can wake it. This has to move into `dynamic-config/` before its
-   wake works at all.
+   DONE for searchsearcher (2026-09-13): `dynamic-config/searchsearcher.yml`
+   owns the `search.…com` router + `searchsearcher-wake` errors middleware,
+   upstream `http://searchsearcher-app:3000`. The compose rework that renamed
+   the container to `searchsearcher` was walked back — `container_name` is
+   `searchsearcher-app` again so lokey's exact-name `docker start` still lands;
+   the planned oauth2-proxy front (searchsearcher-oauth) still needs its
+   `SEARCHSEARCHER_OIDC_SECRET` before it can take over this route.
+   reech's router remains on container labels — same trap still applies there.
 2. **The frontends.** DONE for the welcome hub (→ forge, 2026-09-03) and the
    client portal (→ reech, 2026-09-03): both carry a script that calls
    `/__wake/triggers?domain=…` then `/__wake/<container>`, same-origin paths
