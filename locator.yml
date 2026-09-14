@@ -621,6 +621,17 @@ Service:
     location_type: stationary
     units: "8"
     instances: 1
+    # Idle-stops after 15m of no traffic; a visitor to the main site, the
+    # welcome page, or search.theofficialblacksheepco.com itself wakes it.
+    # Only the app carries idle_stop: searchsearcher-postgres matches the
+    # "postgres" entry in _PINNED_NAMES in locator.py, so its idle reports are
+    # dropped and it would never be reaped anyway — and the app answers 500,
+    # not "starting", if its database is down (which is why it is wake_with).
+    # No project_dir/git_remote here on purpose: placement enforcement counts
+    # only ONLINE instances, so a deployable service would be redeployed 60s
+    # after every idle stop.
+    idle_stop: true
+    idle_timeout: 15m
     public_wake: true
     wake_with: [searchsearcher-postgres]
     wake_triggers:
