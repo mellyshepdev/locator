@@ -742,3 +742,18 @@ Service:
   inventory-app:
     edge_host: inventory-inventory-1
     edge_port: 8082
+
+  # Tikur Bego — luxury landing page on unit7 (pro-pieces.prime-quality.online).
+  # Static Vite/React build behind nginx, tailnet-published at :8094; the edge
+  # file pro-pieces.yml routes to pro-pieces@http and follows a move.
+  pro-pieces:
+    deployment_type: optional
+    location_type: stationary
+    units: "7"
+    instances: 1
+    public_wake: true
+    edge_port: 8094
+    git_remote: https://gitlab.com/gbonds1/pro-pieces.git
+    wake_triggers:
+      domain:
+        - pro-pieces.prime-quality.online
