@@ -166,11 +166,15 @@ is the traffic-metered half; `searchsearcher-postgres` matches `postgres` in
 stays up, which is also what the app needs). Its compose keeps
 `restart: unless-stopped`, which a `docker stop` survives.
 
-Do NOT add `project_dir`/`git_remote` to this entry: `enforce_unit_placement`
-counts only ONLINE instances, so a deployable service marked `units: "8"`
-would be redeployed ~60s after every idle stop and the feature would silently
-never work. (store-site has exactly this combination today — if it ever looks
-like it "won't stay asleep", that is why.)
+It also carries `project_dir` + `git_remote`, so placement can redeploy it —
+which is only safe because `enforce_unit_placement` now skips registry
+entries flagged `idle_stopped` (set by the idle reaper and /api/shutdown,
+cleared by any successful start). Before that guard existed, a deployable
+service marked `units: "8"` was redeployed ~60s after every idle stop —
+store-site looped exactly that way on 2026-09-14 until the check shipped.
+One edge the flag cannot see: if the container is `docker rm`'d while asleep,
+the OFFLINE+idle_stopped entry still blocks placement — recreate it by hand
+or clear the flag.
 
 ## Current wiring (2026-08-30)
 

@@ -627,12 +627,14 @@ Service:
     # "postgres" entry in _PINNED_NAMES in locator.py, so its idle reports are
     # dropped and it would never be reaped anyway — and the app answers 500,
     # not "starting", if its database is down (which is why it is wake_with).
-    # No project_dir/git_remote here on purpose: placement enforcement counts
-    # only ONLINE instances, so a deployable service would be redeployed 60s
-    # after every idle stop.
+    # project_dir+git_remote make it deployable, which is only safe alongside
+    # idle_stop because placement skips entries flagged idle_stopped — that
+    # guard did not exist before 2026-09-14 and store-site looped on it.
     idle_stop: true
     idle_timeout: 15m
     public_wake: true
+    project_dir: /home/swoopg111/projects/searchsearcher
+    git_remote: git@github.com:mellyshepdev/searchsearcher.git
     wake_with: [searchsearcher-postgres]
     wake_triggers:
       domain:

@@ -4318,6 +4318,14 @@ def enforce_unit_placement():
                 for unit in sorted(missing):
                     if _recent_placement_failure(unit, name, now):
                         continue
+                    # locator itself put it to sleep — the idle reaper and
+                    # /api/shutdown both set metadata.idle_stopped, and any
+                    # successful start clears it. Deploying over that flag
+                    # resurrects the service ~60s after every quiet-hours
+                    # stop: store-site looped exactly like this until the
+                    # check existed. Wake is the way back, not placement.
+                    if _was_idle_stopped(name, unit, services):
+                        continue
                     env_cfg = pol.get("env") or {}
                     env_map = {**(env_cfg.get("common") or {}),
                                **(env_cfg.get(unit) or {})}
@@ -4332,6 +4340,20 @@ def enforce_unit_placement():
         except Exception as e:
             print(f"⚠️  enforce_unit_placement error: {e}")
         time.sleep(60)
+
+
+def _was_idle_stopped(name, unit, services):
+    """True when the service's registry entry on `unit` carries idle_stopped —
+    locator queued that stop itself (idle reaper or /api/shutdown) and no
+    successful start has landed since. Placement must not resurrect it."""
+    for _svc_id, svc in services:
+        if (svc.get("name") or "").lower() != name:
+            continue
+        if svc.get("host") != unit:
+            continue
+        if (svc.get("metadata") or {}).get("idle_stopped"):
+            return True
+    return False
 
 
 def _recent_placement_failure(unit, container, now):
