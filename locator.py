@@ -964,6 +964,14 @@ def get_service(name):
 # middleware exists to catch.
 EDGE_DEAD_UPSTREAM = "http://127.0.0.1:9"
 
+# Deployment addressing. A registered service carrying a subdomain+domain pair
+# is emitted by /api/traefik as Host(`<sub>.<dom>`) -> its own upstream, so user
+# deployments are served at https://<sub>.<dom> with a per-host tlsChallenge
+# cert (no wildcard DNS-01 needed). Labels must be DNS-safe: they land inside a
+# Traefik rule string verbatim.
+_DEPLOY_SUBDOMAIN = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
+_DEPLOY_DOMAIN = re.compile(r"[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?")
+
 
 def _edge_upstream(name, cfg, port):
     """The tailnet URL an edge should proxy this service to, or the dead
@@ -1022,7 +1030,31 @@ def traefik_all_services():
                 lb["healthCheck"] = {"path": cfg["edge_healthcheck"],
                                      "interval": "15s", "timeout": "5s"}
             out[name] = {"loadBalancer": lb}
-    return jsonify({"http": {"services": out}})
+        # User deployments: any registered service carrying a subdomain+domain
+        # gets a concrete Host rule (its own cert via tlsChallenge — a wildcard
+        # HostRegexp could not be issued one) plus an upstream pointed wherever
+        # the deployment's node currently lives. Two claims on one subdomain
+        # collapse to a single router; the later registration wins.
+        routers = {}
+        for svc in registry["services"].values():
+            sub, dom = svc.get("subdomain"), svc.get("domain")
+            if not sub or not dom:
+                continue
+            host = svc.get("host") or ((svc.get("hosts") or [None])[0])
+            ip = _node_probe_addr(registry["nodes"].get(host or "") or {})
+            url = f"http://{ip}:{svc.get('port') or 80}" if ip else EDGE_DEAD_UPSTREAM
+            rname = f"deploy-{sub}"
+            out[rname] = {"loadBalancer": {"servers": [{"url": url}]}}
+            routers[rname] = {
+                "rule": f"Host(`{sub}.{dom}`)",
+                "entryPoints": ["websecure"],
+                "service": rname,
+                "tls": {"certResolver": "myresolver"},
+            }
+    body = {"http": {"services": out}}
+    if routers:
+        body["http"]["routers"] = routers
+    return jsonify(body)
 
 
 @app.route("/api/traefik/<name>", methods=["GET"])
@@ -1215,6 +1247,13 @@ def register_service():
     if not data or "name" not in data:
         return jsonify({"error": "Missing required field: 'name'"}), 400
 
+    sub = data.get("subdomain")
+    dom = data.get("domain")
+    if sub and not _DEPLOY_SUBDOMAIN.fullmatch(str(sub)):
+        return jsonify({"error": "subdomain must be a DNS label ([a-z0-9-])"}), 400
+    if dom and not _DEPLOY_DOMAIN.fullmatch(str(dom)):
+        return jsonify({"error": "domain must be a DNS name ([a-z0-9.-])"}), 400
+
     name = data["name"]
     host = data.get("host", "unknown")
     service_id = f"{name}@{host}"
@@ -1246,6 +1285,10 @@ def register_service():
             #   after a native migration (see migrate_native.py, added in Phase 2).
             "depends_on": data.get("depends_on", existing.get("depends_on", [])),
             "prereqs": data.get("prereqs", existing.get("prereqs", {})),
+            # Public deployment addressing — consumed by /api/traefik. Re-registering
+            # with an empty subdomain clears the pair and withdraws the route.
+            "subdomain": data.get("subdomain", existing.get("subdomain")),
+            "domain": data.get("domain", existing.get("domain")),
         }
 
         # Self-registered devices (phones/tablets/laptops via /register-device) are also
