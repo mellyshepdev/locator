@@ -157,6 +157,21 @@ router lived on the app container's labels, so with the container gone
 - `?to=` cannot be turned into an open redirect; the allowlist is a regex over
   our own domains.
 
+## Idle-stop (2026-09-14)
+
+`searchsearcher-app` now carries `idle_stop: true` + `idle_timeout: 15m`, so a
+quiet spell stops it and any of the wake paths above brings it back (the app
+is the traffic-metered half; `searchsearcher-postgres` matches `postgres` in
+`_PINNED_NAMES`, so its reports are dropped and it is never reaped — it just
+stays up, which is also what the app needs). Its compose keeps
+`restart: unless-stopped`, which a `docker stop` survives.
+
+Do NOT add `project_dir`/`git_remote` to this entry: `enforce_unit_placement`
+counts only ONLINE instances, so a deployable service marked `units: "8"`
+would be redeployed ~60s after every idle stop and the feature would silently
+never work. (store-site has exactly this combination today — if it ever looks
+like it "won't stay asleep", that is why.)
+
 ## Current wiring (2026-08-30)
 
 `locator.yml` policy is declared for all of these. The column that matters is
@@ -174,7 +189,7 @@ unit8 on 2026-09-11).
 | `ops-dashboard` (+`pgadmin_ui`, `inventory-server`, `inventory-api`, `inventory-inventory-1`) | `ops.theofficialblacksheepco.com` visit | ✅ page-driven, `ops-dashboard.yml` (2026-09-11) — own 502 path too | `ops-dashboard` local docker-net (stationary); `inventory-app@http` (dynamic) | ✅ |
 | `agent-0` (+`ollama`) | `a0.theofficialblacksheepco.online` | ✅ `agent-zero.yml` | static file | — |
 | `rasa` (+`ollama`) | `rasa.theofficialblacksheepco.online` | ✅ `rasa.yml` | static file | — |
-| `searchsearcher-app` (+ its postgres) | `search.…com`, `www.…com` | ✅ `searchsearcher.yml` (2026-09-13) | static file | ✅ 200 |
+| `searchsearcher-app` (+ its postgres) | `search.…com`, `www.…com`, `link: welcome:search` + `main:search` | ✅ `searchsearcher.yml` (2026-09-13) | static file | ✅ 200 |
 | `reech` (+`reech-oauth`) | `portal.theofficialblacksheepco.com` visit | ✅ page-driven, `client-portal.yml` (2026-09-03) | static file | ✅ 302 |
 | `reech-oauth` itself | `reech.prime-quality.online` | ❌ **still none** — its router is a container LABEL, so stopping it deletes the route and the host 404s with nothing to wake | static file | ✅ 302 |
 
@@ -250,18 +265,28 @@ separate piece of work from waking it.
    the planned oauth2-proxy front (searchsearcher-oauth) still needs its
    `SEARCHSEARCHER_OIDC_SECRET` before it can take over this route.
    reech's router remains on container labels — same trap still applies there.
-2. **The frontends.** DONE for the welcome hub (→ forge, 2026-09-03) and the
-   client portal (→ reech, 2026-09-03): both carry a script that calls
-   `/__wake/triggers?domain=…` then `/__wake/<container>`, same-origin paths
-   proxied to locator by `welcome-hub.yml` / `client-portal.yml` on unit8.
-   Asking rather than hardcoding is the whole point of the trigger map.
+2. **The frontends.** DONE for the welcome hub (→ forge, 2026-09-03), the
+   client portal (→ reech, 2026-09-03), the welcome page (→ searchsearcher via
+   `link=welcome:search`, 2026-09-14) and the main site (`js/wake.js`, →
+   searchsearcher via `link=main:search`, 2026-09-14): each carries a script
+   that calls `/__wake/triggers?<kind>=…` then `/__wake/<container>`,
+   same-origin paths proxied to locator by `welcome-hub.yml` /
+   `client-portal.yml` / `main-site.yml` on unit8. Asking rather than
+   hardcoding is the whole point of the trigger map.
 
    **A page-driven wake is the ONLY option when the visited host is healthy.**
    An `errors` middleware needs a 502/503/504 to fire, and a hub or portal that
    answers 200 never produces one, so it can never wake a sibling container.
    Use the middleware to wake the host being visited, the page to wake others.
 
-   Still to do: the main site's search bar (→ searchsearcher-app).
+   **First match wins — shared domains get shadowed.** `/api/wake/triggers`
+   returns the FIRST policy entry declaring a trigger. store-site sits earlier
+   in `locator.yml` than searchsearcher-app and claims the same apex/www
+   domains, so `?domain=www.…` on the main site resolves to the store, never
+   the search app. That is why both pages use `link:` triggers for
+   searchsearcher (`welcome:search`, `main:search`) — a name nothing else
+   declares. Check who actually resolves before adding a domain that already
+   appears on another service.
 3. **`locator-api-readblock.yml` blocks `PathPrefix(/wake)`** on both public
    locator hostnames, so a browser-initiated wake from a page still gets 403.
    That block predates wake having any auth of its own; now that the gate is

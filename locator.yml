@@ -641,6 +641,11 @@ Service:
         - theofficialblacksheepco.com
       link:
         - welcome:search
+        # The apex/www domains are ALSO declared by store-site, which sits
+        # earlier in this file, and /api/wake/triggers returns the first
+        # match — so the main site's domain lookup resolves to the store.
+        # main:search gives its wake.js a trigger that cannot be shadowed.
+        - main:search
 
   searchsearcher-postgres:
     deployment_type: optional
