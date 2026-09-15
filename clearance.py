@@ -281,6 +281,11 @@ ROUTE_CLEARANCE = {
     # Hard-removes a registry row (the reaper's soft-delete is
     # deregister_service at OPERATOR). Destroying state stays owner-level.
     "delete_registry_entry": ROOT,
+    # Takes raw credential values from a unit and writes them to OpenBao.
+    # Admin-keyed in the handler, but it had no entry here, so the fail-closed
+    # rule answered every call 403 "endpoint has no clearance policy" and
+    # nothing a unit offered was ever filed. Same bar as its siblings.
+    "secrets_ingest":        ROOT,
 
     # ── Root: identity administration ───────────────────────────────────
     # Lists accounts and grants clearance levels. Whoever can reach these can
