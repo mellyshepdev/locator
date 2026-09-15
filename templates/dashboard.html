@@ -3705,7 +3705,11 @@
             try {
                 const rows = await (await fetch(`/api/metrics/containers?${qs}`)).json();
                 if (rows.error) throw new Error(rows.error);
-                if (!rows.length) { tbody.innerHTML = '<tr><td colspan="6" style="padding:10px;color:#555;">No container activity in this range.</td></tr>'; return; }
+                if (!rows.length) {
+                    tbody.innerHTML = '<tr><td colspan="6" style="padding:10px;color:#555;">No container activity in this range.</td></tr>';
+                    document.getElementById('metrics-chart-wrap').style.display = 'none';
+                    return;
+                }
                 tbody.innerHTML = rows.map(r => `
                     <tr style="border-bottom:1px solid rgba(0,255,0,0.15); cursor:pointer;" onclick="showContainerHistory('${r.service_id}', '${since}', '${until}')">
                         <td style="padding:6px;">${r.service_id}</td>
@@ -3716,6 +3720,11 @@
                         <td style="padding:6px;">${timeSince(r.last_seen)}</td>
                     </tr>
                 `).join('');
+                // The chart used to stay hidden until you clicked a row, so the
+                // tab could show a fully populated table with no graph anywhere
+                // on it. Auto-show one for the heaviest container on load.
+                const top = rows.slice().sort((a, b) => (b.avg_mem_mb || 0) - (a.avg_mem_mb || 0))[0];
+                if (top) showContainerHistory(top.service_id, since, until);
             } catch (err) {
                 tbody.innerHTML = `<tr><td colspan="6" style="padding:10px;color:var(--danger);">${err.message}</td></tr>`;
             }
