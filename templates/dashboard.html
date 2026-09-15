@@ -1360,6 +1360,33 @@
                 <div id="metrics-summary" style="font-size:13px; color:var(--neon-green);">Loading...</div>
             </div>
 
+            <!-- Overview charts: by-host split and top containers by RAM -->
+            <div style="display:flex; gap:28px; flex-wrap:wrap;">
+                <div style="flex:1; min-width:260px; max-width:360px;">
+                    <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Containers by Host</h3>
+                    <canvas id="metrics-pie" height="220"></canvas>
+                </div>
+                <div style="flex:2; min-width:320px;">
+                    <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Top Containers by Avg RAM</h3>
+                    <canvas id="metrics-bar" height="220"></canvas>
+                </div>
+            </div>
+
+            <!-- Live per-node RAM/disk (from the same registry data behind the
+                 Devices table — not historical, so it's a bar not a line). -->
+            <div>
+                <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Node Resources (Live) — RAM % / Disk %</h3>
+                <canvas id="metrics-node-bar" height="160"></canvas>
+            </div>
+
+            <!-- RAM-over-time line chart -->
+            <div id="metrics-chart-wrap" style="display:none;">
+                <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">
+                    RAM over time — <span id="metrics-chart-title"></span>
+                </h3>
+                <canvas id="metrics-chart" height="90"></canvas>
+            </div>
+
             <!-- Per-container table -->
             <div>
                 <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Containers</h3>
@@ -1375,14 +1402,6 @@
                         <tbody id="metrics-tbody"></tbody>
                     </table>
                 </div>
-            </div>
-
-            <!-- RAM-over-time chart for a selected container -->
-            <div id="metrics-chart-wrap" style="display:none;">
-                <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">
-                    RAM over time — <span id="metrics-chart-title"></span>
-                </h3>
-                <canvas id="metrics-chart" height="90"></canvas>
             </div>
         </div>
     </div>
@@ -3646,7 +3665,7 @@
         // lokey heartbeat. Unlike the rest of the registry, this is historical
         // data, so every fetch here is scoped to a since/until range from the
         // picker instead of just reflecting current state.
-        let metricsChart = null;
+        let metricsChart = null, metricsPieChart = null, metricsBarChart = null, metricsNodeChart = null;
 
         function onMetricsRangeChange() {
             const custom = document.getElementById('metrics-range').value === 'custom';
@@ -3688,6 +3707,8 @@
             const { since, until } = bounds;
             const qs = `since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`;
 
+            renderNodeResourceBar();
+
             const summaryEl = document.getElementById('metrics-summary');
             const tbody = document.getElementById('metrics-tbody');
             summaryEl.textContent = 'Loading...';
@@ -3698,6 +3719,7 @@
                 if (summary.error) throw new Error(summary.error);
                 const byHost = (summary.by_host || []).map(h => `${h.host || 'unknown'}: ${h.containers}`).join(' · ');
                 summaryEl.textContent = `${summary.total_containers} container(s) active in range` + (byHost ? ` — ${byHost}` : '');
+                renderHostPie(summary.by_host || []);
             } catch (err) {
                 summaryEl.textContent = `Error: ${err.message}`;
             }
@@ -3722,12 +3744,146 @@
                 `).join('');
                 // The chart used to stay hidden until you clicked a row, so the
                 // tab could show a fully populated table with no graph anywhere
-                // on it. Auto-show one for the heaviest container on load.
-                const top = rows.slice().sort((a, b) => (b.avg_mem_mb || 0) - (a.avg_mem_mb || 0))[0];
-                if (top) showContainerHistory(top.service_id, since, until);
+                // on it. Default to an overview of the top containers by avg
+                // RAM; clicking any row still drills into just that one.
+                showOverviewChart(rows, since, until);
+                renderTopBar(rows);
             } catch (err) {
                 tbody.innerHTML = `<tr><td colspan="6" style="padding:10px;color:var(--danger);">${err.message}</td></tr>`;
             }
+        }
+
+        // Distinct, readable-on-black palette for up to 8 overlaid lines/slices/bars.
+        const OVERVIEW_COLORS = ['#00ff00', '#00f0ff', '#ff8800', '#ff2d95', '#a200ff', '#ffe600', '#4169E1', '#ff003c'];
+
+        function renderHostPie(byHost) {
+            const ctx = document.getElementById('metrics-pie').getContext('2d');
+            if (metricsPieChart) metricsPieChart.destroy();
+            if (!byHost.length) return;
+            metricsPieChart = new Chart(ctx, {
+                type: 'pie',
+                data: {
+                    labels: byHost.map(h => (h.host || 'unknown').toUpperCase()),
+                    datasets: [{
+                        data: byHost.map(h => h.containers),
+                        backgroundColor: byHost.map((_, i) => OVERVIEW_COLORS[i % OVERVIEW_COLORS.length]),
+                        borderColor: '#000',
+                        borderWidth: 2,
+                    }],
+                },
+                options: {
+                    responsive: true,
+                    plugins: { legend: { position: 'bottom', labels: { color: '#00ff00' } } },
+                },
+            });
+        }
+
+        function renderTopBar(rows) {
+            const ctx = document.getElementById('metrics-bar').getContext('2d');
+            if (metricsBarChart) metricsBarChart.destroy();
+            const top = rows.slice().sort((a, b) => (b.avg_mem_mb || 0) - (a.avg_mem_mb || 0)).slice(0, 12);
+            if (!top.length) return;
+            metricsBarChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: top.map(r => r.service_id),
+                    datasets: [
+                        { label: 'Avg RAM (MB)', data: top.map(r => r.avg_mem_mb || 0), backgroundColor: 'rgba(0,255,0,0.5)', borderColor: '#00ff00', borderWidth: 1 },
+                        { label: 'Max RAM (MB)', data: top.map(r => r.max_mem_mb || 0), backgroundColor: 'rgba(0,240,255,0.35)', borderColor: '#00f0ff', borderWidth: 1 },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        x: { ticks: { color: '#00ff00', maxRotation: 60, minRotation: 40, autoSkip: false, font: { size: 9 } }, grid: { display: false } },
+                        y: { ticks: { color: '#00ff00' }, grid: { color: 'rgba(0,255,0,0.1)' } },
+                    },
+                    plugins: { legend: { labels: { color: '#00ff00' } } },
+                },
+            });
+        }
+
+        // Live snapshot (not historical — the container_metrics table only
+        // tracks RAM per container, not per-node disk/CPU over time), pulled
+        // from the same registry data the Devices table already renders from.
+        function renderNodeResourceBar() {
+            const canvas = document.getElementById('metrics-node-bar');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            if (metricsNodeChart) metricsNodeChart.destroy();
+            const nodes = Object.entries((lastRegistryData && lastRegistryData.nodes) || {})
+                .map(([id, n]) => ({ id, ...n }))
+                .filter(n => n.mem_percent != null || n.disk_percent != null);
+            if (!nodes.length) return;
+            metricsNodeChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: nodes.map(n => (n.name || n.id).toUpperCase()),
+                    datasets: [
+                        { label: 'RAM %', data: nodes.map(n => n.mem_percent ?? null), backgroundColor: 'rgba(0,255,0,0.5)', borderColor: '#00ff00', borderWidth: 1 },
+                        { label: 'Disk %', data: nodes.map(n => n.disk_percent ?? null), backgroundColor: 'rgba(255,136,0,0.5)', borderColor: '#ff8800', borderWidth: 1 },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        x: { ticks: { color: '#00ff00' }, grid: { display: false } },
+                        y: { ticks: { color: '#00ff00' }, grid: { color: 'rgba(0,255,0,0.1)' }, min: 0, max: 100 },
+                    },
+                    plugins: { legend: { labels: { color: '#00ff00' } } },
+                },
+            });
+        }
+
+        async function showOverviewChart(rows, since, until) {
+            const wrap = document.getElementById('metrics-chart-wrap');
+            const title = document.getElementById('metrics-chart-title');
+            const top = rows.slice().sort((a, b) => (b.avg_mem_mb || 0) - (a.avg_mem_mb || 0)).slice(0, 8);
+            if (!top.length) { wrap.style.display = 'none'; return; }
+            wrap.style.display = '';
+            title.textContent = `Top ${top.length} by avg RAM — click a row for one container`;
+
+            const qs = (id) => `service_id=${encodeURIComponent(id)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`;
+            let series;
+            try {
+                series = await Promise.all(top.map(async r => {
+                    const points = await (await fetch(`/api/metrics/history?${qs(r.service_id)}`)).json();
+                    if (points.error) throw new Error(points.error);
+                    return { id: r.service_id, points };
+                }));
+            } catch (err) {
+                notify(`Failed to load history: ${err.message}`, 'error');
+                return;
+            }
+
+            // Datasets can have different sample counts; use the longest as
+            // the shared category axis rather than pulling in a time-scale
+            // adapter for what only needs to look right, not be pixel-exact.
+            const longest = series.reduce((a, b) => (b.points.length > a.points.length ? b : a), series[0]);
+            const ctx = document.getElementById('metrics-chart').getContext('2d');
+            if (metricsChart) metricsChart.destroy();
+            metricsChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: longest.points.map(p => new Date(p.sampled_at).toLocaleString()),
+                    datasets: series.map((s, i) => ({
+                        label: s.id,
+                        data: s.points.map(p => p.mem_usage_mb),
+                        borderColor: OVERVIEW_COLORS[i % OVERVIEW_COLORS.length],
+                        backgroundColor: 'transparent',
+                        pointRadius: 0,
+                        tension: 0.2,
+                    })),
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        x: { ticks: { color: '#00ff00', maxTicksLimit: 8 }, grid: { color: 'rgba(0,255,0,0.1)' } },
+                        y: { ticks: { color: '#00ff00' }, grid: { color: 'rgba(0,255,0,0.1)' } },
+                    },
+                    plugins: { legend: { labels: { color: '#00ff00' } } },
+                },
+            });
         }
 
         async function showContainerHistory(serviceId, since, until) {
