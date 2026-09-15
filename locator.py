@@ -65,6 +65,7 @@ import kc_admin
 import bao
 import renewals
 import secretscan
+import unitkeys
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -4889,6 +4890,24 @@ def _bao_path_for(compose_name):
     return f"{SECRETSCAN_PREFIX}/{compose_name}"
 
 
+def _unit_key_auth():
+    """Authenticate a secrets call made with the admin key or a unit's own key.
+
+    Returns (scope, None) on success — scope is None for the admin key (any
+    unit) or the unit name the key belongs to — or (None, response) to abort.
+    Fails closed: a request carrying neither credential is refused here, since
+    clearance.UNIT_KEY lets these routes past the gate for this check to run.
+    """
+    if request.headers.get("X-Locator-Admin-Key"):
+        denied = _require_admin_key()
+        return (None, denied) if denied else (None, None)
+    unit = request.headers.get("X-Lokey-Unit", "").strip()
+    key = request.headers.get("X-Lokey-Key", "")
+    if unit and key and unitkeys.verify(unit, key):
+        return unit, None
+    return None, (jsonify({"error": "unauthorized"}), 401)
+
+
 # ── INGEST: a unit hands us its .env, we file the credentials in OpenBao ──────
 #
 # The gap this closes: lokey only ever uploaded docker-compose.yml, and
@@ -4934,15 +4953,20 @@ def secrets_ingest():
     Returns the bao:// refs to paste into locator.yml, what was skipped, and
     masked values only — the response is safe to log and to show in an event.
     """
-    denied = _require_admin_key()
+    scope, denied = _unit_key_auth()
     if denied:
         return denied
 
     body = request.get_json(silent=True) or {}
-    unit = str(body.get("unit") or "").strip() or "unknown"
+    unit = str(body.get("unit") or "").strip() or (scope or "unknown")
     source = str(body.get("source") or "").strip()
     origin = str(body.get("path") or "").strip()
     content = body.get("content")
+
+    # A unit key files under its own unit and nowhere else. Checked before
+    # anything is parsed, so a key cannot be used to write another unit's path.
+    if scope and unit != scope:
+        return jsonify({"error": f"this key belongs to {scope}, not {unit}"}), 403
 
     if not source:
         return jsonify({"error": "source (the compose project name) is required"}), 400
@@ -4977,7 +5001,10 @@ def secrets_ingest():
                         "note": "no storable credential found"})
 
     values = {f["key"]: f["value"] for f in actionable}
-    bao_path = _bao_path_for(source)
+    # Unit-key filings live under compose/units/<unit>/<source>, the one prefix
+    # /api/secrets/unit-resolve lets that same unit read back.
+    bao_path = (f"{unitkeys.secret_prefix(SECRETSCAN_PREFIX, scope)}/{source}" if scope
+                else _bao_path_for(source))
     refs = {k: f"bao://{SECRETSCAN_MOUNT}/{bao_path}#{k}" for k in sorted(values)}
     masked = {f["key"]: f["masked"] for f in actionable}
 
@@ -5010,10 +5037,77 @@ def secrets_ingest():
     beast_log(f"\U0001f510 INGESTED {len(values)} credential(s) from "
               f"{unit}:{origin or source} \u2192 {SECRETSCAN_MOUNT}/{bao_path} "
               f"({', '.join(sorted(values))})")
+    # `stored` lists exactly the keys whose values OpenBao returned unchanged on
+    # read-back. It is the confirmation lokey waits for before deleting those
+    # keys from the unit's .env — and nothing absent from it may be deleted.
     return jsonify({"unit": unit, "source": source, "path": origin,
-                    "stored": sorted(values), "refs": refs, "masked": masked,
+                    "stored": sorted(values), "verified": True, "refs": refs, "masked": masked,
                     "bao_path": f"{SECRETSCAN_MOUNT}/{bao_path}",
                     "skipped": secretscan.public(skipped)})
+
+
+@app.route("/api/secrets/unit-resolve", methods=["POST"])
+def secrets_unit_resolve():
+    """A unit reads back the secrets it filed — and only those.
+
+    Body: {"refs": ["bao://secret/compose/units/unit8/matomo#DB_PASSWORD", ...]}
+    Auth: X-Lokey-Unit + X-Lokey-Key. Every ref must sit under
+    compose/units/<that unit>/; one out-of-scope ref refuses the whole request,
+    and nothing is resolved on any failure (same rule as /api/secrets/resolve).
+    """
+    scope, denied = _unit_key_auth()
+    if denied:
+        return denied
+    if not scope:
+        return jsonify({"error": "unit key required; admins use /api/secrets/resolve"}), 400
+    refs = (request.get_json(silent=True) or {}).get("refs")
+    if not isinstance(refs, list) or not refs:
+        return jsonify({"error": "refs must be a non-empty list"}), 400
+    try:
+        parsed = [(r, *bao.parse_ref(r)) for r in refs]
+    except bao.BaoError as e:
+        return jsonify({"error": str(e)}), 400
+    outside = [r for r, mount, path, _f in parsed
+               if mount != SECRETSCAN_MOUNT or not unitkeys.path_in_scope(path, SECRETSCAN_PREFIX, scope)]
+    if outside:
+        _ingest_log(f"{scope} asked for {len(outside)} ref(s) outside its scope — refused")
+        return jsonify({"error": f"refs outside {scope}'s scope", "refs": outside}), 403
+    out = {}
+    try:
+        for ref in refs:
+            out[ref] = bao.resolve_ref(ref)
+    except bao.BaoError as e:
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"resolved": out, "count": len(out)})
+
+
+@app.route("/api/secrets/unit-keys", methods=["POST"])
+def secrets_unit_keys_mint():
+    """Mint or rotate a unit's ingest key. Body: {"unit": "unit8"}.
+
+    The key is in this response and nowhere else — only its hash is kept.
+    Minting again replaces (and so revokes) that unit's previous key.
+    """
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    unit = str((request.get_json(silent=True) or {}).get("unit") or "").strip()
+    try:
+        key = unitkeys.mint(unit)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    emit_event("secrets", action="unit_key_minted", unit=unit)
+    return jsonify({"unit": unit, "key": key,
+                    "note": "shown once; put it in this unit's lokey as LOKEY_UNIT_KEY"})
+
+
+@app.route("/api/secrets/unit-keys", methods=["GET"])
+def secrets_unit_keys_list():
+    """Which units hold an ingest key, and when it was minted. Never the keys."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    return jsonify({"units": unitkeys.listing()})
 
 
 @app.route("/api/secrets/quarantine", methods=["POST"])

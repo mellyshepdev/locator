@@ -384,7 +384,7 @@ class TestPolicyCoverage(unittest.TestCase):
         """
         import re
         endpoints = _all_endpoints()
-        classified = C.PUBLIC | C.INGEST | set(C.ROUTE_CLEARANCE)
+        classified = C.PUBLIC | C.INGEST | C.UNIT_KEY | set(C.ROUTE_CLEARANCE)
         missing = sorted(endpoints - classified)
         self.assertEqual(missing, [], f"unclassified endpoints: {missing}")
 
@@ -397,7 +397,7 @@ class TestPolicyCoverage(unittest.TestCase):
         import re
         endpoints = _all_endpoints()
         # "static" is Flask's built-in file server, not a route in this source.
-        classified = (C.PUBLIC | C.INGEST | set(C.ROUTE_CLEARANCE)) - {"static"}
+        classified = (C.PUBLIC | C.INGEST | C.UNIT_KEY | set(C.ROUTE_CLEARANCE)) - {"static"}
         stale = sorted(classified - endpoints)
         self.assertEqual(stale, [], f"policy names routes that do not exist: {stale}")
 

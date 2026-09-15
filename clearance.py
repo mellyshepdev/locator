@@ -185,6 +185,16 @@ INGEST = {
     "complete_migration",
 }
 
+# Routes a lokey reaches with its PER-UNIT key (X-Lokey-Unit + X-Lokey-Key),
+# which carries no clearance level, so the gate cannot judge it. The handler
+# authenticates instead — admin key, or that unit's own key and nothing wider —
+# and fails closed. Listed so the gate lets the request reach that check; it is
+# not PUBLIC, and a request with neither key gets a 401 from the handler.
+UNIT_KEY = {
+    "secrets_ingest",        # file this unit's .env credentials into OpenBao
+    "secrets_unit_resolve",  # read back only secrets filed under this unit
+}
+
 ROUTE_CLEARANCE = {
     # ── Read: registry surface ──────────────────────────────────────────
     # Low bar to reach, because what comes back is filtered per-tenant and
@@ -289,11 +299,10 @@ ROUTE_CLEARANCE = {
     # Hard-removes a registry row (the reaper's soft-delete is
     # deregister_service at OPERATOR). Destroying state stays owner-level.
     "delete_registry_entry": ROOT,
-    # Takes raw credential values from a unit and writes them to OpenBao.
-    # Admin-keyed in the handler, but it had no entry here, so the fail-closed
-    # rule answered every call 403 "endpoint has no clearance policy" and
-    # nothing a unit offered was ever filed. Same bar as its siblings.
-    "secrets_ingest":        ROOT,
+    # Mints (or rotates) a unit's ingest key, and lists which units hold one.
+    # Minting hands out a credential, so it sits with the other secrets routes.
+    "secrets_unit_keys_mint": ROOT,
+    "secrets_unit_keys_list": ROOT,
 
     # ── Root: identity administration ───────────────────────────────────
     # Lists accounts and grants clearance levels. Whoever can reach these can
@@ -673,6 +682,8 @@ def install(app):
             return None                       # 404 — let Flask answer it
         if endpoint in PUBLIC:
             return None
+        if endpoint in UNIT_KEY:
+            return None                       # handler authenticates; see UNIT_KEY
 
         if endpoint in INGEST:
             if not ENFORCE_INGEST:
