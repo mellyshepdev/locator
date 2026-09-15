@@ -212,6 +212,14 @@ ROUTE_CLEARANCE = {
     # worker, and minting still goes through certs_issue at ROOT.
     "renewals_status":       PARTNER,
     "dns_status":            ENGINEER,
+    # Container resource history behind the dashboard's Metrics tab. No entry
+    # here meant the fail-closed rule 403'd every call the moment ENFORCE went
+    # true — same bug class as secrets_ingest above, caught by hitting the tab
+    # right after deploy. VIEW_CLEARANCE["metrics"] already gates the tab
+    # itself at ENGINEER; these match it rather than sitting open beneath it.
+    "metrics_summary":       ENGINEER,
+    "metrics_containers":    ENGINEER,
+    "metrics_history":       ENGINEER,
     "list_migrations":       PARTNER,
     # Fleet refresh — status/history read like the other operational telemetry;
     # triggering one redeploys across the fleet, so that sits with the deploys.
