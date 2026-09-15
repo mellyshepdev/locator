@@ -24,8 +24,9 @@ Service:
   mariadb-11.4:
     deployment_type: essential
     location_type: stationary
-    units: "8"
+    units: "7_8"
     instances: 1
+    restart_when_stopped: true
 
   mariadb-pdns:
     deployment_type: essential
@@ -189,6 +190,73 @@ Service:
     units: "7"
     instances: 1
 
+  # ── unit7 databases — pinned 2026-09-15 ───────────────────────────────
+  # Found ONLINE on unit7 with no policy entry, so the balancer saw them as
+  # movable: none match _PINNED_NAMES ("pgdb" is not "postgres", cockroach and
+  # the wazuh OpenSearch indexer are not listed at all). pgdb-18.3 is the
+  # inventory source of truth. Migration moves the compose file and NOT the
+  # volume, so every one of these would have arrived empty.
+  #
+  # restart_when_stopped: lokey's keep_alive() starts the container whenever
+  # unit7 is up and it is found stopped - including after a deliberate
+  # docker stop, which an unless-stopped restart policy never comes back from.
+
+  pgdb-18.3:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    restart_when_stopped: true
+
+  pgdb2-18.3:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    restart_when_stopped: true
+
+  liv-log-pgdb-18.3:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    restart_when_stopped: true
+
+  live-logger-db:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    restart_when_stopped: true
+
+  lago-db:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    restart_when_stopped: true
+
+  lago-redis:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    restart_when_stopped: true
+
+  puffbase-cockroach:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    restart_when_stopped: true
+
+  wazuh-indexer:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    restart_when_stopped: true
+
   traefik:
     deployment_type: essential
     location_type: stationary
@@ -248,7 +316,7 @@ Service:
   kc-pg-node:
     deployment_type: essential
     location_type: stationary
-    units: "4_8"
+    units: "4_7_8"
     instances: 1
 
   main-site-apache:
@@ -339,7 +407,8 @@ Service:
   # deployment_type: essential is set here but is NOT protection today. Tested
   # 2026-08-23: policy loaded, the registry correctly saw
   # live-logger-container-names@unit9 go OFFLINE, and
-  # critical_service_watchdog() queued no start in 5 minutes. Treat these two
+  # nothing queued a start in 5 minutes. restart_when_stopped (lokey keep_alive)
+  # is what brings them back now. Treat any other essential service
   # as unsupervised until that is fixed; the flag only drives the grid badge.
   #
   # units MUST be present and MUST be quoted. Without it
@@ -371,7 +440,7 @@ Service:
   # separators) and would match no unit at all.
   #
   # These three flags are a no-op FOR LOKEY SPECIFICALLY — locator.py already
-  # hardcodes all of them: "lokey"/"lokey-client" are in _WATCHDOG_SERVICES
+  # hardcodes all of them: "lokey"/"lokey-client" were in _WATCHDOG_SERVICES (removed 2026-09-15)
   # (= essential) and in _PINNED_NAMES (= stationary, and dedup-exempt).
   # Written out so the policy file states the intent rather than relying on
   # the hardcoded floor.

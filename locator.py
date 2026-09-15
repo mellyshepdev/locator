@@ -1732,11 +1732,12 @@ def _is_name_locked(name):
 def get_policy_for_unit(unit):
     """Policy entries that apply to one unit — for lokey's local enforcement.
 
-    lokey enforces restart_when_stopped itself instead of waiting for
-    critical_service_watchdog() to queue a start. That watchdog needs the
-    registry to show the service OFFLINE *and* its node ONLINE, so it goes
-    blind precisely when registration is failing — which is exactly when a
-    stopped container most needs restarting. Serving the policy lets each
+    lokey enforces restart_when_stopped itself from its own Docker socket.
+    The locator-side critical_service_watchdog() that used to queue starts
+    was removed 2026-09-15: it keyed off registry OFFLINE status, which
+    flaps, so it "restarted" running services, and its hardcoded floor
+    (lokey, lokey-client, locator, apache on the long-gone unit2) named only
+    things a queued command can never restart. Serving the policy lets each
     agent act from its own Docker socket with no round trip, and keep acting
     from its cached copy when this locator is unreachable.
 
@@ -6581,83 +6582,6 @@ def url_status_checker():
         time.sleep(URL_CHECK_INTERVAL)
 
 
-# ── CRITICAL SERVICE WATCHDOG ────────────────────────────────────────────────
-
-# Services that must always be running — immediately queued for restart on OFFLINE
-_WATCHDOG_SERVICES = {
-    "apache",       # welcome site (unit2)
-    "lokey",        # lokey agent (all units)
-    "lokey-client", # lokey agent alt name
-    "locator",      # self (Docker restart=always is primary; this catches lokey-reported gaps)
-}
-_watchdog_cooldown: dict = {}   # key: (unit, container) → datetime of last restart attempt
-WATCHDOG_INTERVAL  = 15         # seconds between watchdog scans
-WATCHDOG_COOLDOWN  = 90         # seconds before re-queuing restart for same service
-WATCHDOG_MAX_AGE   = 3 * 86400  # ignore services OFFLINE for more than 3 days (stale entries)
-# locator.yml calls deployment_type "(informational)" in its own header comment,
-# yet is_essential() read it and the watchdog restarted on it - which is why
-# synapse/chatwoot-rails/traefik/databases were being "restarted" while running.
-# Default off until registry liveness can be trusted.
-WATCHDOG_TRUST_ESSENTIAL = os.environ.get("WATCHDOG_TRUST_ESSENTIAL", "false").lower() == "true"
-# A target that can never succeed (a service name with no matching container,
-# e.g. lokey-client where the container is lokey) otherwise loops forever.
-WATCHDOG_MAX_ATTEMPTS = int(os.environ.get("WATCHDOG_MAX_ATTEMPTS", "5"))
-_watchdog_attempts: dict = {}
-_watchdog_gaveup: set = set()
-
-def critical_service_watchdog():
-    """Immediately queues a start command when a critical service goes OFFLINE."""
-    while True:
-        time.sleep(WATCHDOG_INTERVAL)
-        now = datetime.now(timezone.utc)
-        with lock:
-            services_snap = {k: dict(v) for k, v in registry["services"].items()}
-            nodes_snap    = {k: dict(v) for k, v in registry["nodes"].items()}
-
-        for name, svc in services_snap.items():
-            base = name.split("@")[0].lower()
-            # locator.yml's "essential" flag is the editable half of this list.
-            # The hardcoded set stays as a floor, so a broken or missing policy
-            # file cannot leave the agents themselves unwatched.
-            in_floor = any(w == base for w in _WATCHDOG_SERVICES)
-            if not in_floor and not (WATCHDOG_TRUST_ESSENTIAL and is_essential(_policy_for(base))):
-                continue
-            if svc.get("status") != "OFFLINE":
-                continue
-            unit = svc.get("host", "")
-            if not unit:
-                continue
-            # Skip units that are themselves OFFLINE — commands will never be consumed
-            if nodes_snap.get(unit, {}).get("status") != "ONLINE":
-                continue
-            # Skip stale entries — services OFFLINE for more than WATCHDOG_MAX_AGE
-            offline_since = svc.get("offline_since")
-            if offline_since:
-                try:
-                    age = (now - datetime.fromisoformat(offline_since)).total_seconds()
-                    if age > WATCHDOG_MAX_AGE:
-                        continue
-                except (TypeError, ValueError):
-                    pass
-            key = (unit, name)
-            last = _watchdog_cooldown.get(key)
-            if last and (now - last).total_seconds() < WATCHDOG_COOLDOWN:
-                continue
-            if key in _watchdog_gaveup:
-                continue
-            attempts = _watchdog_attempts.get(key, 0) + 1
-            _watchdog_attempts[key] = attempts
-            if attempts > WATCHDOG_MAX_ATTEMPTS:
-                _watchdog_gaveup.add(key)
-                print(f"🛑 WATCHDOG: giving up on '{name}' on {unit} after "
-                      f"{WATCHDOG_MAX_ATTEMPTS} attempts — check that a container "
-                      f"by that name exists on {unit}")
-                continue
-            _watchdog_cooldown[key] = now
-            _queue_command(unit, name.split("@")[0], "start", source="watchdog")
-            print(f"🚨 WATCHDOG: queued restart for '{name}' on {unit} (attempt {attempts})")
-
-
 # ── STARTUP ─────────────────────────────────────────────────────────────────
 
 _workers_lock = threading.Lock()
@@ -6724,7 +6648,6 @@ def start_background_workers():
         url_status_checker,         # websites + serverless, no Docker needed
         _self_election,             # secondaries stop themselves if primary is up
         enforce_unit_placement,     # locator.yml "units:" placement
-        critical_service_watchdog,  # restarts apache/lokey/locator if OFFLINE
         secret_sweeper,             # finds plaintext credentials in the store
         bao_token_renewer,          # a periodic OpenBao token dies silently
         traccar_feeder,             # lokey's GPS fixes into Traccar
