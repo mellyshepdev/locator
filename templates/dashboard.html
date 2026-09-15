@@ -482,6 +482,24 @@
             border-radius: 50%;
             margin-right: 10px;
         }
+        /* Status pill: wraps a dot + label so the leading status column reads
+           as one badge. Online gets an underglow lining the whole box, not
+           just the dot, so it's readable at a glance down the leftmost column. */
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 10px 4px 8px;
+            border-radius: 12px;
+            border: 1px solid transparent;
+        }
+        .status-pill.is-online {
+            background: rgba(0, 255, 0, 0.10);
+            border-color: rgba(0, 255, 0, 0.4);
+            box-shadow: 0 0 10px rgba(0, 255, 0, 0.35), inset 0 0 8px rgba(0, 255, 0, 0.15);
+        }
+        .status-pill.is-offline {
+            opacity: 0.85;
+        }
         /* Whole-row device states. steps(1,end) gives a hard alternation
            between yellow and red rather than a soft crossfade, so a problem
            device is unmissable at a glance. */
@@ -1028,7 +1046,7 @@
                 </select>
                 <select id="grid-node-sort" onchange="dropdownSort(this.value)">
                     <option value="">SORT: DEFAULT</option>
-                    <option value="status">SORT: STATUS</option>
+                    <option value="status" selected>SORT: STATUS</option>
                     <option value="name">SORT: NAME</option>
                     <option value="mem">SORT: AVAILABLE MEM</option>
                     <option value="disk">SORT: AVAILABLE STORAGE</option>
@@ -1041,10 +1059,10 @@
 
             <div class="table-scroll"><table>
                 <thead><tr>
+                    <th data-sort-table="devices" data-sort-key="status" data-label="Status" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','status')">Status</th>
                     <th data-sort-table="devices" data-sort-key="name" data-label="Device" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','name')">Device</th>
                     <th data-sort-table="devices" data-sort-key="ip" data-label="IP Address" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','ip')">IP Address</th>
                     <th data-sort-table="devices" data-sort-key="type" data-label="Type / OS" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','type')">Type / OS</th>
-                    <th data-sort-table="devices" data-sort-key="status" data-label="Status" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','status')">Status</th>
                     <th style="color: #00f0ff;">Metadata</th>
                     <th data-sort-table="devices" data-sort-key="lastseen" data-label="Last Seen" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','lastseen')">Last Seen</th>
                 </tr></thead>
@@ -1062,10 +1080,10 @@
             </div>
             <div class="table-scroll"><table>
                 <thead><tr>
+                    <th data-sort-table="docker" data-sort-key="status" data-label="Status" style="cursor:pointer" onclick="sortByColumn('docker','status')">Status</th>
                     <th data-sort-table="docker" data-sort-key="name" data-label="Service" style="cursor:pointer" onclick="sortByColumn('docker','name')">Service</th>
                     <th class="col-host" data-sort-table="docker" data-sort-key="host" data-label="Node / Host" style="cursor:pointer" onclick="sortByColumn('docker','host')">Node / Host</th>
                                                                                 <th>Stats (CPU/RAM/Temp/Disk)</th>
-                    <th data-sort-table="docker" data-sort-key="status" data-label="Status" style="cursor:pointer" onclick="sortByColumn('docker','status')">Status</th>
                     <th>Metadata</th>
                     <th data-sort-table="docker" data-sort-key="lastseen" data-label="Last Seen" style="cursor:pointer" onclick="sortByColumn('docker','lastseen')">Last Seen</th>
                     <th title="Must always be running — the locator queues a restart as soon as it goes OFFLINE">Essential</th>
@@ -1104,10 +1122,10 @@
             </div>
             <div class="table-scroll"><table>
                 <thead><tr>
+                    <th data-sort-table="websites" data-sort-key="status" data-label="Status" style="color: #a200ff;cursor:pointer" onclick="sortByColumn('websites','status')">Status</th>
                     <th data-sort-table="websites" data-sort-key="name" data-label="Service" style="color: #a200ff;cursor:pointer" onclick="sortByColumn('websites','name')">Service</th>
                     <th class="col-host" data-sort-table="websites" data-sort-key="host" data-label="Node / Host" style="color: #a200ff;cursor:pointer" onclick="sortByColumn('websites','host')">Node / Host</th>
                     <th data-sort-table="websites" data-sort-key="url" data-label="URL" style="color: #a200ff;cursor:pointer" onclick="sortByColumn('websites','url')">URL</th>
-                    <th data-sort-table="websites" data-sort-key="status" data-label="Status" style="color: #a200ff;cursor:pointer" onclick="sortByColumn('websites','status')">Status</th>
                     <th style="color: #a200ff;">Metadata</th>
                     <th data-sort-table="websites" data-sort-key="lastseen" data-label="Last Seen" style="color: #a200ff;cursor:pointer" onclick="sortByColumn('websites','lastseen')">Last Seen</th>
                 </tr></thead>
@@ -1125,11 +1143,11 @@
             </div>
             <div class="table-scroll"><table>
                 <thead><tr>
+                    <th data-sort-table="vms" data-sort-key="status" data-label="Status" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','status')">Status</th>
                     <th data-sort-table="vms" data-sort-key="name" data-label="VM Name" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','name')">VM Name</th>
                     <th class="col-host" data-sort-table="vms" data-sort-key="host" data-label="Node / Host" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','host')">Node / Host</th>
                     <th data-sort-table="vms" data-sort-key="internal" data-label="Internal URL" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','internal')">Internal URL</th>
                     <th data-sort-table="vms" data-sort-key="url" data-label="Public URL" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','url')">Public URL</th>
-                    <th data-sort-table="vms" data-sort-key="status" data-label="Status" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','status')">Status</th>
                     <th style="color: #ff8800;">Metadata</th>
                     <th data-sort-table="vms" data-sort-key="lastseen" data-label="Last Seen" style="color: #ff8800;cursor:pointer" onclick="sortByColumn('vms','lastseen')">Last Seen</th>
                 </tr></thead>
@@ -1147,10 +1165,10 @@
             </div>
             <div class="table-scroll"><table>
                 <thead><tr>
+                    <th data-sort-table="serverless" data-sort-key="status" data-label="Status" style="color: #ff2d95;cursor:pointer" onclick="sortByColumn('serverless','status')">Status</th>
                     <th data-sort-table="serverless" data-sort-key="name" data-label="Service" style="color: #ff2d95;cursor:pointer" onclick="sortByColumn('serverless','name')">Service</th>
                     <th class="col-host" data-sort-table="serverless" data-sort-key="platform" data-label="Platform" style="color: #ff2d95;cursor:pointer" onclick="sortByColumn('serverless','platform')">Platform</th>
                     <th data-sort-table="serverless" data-sort-key="url" data-label="URL" style="color: #ff2d95;cursor:pointer" onclick="sortByColumn('serverless','url')">URL</th>
-                    <th data-sort-table="serverless" data-sort-key="status" data-label="Status" style="color: #ff2d95;cursor:pointer" onclick="sortByColumn('serverless','status')">Status</th>
                     <th style="color: #ff2d95;">Metadata</th>
                     <th data-sort-table="serverless" data-sort-key="lastseen" data-label="Last Seen" style="color: #ff2d95;cursor:pointer" onclick="sortByColumn('serverless','lastseen')">Last Seen</th>
                 </tr></thead>
@@ -1275,7 +1293,8 @@
     </div>
 
     <div id="view-exec" class="view-container" style="background:var(--grid-bg); background-image:linear-gradient(var(--neon-green-dim) 1px,transparent 1px),linear-gradient(90deg,var(--neon-green-dim) 1px,transparent 1px); background-size:30px 30px; overflow-y:auto; flex-direction:column;">
-        <div style="padding:16px 30px 8px; border-bottom:1px solid var(--neon-green); flex-shrink:0; display:flex; align-items:center; gap:20px; justify-content:space-between;">
+        <!-- see the matching comment on #view-metrics's header — same #ui-toggle overlap -->
+        <div style="padding:80px 30px 8px; border-bottom:1px solid var(--neon-green); flex-shrink:0; display:flex; align-items:center; gap:20px; justify-content:space-between;">
             <h2 style="margin:0; color:var(--neon-green); text-transform:uppercase; letter-spacing:4px; font-size:16px; text-shadow:0 0 10px var(--neon-green);">Remote Exec</h2>
             <button onclick="promptExecKey()" style="background:none; border:1px solid var(--neon-green); color:var(--neon-green); padding:5px 14px; font-family:inherit; font-size:11px; letter-spacing:1px; cursor:pointer; border-radius:3px;">SET ADMIN KEY</button>
         </div>
@@ -1315,7 +1334,10 @@
     </div>
 
     <div id="view-metrics" class="view-container" style="background:var(--grid-bg); background-image:linear-gradient(var(--neon-green-dim) 1px,transparent 1px),linear-gradient(90deg,var(--neon-green-dim) 1px,transparent 1px); background-size:30px 30px; overflow-y:auto; flex-direction:column;">
-        <div style="padding:16px 30px 8px; border-bottom:1px solid var(--neon-green); flex-shrink:0; display:flex; align-items:center; gap:20px; justify-content:space-between; flex-wrap:wrap;">
+        <!-- top padding clears #ui-toggle (position:absolute; top:20px; right:30px),
+             which otherwise sits directly over this row and hides it — worse the
+             more tabs #ui-toggle has, since it can wrap to a second line. -->
+        <div style="padding:80px 30px 8px; border-bottom:1px solid var(--neon-green); flex-shrink:0; display:flex; align-items:center; gap:20px; justify-content:space-between; flex-wrap:wrap;">
             <h2 style="margin:0; color:var(--neon-green); text-transform:uppercase; letter-spacing:4px; font-size:16px; text-shadow:0 0 10px var(--neon-green);">Metrics</h2>
             <div style="display:flex; gap:10px; align-items:center;">
                 <select id="metrics-range" onchange="onMetricsRangeChange()" style="background:#000; color:var(--neon-green); border:1px solid var(--neon-green); padding:8px; font-family:inherit; font-size:12px;">
@@ -1386,6 +1408,9 @@
             if (viewName === 'traccar') initTraccarMap();
             if (viewName === 'exec') loadScheduleList();
             if (viewName === 'metrics') loadMetrics();
+            // Map rendering is skipped by the poll loop while this view isn't
+            // visible (see loadRegistryData) — catch it up now that it is.
+            if (viewName === 'map' && lastRegistryData) renderMap(lastRegistryData);
         }
 
         // Deep link: /?view=grid opens straight into the Tactical Grid
@@ -1919,7 +1944,17 @@
         // State persists across the 10s poll refresh (loadRegistryData rebuilds
         // every table from scratch each cycle) because sorting happens on the
         // underlying data array before render, not as a one-off DOM reorder.
-        let columnSort = {}; // { devices: {key, dir}, docker: {...}, websites: {...}, vms: {...}, serverless: {...} }
+        // Every table starts sorted online-first on a fresh page load; clicking
+        // a column header (or the devices dropdown) still overrides this per
+        // table for the rest of the session, same as before.
+        let columnSort = {
+            devices:    { key: 'status', dir: 'asc' },
+            docker:     { key: 'status', dir: 'asc' },
+            websites:   { key: 'status', dir: 'asc' },
+            vms:        { key: 'status', dir: 'asc' },
+            serverless: { key: 'status', dir: 'asc' },
+        };
+        document.addEventListener('DOMContentLoaded', () => updateSortIndicators());
 
         function availMem(n) {
             if (n.mem_total_gb != null && n.mem_used_gb != null) return n.mem_total_gb - n.mem_used_gb;
@@ -2329,7 +2364,13 @@
                     lastSuccessfulUpdate = Date.now();
                     liveUpdateFailures = 0;
                     renderGrid(data);
-                    renderMap(data);
+                    // Full vis.js DataSet rebuild + physics layout — by far the
+                    // most expensive of these three. Was running every 10s in
+                    // the background no matter which tab was open; only pay
+                    // for it while the Map view is actually visible.
+                    if (document.getElementById('view-map').classList.contains('active')) {
+                        renderMap(data);
+                    }
                     renderNodeCards(data);
                     updateLiveStatusIndicator();
                 })
@@ -2481,13 +2522,14 @@
                     tr.classList.add('dev-alert');
                 }
                 tr.innerHTML = `
+                    <td>
+                        <span class="status-pill ${item.status === 'ONLINE' ? 'is-online' : 'is-offline'}">
+                            <span class="status-dot ${dotClass}"></span>${displayStatus}
+                        </span>
+                    </td>
                     <td style="font-weight:bold">${item.name || item.id}</td>
                     <td>${item.ip || item.tailscale_ip || 'unknown'}</td>
                     <td>${item.type || '-'}</td>
-                    <td>
-                        <span class="status-dot ${dotClass}"></span>
-                        ${displayStatus}
-                    </td>
                 `;
                 tr.appendChild(createMetaBadges(item.metadata));
                 tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_seen ? timeSince(item.last_seen) : 'Never'}</td>`;
@@ -2506,22 +2548,16 @@
                 const safeName = (item.name || '').replace(/'/g, "\\'");
 
                 tr.innerHTML = `
+                    <td>
+                        <span class="status-dot ${isOnline ? 'online' : 'offline'}"></span>
+                        ${isOnline ? 'ONLINE' : 'OFFLINE'}
+                    </td>
                     <td style="font-weight:bold">${item.name}</td>
                     <td class="col-host">${hostBadges}</td>
                 `;
 
                 // Stats Column
                 tr.appendChild(createStatsBadges(item));
-
-                // Clickable status toggle button
-                const statusTd = document.createElement('td');
-                statusTd.innerHTML = `
-                    <button class="status-toggle-btn ${isOnline ? 'is-online' : 'is-offline'}"
-                            onclick="event.stopPropagation(); openToggleModal('${safeName}', '${isOnline ? 'ONLINE' : 'OFFLINE'}')">
-                        <span class="status-dot ${isOnline ? 'online' : 'offline'}"></span>
-                        ${isOnline ? 'Shutdown' : 'Deploy'}
-                    </button>`;
-                tr.appendChild(statusTd);
 
                 tr.appendChild(createMetaBadges(item.metadata));
                 tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never'}</td>`;
@@ -2530,16 +2566,23 @@
                 tr.appendChild(policyCell(item, 'essential'));
                 tr.appendChild(policyCell(item, 'stationary'));
 
-                const migTd = document.createElement('td');
+                // Actions: Shutdown/Deploy and Migrate together at the end,
+                // separated from the status light in the leading column.
+                const actionsTd = document.createElement('td');
+                actionsTd.style.cssText = 'display:flex; gap:6px; flex-wrap:wrap;';
                 const safeId = (item.id || '').replace(/'/g, "\\'");
                 const safeHost = (item.host || '').replace(/'/g, "\\'");
-                migTd.innerHTML = `
+                actionsTd.innerHTML = `
+                    <button class="status-toggle-btn ${isOnline ? 'is-online' : 'is-offline'}"
+                            onclick="event.stopPropagation(); openToggleModal('${safeName}', '${isOnline ? 'ONLINE' : 'OFFLINE'}')">
+                        ${isOnline ? 'Shutdown' : 'Deploy'}
+                    </button>
                     <button class="status-toggle-btn"
                             title="Queue a migration to another node"
                             onclick="event.stopPropagation(); openMigrateModal('${safeId}','${safeName}','${safeHost}')">
                         Migrate
                     </button>`;
-                tr.appendChild(migTd);
+                tr.appendChild(actionsTd);
                 tr.addEventListener('click', () => openDeviceModal(item));
                 tbodyDocker.appendChild(tr);
             });
@@ -2553,13 +2596,13 @@
                 const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:${hostColor(h)};color:${hostColor(h)}">${h}</span>`).join('');
 
                 tr.innerHTML = `
-                    <td style="font-weight:bold">${item.name}</td>
-                    <td class="col-host">${hostBadges}</td>
-                    <td><a href="${item.url}" target="_blank" onclick="event.stopPropagation()">${item.url}</a></td>
                     <td>
                         <span class="status-dot ${item.status === 'ONLINE' ? 'online' : 'offline'}"></span>
                         ${item.status}
                     </td>
+                    <td style="font-weight:bold">${item.name}</td>
+                    <td class="col-host">${hostBadges}</td>
+                    <td><a href="${item.url}" target="_blank" onclick="event.stopPropagation()">${item.url}</a></td>
                 `;
                 tr.appendChild(createMetaBadges(item.metadata));
                 tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never'}</td>`;
@@ -2577,14 +2620,14 @@
                 const isOnline = item.status === 'ONLINE';
 
                 tr.innerHTML = `
-                    <td style="font-weight:bold;color:#ff8800">${item.name}</td>
-                    <td class="col-host">${hostBadges}</td>
-                    <td>${item.internal ? `<a href="${item.internal}" target="_blank" style="color:#ff8800" onclick="event.stopPropagation()">${item.internal}</a>` : '-'}</td>
-                    <td>${item.url ? `<a href="${item.url}" target="_blank" style="color:#ff8800" onclick="event.stopPropagation()">${item.url}</a>` : '-'}</td>
                     <td>
                         <span class="status-dot ${isOnline ? 'online' : 'offline'}" style="${isOnline ? 'background:#ff8800;box-shadow:0 0 8px #ff8800' : ''}"></span>
                         <span style="color:${isOnline ? '#ff8800' : '#666'}">${item.status}</span>
                     </td>
+                    <td style="font-weight:bold;color:#ff8800">${item.name}</td>
+                    <td class="col-host">${hostBadges}</td>
+                    <td>${item.internal ? `<a href="${item.internal}" target="_blank" style="color:#ff8800" onclick="event.stopPropagation()">${item.internal}</a>` : '-'}</td>
+                    <td>${item.url ? `<a href="${item.url}" target="_blank" style="color:#ff8800" onclick="event.stopPropagation()">${item.url}</a>` : '-'}</td>
                 `;
                 tr.appendChild(createMetaBadges(item.metadata));
                 tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never'}</td>`;
@@ -2601,13 +2644,13 @@
                 const isOnline = item.status === 'ONLINE';
 
                 tr.innerHTML = `
-                    <td style="font-weight:bold;color:#ff2d95">${item.name}</td>
-                    <td><span class="node-badge" style="border-color:#ff2d95;color:#ff2d95">${platform}</span></td>
-                    <td>${item.url ? `<a href="${item.url}" target="_blank" style="color:#ff2d95" onclick="event.stopPropagation()">${item.url}</a>` : '-'}</td>
                     <td>
                         <span class="status-dot ${isOnline ? 'online' : 'offline'}" style="${isOnline ? 'background:#ff2d95;box-shadow:0 0 8px #ff2d95' : ''}"></span>
                         <span style="color:${isOnline ? '#ff2d95' : '#666'}">${item.status}</span>
                     </td>
+                    <td style="font-weight:bold;color:#ff2d95">${item.name}</td>
+                    <td><span class="node-badge" style="border-color:#ff2d95;color:#ff2d95">${platform}</span></td>
+                    <td>${item.url ? `<a href="${item.url}" target="_blank" style="color:#ff2d95" onclick="event.stopPropagation()">${item.url}</a>` : '-'}</td>
                 `;
                 tr.appendChild(createMetaBadges(item.metadata));
                 tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_heartbeat ? timeSince(item.last_heartbeat) : 'Never'}</td>`;
