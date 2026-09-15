@@ -3775,8 +3775,8 @@ def load_policy():
                 # public_wake — STRICTLY OPT-IN, exactly like idle_stop. Lets an
                 # anonymous visitor wake this one container and nothing else.
                 "public_wake": bool(cfg.get("public_wake", False)),
-                # wake_with — dependencies started alongside it. agent-0 needs
-                # ollama; reech needs its db. Declared here so a caller asks for
+                # wake_with — dependencies started alongside it. reech needs
+                # reech-oauth; forge needs forge-relay. Declared here so a caller asks for
                 # ONE name and locator expands it, instead of every Traefik file
                 # and every link having to know the dependency list.
                 "wake_with": _as_list(cfg.get("wake_with")),
@@ -5797,7 +5797,7 @@ def _find_service_entry(container):
     # paths and older hostname conventions, and they can ALL be OFFLINE - a
     # STOPPED container has no online record anywhere, which is exactly when
     # something wants to start it. With only the first two keys the choice
-    # among equals fell to insertion order. For ollama that picked between a
+    # among equals fell to insertion order. For one service that picked between a
     # record attributed to unit1 (the dead laptop) and one to the pre-rename
     # host "BlackSheepUnit4", which no lokey polls under - either way the start
     # command was queued somewhere nothing would ever execute it, and the wake
@@ -5869,7 +5869,7 @@ def shutdown_container(name):
 # up work — and nothing else. No registry data is disclosed: see wake_page for
 # why the page no longer reads /services/<name>.
 PUBLIC_WAKE = {n.strip() for n in os.environ.get(
-    "PUBLIC_WAKE", "forge,forge-relay,agent-0,rasa,ollama").split(",") if n.strip()}
+    "PUBLIC_WAKE", "forge,forge-relay,agent-0,rasa").split(",") if n.strip()}
 
 # Hostnames that ARE locator. Anything else arriving at /wake got here through
 # another service's Traefik errors middleware, which serves this page under the
@@ -6003,12 +6003,12 @@ def wake_page(container):
     """Click-to-wake: queue the start command and show a page that comes back
     once the service is up.
 
-    Accepts a COMMA-SEPARATED list ("agent-0,ollama") so one request wakes a
-    service together with the dependencies it calls directly. agent-0 and rasa
-    both reach ollama over unit4 rather than through Traefik, so no HTTP
-    request ever passes through ollama and nothing in the request path can
-    wake it on its own. Without this, waking agent-0 after an idle period
-    gives you a live UI whose first model call fails against a stopped ollama.
+    Accepts a COMMA-SEPARATED list ("reech,reech-oauth") so one request wakes a
+    service together with the dependencies it calls directly -- ones reached
+    over the docker network or tailnet rather than through Traefik, so no HTTP
+    request ever passes through them and nothing in the request path can wake
+    them on its own. (The LLM backend is llama.cpp under systemd on unit7 and
+    is never idle-stopped, so nothing needs waking for it.)
 
     The FIRST name is the primary: it is what gets displayed, waited on, and
     redirected to. The rest are started silently.

@@ -59,7 +59,7 @@ finds, and `/api/wake/triggers` will match on any of them.
 ### `GET /wake/<container>` — the wake page
 
 Queues the start and returns a page that comes back when the service is up.
-Accepts a comma-separated list (`/wake/agent-0,ollama`); the first name is the
+Accepts a comma-separated list (`/wake/reech,reech-oauth`); the first name is the
 primary. `wake_with` from policy is merged in automatically, so the URL does
 not need the dependency list.
 
@@ -191,8 +191,8 @@ unit8 on 2026-09-11).
 | `forge-relay` | same host, `/pad` `/view` | ✅ `forge.yml` | `forge-relay@http` (dynamic) | ✅ |
 | `welcome-hub` | `welcome.theofficialblacksheepco.com` | ✅ `welcome-hub.yml` | `welcome-hub@http` (dynamic) | ✅ |
 | `ops-dashboard` (+`pgadmin_ui`, `inventory-server`, `inventory-api`, `inventory-inventory-1`) | `ops.theofficialblacksheepco.com` visit | ✅ page-driven, `ops-dashboard.yml` (2026-09-11) — own 502 path too | `ops-dashboard` local docker-net (stationary); `inventory-app@http` (dynamic) | ✅ |
-| `agent-0` (+`ollama`) | `a0.theofficialblacksheepco.online` | ✅ `agent-zero.yml` | static file | — |
-| `rasa` (+`ollama`) | `rasa.theofficialblacksheepco.online` | ✅ `rasa.yml` | static file | — |
+| `agent-0` | `a0.theofficialblacksheepco.online` | ✅ `agent-zero.yml` | static file | — |
+| `rasa` | `rasa.theofficialblacksheepco.online` | ✅ `rasa.yml` | static file | — |
 | `searchsearcher-app` (+ its postgres) | `search.…com`, `www.…com`, `link: welcome:search` + `main:search` | ✅ `searchsearcher.yml` (2026-09-13) | static file | ✅ 200 |
 | `reech` (+`reech-oauth`) | `portal.theofficialblacksheepco.com` visit | ✅ page-driven, `client-portal.yml` (2026-09-03) | static file | ✅ 302 |
 | `reech-oauth` itself | `reech.prime-quality.online` | ❌ **still none** — its router is a container LABEL, so stopping it deletes the route and the host 404s with nothing to wake | static file | ✅ 302 |

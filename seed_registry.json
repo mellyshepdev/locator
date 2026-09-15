@@ -37,12 +37,6 @@
       "port": 5004,
       "type": "container"
     },
-    "ollama": {
-      "internal": "http://ollama:11434",
-      "host": "unit1",
-      "port": 11434,
-      "type": "container"
-    },
     "openvpn": {
       "internal": "http://openvpn:1194",
       "host": "unit1",
