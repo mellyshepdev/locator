@@ -2542,8 +2542,8 @@
                 }
                 tr.innerHTML = `
                     <td>
-                        <span class="status-pill ${item.status === 'ONLINE' ? 'is-online' : 'is-offline'}">
-                            <span class="status-dot ${dotClass}"></span>${displayStatus}
+                        <span class="status-pill ${item.status === 'ONLINE' ? 'is-online' : 'is-offline'}" title="${displayStatus}">
+                            <span class="status-dot ${dotClass}"></span>
                         </span>
                     </td>
                     <td style="font-weight:bold">${item.name || item.id}</td>
@@ -2568,8 +2568,7 @@
 
                 tr.innerHTML = `
                     <td>
-                        <span class="status-dot ${isOnline ? 'online' : 'offline'}"></span>
-                        ${isOnline ? 'ONLINE' : 'OFFLINE'}
+                        <span class="status-dot ${isOnline ? 'online' : 'offline'}" title="${isOnline ? 'ONLINE' : 'OFFLINE'}"></span>
                     </td>
                     <td style="font-weight:bold">${item.name}</td>
                     <td class="col-host">${hostBadges}</td>
@@ -2616,8 +2615,7 @@
 
                 tr.innerHTML = `
                     <td>
-                        <span class="status-dot ${item.status === 'ONLINE' ? 'online' : 'offline'}"></span>
-                        ${item.status}
+                        <span class="status-dot ${item.status === 'ONLINE' ? 'online' : 'offline'}" title="${item.status}"></span>
                     </td>
                     <td style="font-weight:bold">${item.name}</td>
                     <td class="col-host">${hostBadges}</td>
@@ -2640,8 +2638,7 @@
 
                 tr.innerHTML = `
                     <td>
-                        <span class="status-dot ${isOnline ? 'online' : 'offline'}" style="${isOnline ? 'background:#ff8800;box-shadow:0 0 8px #ff8800' : ''}"></span>
-                        <span style="color:${isOnline ? '#ff8800' : '#666'}">${item.status}</span>
+                        <span class="status-dot ${isOnline ? 'online' : 'offline'}" style="${isOnline ? 'background:#ff8800;box-shadow:0 0 8px #ff8800' : ''}" title="${item.status}"></span>
                     </td>
                     <td style="font-weight:bold;color:#ff8800">${item.name}</td>
                     <td class="col-host">${hostBadges}</td>
@@ -2664,8 +2661,7 @@
 
                 tr.innerHTML = `
                     <td>
-                        <span class="status-dot ${isOnline ? 'online' : 'offline'}" style="${isOnline ? 'background:#ff2d95;box-shadow:0 0 8px #ff2d95' : ''}"></span>
-                        <span style="color:${isOnline ? '#ff2d95' : '#666'}">${item.status}</span>
+                        <span class="status-dot ${isOnline ? 'online' : 'offline'}" style="${isOnline ? 'background:#ff2d95;box-shadow:0 0 8px #ff2d95' : ''}" title="${item.status}"></span>
                     </td>
                     <td style="font-weight:bold;color:#ff2d95">${item.name}</td>
                     <td><span class="node-badge" style="border-color:#ff2d95;color:#ff2d95">${platform}</span></td>

@@ -46,6 +46,16 @@ Service:
     units: "8"
     instances: 1
 
+  # Not in _PINNED_NAMES and had no locator.yml entry at all until now — the
+  # exact same unprotected shape as the mariadb-11.4 incident (2026-08-09,
+  # see BALANCE_ENABLED history): local vault DB, migration moves the compose
+  # file but not the volume, so a migrate would orphan the real vault data.
+  vaultwarden:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
   postgres-inventory-backup:
     deployment_type: essential
     location_type: stationary

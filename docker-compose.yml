@@ -62,7 +62,16 @@ services:
       - PYTHONUNBUFFERED=1
       - LOCATOR_IS_PRIMARY=false
       - SELF_CONTAINER_NAME=locator
-      - BALANCE_ENABLED=false
+      # Was off since 2026-08-09 after the balancer queued a move of mariadb-11.4
+      # (PowerDNS's DB) off an exact-vs-substring pin-check bug — fixed same day
+      # (unified pin-check, locator.yml's stationary flag actually wired up), but
+      # the switch itself was never flipped back on. Re-enabled 2026-09-15 after
+      # re-verifying _is_pinned() live against every critical DB/edge service
+      # (mariadb-11.4, comms-postgres, mariadb-pdns-primary, postgres,
+      # postgres-inventory-backup, matomo-db, synapse, chatwoot-rails, traefik,
+      # lokey, pdns, dnsdist, redis, wg-easy) and adding the one real remaining
+      # gap found: vaultwarden had no locator.yml entry at all.
+      - BALANCE_ENABLED=true
       - ELECTION_DRY_RUN=false
       - DISK_VETO_PERCENT=97
       - DATABASE_URL=${DATABASE_URL}
