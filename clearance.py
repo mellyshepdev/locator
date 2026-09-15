@@ -297,6 +297,7 @@ VIEW_CLEARANCE = {
     "traccar": STAFF,
     "yamls":   ENGINEER,
     "exec":    ROOT,
+    "metrics": ENGINEER,
 }
 
 # ── FIELD REDACTION ─────────────────────────────────────────────────────────

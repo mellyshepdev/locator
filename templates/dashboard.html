@@ -712,7 +712,13 @@
             transition: background 0.2s, transform 0.15s;
         }
         .metric-card .mc-maximize:hover { background: rgba(0, 240, 255, 0.25); transform: scale(1.1); }
-        .mc-badge.online  { color: var(--neon-green); border-color: var(--neon-green); background: rgba(0,255,0,0.1); }
+        .mc-badge.online  {
+            color: var(--neon-green); border-color: var(--neon-green); background: rgba(0,255,0,0.1);
+            /* Same idea as .online's dot glow -- a plain 0.1-alpha fill read as
+               barely-lit against the card's own colored border/shadow, so ONLINE
+               and OFFLINE badges looked almost the same at a glance. */
+            box-shadow: 0 0 8px rgba(0,255,0,0.65), 0 0 16px rgba(0,255,0,0.35);
+        }
         .mc-badge.stale   { color: #ffe600; border-color: #ffe600; background: rgba(255,230,0,0.1); }
         .mc-badge.offline { color: var(--danger); border-color: var(--danger); background: rgba(255,0,60,0.1); }
         .metric-card .mc-row { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 3px; }
@@ -896,6 +902,9 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
+<!-- Chart.js (Metrics tab) -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+
 </head>
 <body>
 
@@ -913,6 +922,7 @@
         <button class="toggle-btn" data-view="traccar" onclick="switchView('traccar')">Traccar Map</button>
         <button class="toggle-btn" data-view="yamls" onclick="switchView('yamls')">YAMLs</button>
         <button class="toggle-btn" data-view="exec" onclick="switchView('exec')">Exec</button>
+        <button class="toggle-btn" data-view="metrics" onclick="switchView('metrics')">Metrics</button>
         <span id="clearance-badge" style="display:none; margin-left:14px; align-self:center; font-family:'Courier New',monospace; font-size:10px; letter-spacing:2px; color:var(--neon-green); border:1px solid var(--neon-green); border-radius:3px; padding:3px 9px; opacity:0.85;"></span>
     </div>
 
@@ -1304,6 +1314,57 @@
         </div>
     </div>
 
+    <div id="view-metrics" class="view-container" style="background:var(--grid-bg); background-image:linear-gradient(var(--neon-green-dim) 1px,transparent 1px),linear-gradient(90deg,var(--neon-green-dim) 1px,transparent 1px); background-size:30px 30px; overflow-y:auto; flex-direction:column;">
+        <div style="padding:16px 30px 8px; border-bottom:1px solid var(--neon-green); flex-shrink:0; display:flex; align-items:center; gap:20px; justify-content:space-between; flex-wrap:wrap;">
+            <h2 style="margin:0; color:var(--neon-green); text-transform:uppercase; letter-spacing:4px; font-size:16px; text-shadow:0 0 10px var(--neon-green);">Metrics</h2>
+            <div style="display:flex; gap:10px; align-items:center;">
+                <select id="metrics-range" onchange="onMetricsRangeChange()" style="background:#000; color:var(--neon-green); border:1px solid var(--neon-green); padding:8px; font-family:inherit; font-size:12px;">
+                    <option value="today">Today</option>
+                    <option value="yesterday">Yesterday</option>
+                    <option value="7d" selected>Last 7 days</option>
+                    <option value="30d">Last 30 days</option>
+                    <option value="custom">Custom range</option>
+                </select>
+                <input id="metrics-since" type="date" style="display:none; background:#000; color:var(--neon-green); border:1px solid var(--neon-green); padding:8px; font-family:inherit; font-size:12px;">
+                <input id="metrics-until" type="date" style="display:none; background:#000; color:var(--neon-green); border:1px solid var(--neon-green); padding:8px; font-family:inherit; font-size:12px;">
+                <button onclick="loadMetrics()" style="background:var(--neon-green); color:#000; border:none; padding:8px 20px; font-family:inherit; font-size:12px; font-weight:bold; letter-spacing:2px; cursor:pointer; border-radius:3px;">APPLY</button>
+            </div>
+        </div>
+        <div style="padding:20px 30px; display:flex; flex-direction:column; gap:28px;">
+
+            <!-- Summary -->
+            <div>
+                <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Summary</h3>
+                <div id="metrics-summary" style="font-size:13px; color:var(--neon-green);">Loading...</div>
+            </div>
+
+            <!-- Per-container table -->
+            <div>
+                <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Containers</h3>
+                <div style="max-width:100%; overflow-x:auto;">
+                    <table style="width:100%; border-collapse:collapse; font-size:12px;">
+                        <thead>
+                            <tr style="border-bottom:1px solid var(--neon-green); text-align:left; color:var(--neon-green);">
+                                <th style="padding:6px;">CONTAINER</th><th style="padding:6px;">HOST</th>
+                                <th style="padding:6px;">UPTIME</th><th style="padding:6px;">AVG RAM</th>
+                                <th style="padding:6px;">MAX RAM</th><th style="padding:6px;">LAST SEEN</th>
+                            </tr>
+                        </thead>
+                        <tbody id="metrics-tbody"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- RAM-over-time chart for a selected container -->
+            <div id="metrics-chart-wrap" style="display:none;">
+                <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">
+                    RAM over time — <span id="metrics-chart-title"></span>
+                </h3>
+                <canvas id="metrics-chart" height="90"></canvas>
+            </div>
+        </div>
+    </div>
+
     <script>
         // ── UI TOGGLE LOGIC ──
         function switchView(viewName) {
@@ -1315,7 +1376,7 @@
             document.querySelectorAll('.toggle-btn').forEach(btn => btn.classList.remove('active'));
             document.querySelectorAll('.view-container').forEach(vc => vc.classList.remove('active'));
 
-            const viewMap = { map: 'view-map', grid: 'view-grid', '3js': 'view-3js', traccar: 'view-traccar', yamls: 'view-yamls', exec: 'view-exec' };
+            const viewMap = { map: 'view-map', grid: 'view-grid', '3js': 'view-3js', traccar: 'view-traccar', yamls: 'view-yamls', exec: 'view-exec', metrics: 'view-metrics' };
             const viewId = viewMap[viewName] || 'view-map';
             const btn = document.querySelector(`#ui-toggle .toggle-btn[data-view="${viewName}"]`);
             if (btn) btn.classList.add('active');
@@ -1324,6 +1385,7 @@
             if (viewName === 'yamls') loadYamlList();
             if (viewName === 'traccar') initTraccarMap();
             if (viewName === 'exec') loadScheduleList();
+            if (viewName === 'metrics') loadMetrics();
         }
 
         // Deep link: /?view=grid opens straight into the Tactical Grid
@@ -3534,6 +3596,126 @@
                 notify(`Toggle failed: ${err.message}`, 'error');
                 loadScheduleList();
             }
+        }
+
+        // ── METRICS TAB ──
+        // Backed by container_metrics (see db.py) — one row per container per
+        // lokey heartbeat. Unlike the rest of the registry, this is historical
+        // data, so every fetch here is scoped to a since/until range from the
+        // picker instead of just reflecting current state.
+        let metricsChart = null;
+
+        function onMetricsRangeChange() {
+            const custom = document.getElementById('metrics-range').value === 'custom';
+            document.getElementById('metrics-since').style.display = custom ? '' : 'none';
+            document.getElementById('metrics-until').style.display = custom ? '' : 'none';
+            if (!custom) loadMetrics();
+        }
+
+        function metricsRangeBounds() {
+            const range = document.getElementById('metrics-range').value;
+            const now = new Date();
+            const startOfDay = d => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+            if (range === 'today') {
+                return { since: startOfDay(now).toISOString(), until: now.toISOString() };
+            }
+            if (range === 'yesterday') {
+                const y = new Date(now); y.setDate(y.getDate() - 1);
+                return { since: startOfDay(y).toISOString(), until: startOfDay(now).toISOString() };
+            }
+            if (range === '30d') {
+                const since = new Date(now); since.setDate(since.getDate() - 30);
+                return { since: since.toISOString(), until: now.toISOString() };
+            }
+            if (range === 'custom') {
+                const since = document.getElementById('metrics-since').value;
+                const until = document.getElementById('metrics-until').value;
+                if (!since || !until) { notify('Pick both a since and until date', 'error'); return null; }
+                const untilEnd = new Date(until); untilEnd.setDate(untilEnd.getDate() + 1); // inclusive end day
+                return { since: new Date(since).toISOString(), until: untilEnd.toISOString() };
+            }
+            // default: 7d
+            const since = new Date(now); since.setDate(since.getDate() - 7);
+            return { since: since.toISOString(), until: now.toISOString() };
+        }
+
+        async function loadMetrics() {
+            const bounds = metricsRangeBounds();
+            if (!bounds) return;
+            const { since, until } = bounds;
+            const qs = `since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`;
+
+            const summaryEl = document.getElementById('metrics-summary');
+            const tbody = document.getElementById('metrics-tbody');
+            summaryEl.textContent = 'Loading...';
+            tbody.innerHTML = '<tr><td colspan="6" style="padding:10px;color:#555;">Loading...</td></tr>';
+
+            try {
+                const summary = await (await fetch(`/api/metrics/summary?${qs}`)).json();
+                if (summary.error) throw new Error(summary.error);
+                const byHost = (summary.by_host || []).map(h => `${h.host || 'unknown'}: ${h.containers}`).join(' · ');
+                summaryEl.textContent = `${summary.total_containers} container(s) active in range` + (byHost ? ` — ${byHost}` : '');
+            } catch (err) {
+                summaryEl.textContent = `Error: ${err.message}`;
+            }
+
+            try {
+                const rows = await (await fetch(`/api/metrics/containers?${qs}`)).json();
+                if (rows.error) throw new Error(rows.error);
+                if (!rows.length) { tbody.innerHTML = '<tr><td colspan="6" style="padding:10px;color:#555;">No container activity in this range.</td></tr>'; return; }
+                tbody.innerHTML = rows.map(r => `
+                    <tr style="border-bottom:1px solid rgba(0,255,0,0.15); cursor:pointer;" onclick="showContainerHistory('${r.service_id}', '${since}', '${until}')">
+                        <td style="padding:6px;">${r.service_id}</td>
+                        <td style="padding:6px;">${(r.host || '').toUpperCase()}</td>
+                        <td style="padding:6px;">${r.current_status === 'ONLINE' && r.started_at ? timeSince(r.started_at) : 'offline'}</td>
+                        <td style="padding:6px;">${r.avg_mem_mb != null ? r.avg_mem_mb.toFixed(0) + ' MB' : '—'}</td>
+                        <td style="padding:6px;">${r.max_mem_mb != null ? r.max_mem_mb.toFixed(0) + ' MB' : '—'}</td>
+                        <td style="padding:6px;">${timeSince(r.last_seen)}</td>
+                    </tr>
+                `).join('');
+            } catch (err) {
+                tbody.innerHTML = `<tr><td colspan="6" style="padding:10px;color:var(--danger);">${err.message}</td></tr>`;
+            }
+        }
+
+        async function showContainerHistory(serviceId, since, until) {
+            const wrap = document.getElementById('metrics-chart-wrap');
+            const title = document.getElementById('metrics-chart-title');
+            wrap.style.display = '';
+            title.textContent = serviceId;
+            let points = [];
+            try {
+                const qs = `service_id=${encodeURIComponent(serviceId)}&since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`;
+                points = await (await fetch(`/api/metrics/history?${qs}`)).json();
+                if (points.error) throw new Error(points.error);
+            } catch (err) {
+                notify(`Failed to load history: ${err.message}`, 'error');
+                return;
+            }
+            const ctx = document.getElementById('metrics-chart').getContext('2d');
+            if (metricsChart) metricsChart.destroy();
+            metricsChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: points.map(p => new Date(p.sampled_at).toLocaleString()),
+                    datasets: [{
+                        label: 'RAM (MB)',
+                        data: points.map(p => p.mem_usage_mb),
+                        borderColor: '#00ff00',
+                        backgroundColor: 'rgba(0,255,0,0.1)',
+                        pointRadius: 0,
+                        tension: 0.2,
+                    }],
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        x: { ticks: { color: '#00ff00', maxTicksLimit: 8 }, grid: { color: 'rgba(0,255,0,0.1)' } },
+                        y: { ticks: { color: '#00ff00' }, grid: { color: 'rgba(0,255,0,0.1)' } },
+                    },
+                    plugins: { legend: { labels: { color: '#00ff00' } } },
+                },
+            });
         }
 
     </script>

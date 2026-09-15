@@ -1320,6 +1320,16 @@ def register_service():
     if host != "unknown":
         _enforce_dedup(name, host)
 
+    if _category == "docker containers":
+        _cm = data.get("metadata") or {}
+        if _cm.get("mem_usage_mb") is not None:
+            try:
+                db.insert_container_metric(service_id, host,
+                                            _cm.get("mem_usage_mb"),
+                                            _cm.get("mem_percent"))
+            except Exception as e:
+                print(f"⚠️  Failed to persist container metric: {e}")
+
     _new_battery = (registry["services"][service_id].get("metadata") or {}).get("battery_percent")
     if _new_battery is not None:
         _check_battery_threshold(service_id, _new_battery, _prev_battery)
@@ -2089,6 +2099,63 @@ def get_nodes():
     """Return the known nodes the caller is cleared to see."""
     with lock:
         return jsonify(clearance.project(registry["nodes"]))
+
+
+def _metrics_range_args():
+    """Parse since/until query params (ISO timestamps, required) shared by
+    every /api/metrics/* route. Returns (since, until) or a Flask error
+    response tuple to short-circuit the caller."""
+    since = request.args.get("since")
+    until = request.args.get("until")
+    if not since or not until:
+        return None, None, (jsonify({"error": "since and until (ISO timestamps) are required"}), 400)
+    return since, until, None
+
+
+@app.route("/api/metrics/summary", methods=["GET"])
+def metrics_summary():
+    """Distinct containers active in [since, until), broken down by host.
+    Backs the Metrics tab's time-range picker."""
+    since, until, err = _metrics_range_args()
+    if err:
+        return err
+    try:
+        result = db.metrics_summary(since, until)
+    except Exception as e:
+        print(f"⚠️  Failed to read metrics summary: {e}")
+        return jsonify({"error": "metrics unavailable"}), 503
+    if result is None:
+        return jsonify({"error": "metrics unavailable"}), 503
+    return jsonify(result)
+
+
+@app.route("/api/metrics/containers", methods=["GET"])
+def metrics_containers():
+    """Per-container rollup (first/last seen, avg/max RAM) in [since, until)."""
+    since, until, err = _metrics_range_args()
+    if err:
+        return err
+    try:
+        return jsonify(db.metrics_containers(since, until))
+    except Exception as e:
+        print(f"⚠️  Failed to read metrics containers: {e}")
+        return jsonify({"error": "metrics unavailable"}), 503
+
+
+@app.route("/api/metrics/history", methods=["GET"])
+def metrics_history():
+    """Ordered raw RAM samples for one container, for the history chart."""
+    service_id = request.args.get("service_id")
+    if not service_id:
+        return jsonify({"error": "service_id is required"}), 400
+    since, until, err = _metrics_range_args()
+    if err:
+        return err
+    try:
+        return jsonify(db.metrics_history(service_id, since, until))
+    except Exception as e:
+        print(f"⚠️  Failed to read metrics history: {e}")
+        return jsonify({"error": "metrics unavailable"}), 503
 
 
 @app.route("/nodes", methods=["POST"])

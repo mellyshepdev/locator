@@ -129,6 +129,24 @@ CREATE TABLE IF NOT EXISTS registry_meta (
     value TEXT
 );
 
+-- One row per container per heartbeat (~60s, lokey's TICK_RATE). Backs the
+-- dashboard's Metrics tab (containers-in-range, RAM-over-time) -- nodes/
+-- services above only ever hold the LATEST reading, so history has to live
+-- here instead. Pruned to 30 days by a nightly archive job on the box this
+-- database actually runs on; see locator-metrics-archive.sh.
+CREATE TABLE IF NOT EXISTS container_metrics (
+    id           BIGSERIAL PRIMARY KEY,
+    service_id   TEXT NOT NULL,   -- "name@host", same key as services table
+    host         TEXT,            -- denormalized unit name, for filtering
+    mem_usage_mb REAL,
+    mem_percent  REAL,
+    sampled_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_container_metrics_service_sampled
+    ON container_metrics (service_id, sampled_at DESC);
+CREATE INDEX IF NOT EXISTS idx_container_metrics_sampled_brin
+    ON container_metrics USING BRIN (sampled_at);
+
 CREATE TABLE IF NOT EXISTS events (
     id         BIGSERIAL PRIMARY KEY,
     event_type TEXT NOT NULL,
@@ -298,6 +316,97 @@ def list_events(limit=200):
             {"id": r["id"], "type": r["event_type"], "timestamp": r["created_at"].isoformat(), **r["data"]}
             for r in reversed(rows)
         ]
+
+
+def insert_container_metric(service_id, host, mem_usage_mb, mem_percent):
+    """Fire-and-forget single-row insert, called from register_service()
+    OUTSIDE the in-memory registry lock. Never let a slow/unavailable DB
+    block a heartbeat -- see the tailnet-round-trip incident documented on
+    save_registry_snapshot() above."""
+    with _conn() as conn:
+        if conn is None:
+            return
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO container_metrics (service_id, host, mem_usage_mb, mem_percent)
+                   VALUES (%s, %s, %s, %s)""",
+                (service_id, host, mem_usage_mb, mem_percent),
+            )
+
+
+def metrics_summary(since, until):
+    """Distinct containers active in [since, until), broken down by host."""
+    with _conn() as conn:
+        if conn is None:
+            return None
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT host, COUNT(DISTINCT service_id) AS containers
+                   FROM container_metrics
+                   WHERE sampled_at >= %s AND sampled_at < %s
+                   GROUP BY host ORDER BY host""",
+                (since, until),
+            )
+            by_host = cur.fetchall()
+            cur.execute(
+                """SELECT COUNT(DISTINCT service_id) AS total
+                   FROM container_metrics
+                   WHERE sampled_at >= %s AND sampled_at < %s""",
+                (since, until),
+            )
+            total = cur.fetchone()["total"]
+        return {"total_containers": total, "by_host": by_host}
+
+
+def metrics_containers(since, until):
+    """Per-container rollup in [since, until): first/last seen, avg/max RAM,
+    plus real uptime via a join against services.data->metadata->started_at
+    (the exact docker container start time, reported by lokey -- NOT derived
+    from this table's sampling window, which would understate uptime for
+    anything already running before we started collecting)."""
+    with _conn() as conn:
+        if conn is None:
+            return []
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT cm.service_id, cm.host,
+                          MIN(cm.sampled_at) AS first_seen,
+                          MAX(cm.sampled_at) AS last_seen,
+                          AVG(cm.mem_usage_mb) AS avg_mem_mb,
+                          MAX(cm.mem_usage_mb) AS max_mem_mb,
+                          AVG(cm.mem_percent) AS avg_mem_percent,
+                          MAX(cm.mem_percent) AS max_mem_percent,
+                          MAX(s.data -> 'metadata' ->> 'started_at') AS started_at,
+                          MAX(s.status) AS current_status
+                   FROM container_metrics cm
+                   LEFT JOIN services s ON s.id = cm.service_id
+                   WHERE cm.sampled_at >= %s AND cm.sampled_at < %s
+                   GROUP BY cm.service_id, cm.host
+                   ORDER BY cm.service_id""",
+                (since, until),
+            )
+            rows = cur.fetchall()
+        return [
+            {**r, "first_seen": r["first_seen"].isoformat(), "last_seen": r["last_seen"].isoformat()}
+            for r in rows
+        ]
+
+
+def metrics_history(service_id, since, until):
+    """Ordered raw samples for one container, for the RAM-over-time chart."""
+    with _conn() as conn:
+        if conn is None:
+            return []
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT sampled_at, mem_usage_mb, mem_percent
+                   FROM container_metrics
+                   WHERE service_id = %s AND sampled_at >= %s AND sampled_at < %s
+                   ORDER BY sampled_at""",
+                (service_id, since, until),
+            )
+            rows = cur.fetchall()
+        return [{**r, "sampled_at": r["sampled_at"].isoformat()} for r in rows]
 
 
 def record_command_run(cmd):
