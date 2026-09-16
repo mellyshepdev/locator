@@ -619,7 +619,10 @@ Service:
     location_type: stationary
     units: "4"
     instances: 1
-    idle_stop: true
+    # Front door to the internet — never idle-stopped. The wake path stays
+    # armed (public_wake) purely as recovery if it ever dies for another
+    # reason; a first-time visitor must never land on a wake page.
+    idle_stop: false
     idle_timeout: 15m
     public_wake: true
     # Tailnet publish port edges reach this on; /api/traefik follows it, so the
@@ -628,6 +631,16 @@ Service:
     wake_triggers:
       domain:
         - welcome.theofficialblacksheepco.com
+
+  welcome:
+    # The public landing page — the other half of the front door. Never
+    # idle-stopped: a visitor must never meet a wake page at the entrance.
+    deployment_type: optional
+    location_type: stationary
+    units: "4"
+    instances: 1
+    idle_stop: false
+    public_wake: true
 
   forge:
     # Tailnet publish port edges reach this on; /api/traefik follows it.
