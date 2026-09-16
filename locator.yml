@@ -526,7 +526,11 @@ Service:
   agent-0:
     deployment_type: optional
     location_type: stationary
-    units: "4"
+    # Home unit is 7 (2026-09-16): the container only exists there, and the
+    # oauth2-proxy on unit8 fronts it via --upstream=http://100.99.131.20:50080.
+    # The stale unit4/unit8 registry entries are for containers long deleted —
+    # the `a0` CLI (~/.local/bin/a0) picks the best ONLINE unit and starts it.
+    units: "7"
     instances: 1
     idle_stop: true
     idle_timeout: 15m

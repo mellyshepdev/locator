@@ -39,10 +39,39 @@ import requests
 LOCATOR_URL = os.environ.get("LOCATOR_URL", "https://locator.theofficialblacksheepco.online")
 
 
+def _load_admin_key():
+    """LOCATOR_ADMIN_KEY from env, ~/.config/locator/admin_key, or the locator
+    project's .env. Needed since clearance enforcement went live — without it
+    every route 401s."""
+    key = os.environ.get("LOCATOR_ADMIN_KEY", "").strip()
+    if key:
+        return key
+    for path in (os.path.expanduser("~/.config/locator/admin_key"),
+                 os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")):
+        try:
+            with open(path) as f:
+                text = f.read()
+        except OSError:
+            continue
+        if path.endswith("admin_key"):
+            if text.strip():
+                return text.strip()
+        else:
+            m = re.search(r"^\s*LOCATOR_ADMIN_KEY=(.*)$", text, re.M)
+            if m:
+                return m.group(1).strip().strip('"').strip("'")
+    return ""
+
+
+_ADMIN_KEY = _load_admin_key()
+_HEADERS = {"X-Locator-Admin-Key": _ADMIN_KEY} if _ADMIN_KEY else {}
+
+
 def toggle(name, action):
     resp = requests.post(
         f"{LOCATOR_URL}/api/container/toggle",
         json={"name": name, "action": action},
+        headers=_HEADERS,
         timeout=30,
     )
     data = resp.json()
@@ -54,7 +83,7 @@ def toggle(name, action):
 
 
 def status(name):
-    resp = requests.get(f"{LOCATOR_URL}/services/{name}", timeout=10)
+    resp = requests.get(f"{LOCATOR_URL}/services/{name}", headers=_HEADERS, timeout=10)
     if resp.status_code != 200:
         print(f"error: {resp.text}", file=sys.stderr)
         sys.exit(1)
@@ -63,7 +92,7 @@ def status(name):
 
 
 def _fetch(path, timeout=30):
-    resp = requests.get(f"{LOCATOR_URL}{path}", timeout=timeout)
+    resp = requests.get(f"{LOCATOR_URL}{path}", headers=_HEADERS, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
@@ -339,7 +368,7 @@ def _age(iso_text):
 
 
 def health(since_seconds, show_all, stale_after):
-    resp = requests.get(f"{LOCATOR_URL}/services", timeout=30)
+    resp = requests.get(f"{LOCATOR_URL}/services", headers=_HEADERS, timeout=30)
     resp.raise_for_status()
     services = resp.json()
 
@@ -437,6 +466,7 @@ def migrate(name, to_node, force):
     resp = requests.post(
         f"{LOCATOR_URL}/api/migrations",
         json={"service": name, "to_node": to_node, "force": force},
+        headers=_HEADERS,
         timeout=30,
     )
     data = resp.json()
@@ -450,7 +480,7 @@ def migrate(name, to_node, force):
 
 
 def dns_status():
-    resp = requests.get(f"{LOCATOR_URL}/api/dns/status", timeout=30)
+    resp = requests.get(f"{LOCATOR_URL}/api/dns/status", headers=_HEADERS, timeout=30)
     resp.raise_for_status()
     data = resp.json()
     print(f"ns1: {data.get('ns1_host')}")
@@ -462,7 +492,7 @@ def dns_status():
 
 
 def dns_sync(zone):
-    resp = requests.post(f"{LOCATOR_URL}/api/dns/sync", json={"zone": zone}, timeout=30)
+    resp = requests.post(f"{LOCATOR_URL}/api/dns/sync", json={"zone": zone}, headers=_HEADERS, timeout=30)
     data = resp.json()
     if resp.status_code != 200 or not data.get("ok"):
         print(f"error: {data.get('error', data.get('output', resp.text))}", file=sys.stderr)
