@@ -6731,19 +6731,25 @@ def website_pinger():
         now = datetime.now(timezone.utc).isoformat()
         changed = False
         try:
-            running = {c.name for c in docker_client.containers.list()}
-            all_ctrs = docker_client.containers.list(all=True)
+            # Raw summaries, not SDK objects: a corrupt container (lists in
+            # /containers/json but 404s on inspect — one exists on unit4) made
+            # every lazy attribute fetch throw, killing the whole sweep each
+            # tick. The low-level call returns plain dicts; nothing inspects.
+            all_ctrs = docker_client.api.containers(all=True)
+            running = {s["Names"][0].lstrip("/") for s in all_ctrs
+                       if s.get("State") == "running" and s.get("Names")}
             _unit = os.environ.get("UNIT_NAME", "unknown")
             import re as _re
             for ctr in all_ctrs:
-                for k, v in ctr.labels.items():
+                cname = (ctr.get("Names") or [""])[0].lstrip("/")
+                for k, v in (ctr.get("Labels") or {}).items():
                     if not k.endswith(".rule"):
                         continue
                     hosts = _re.findall(r"Host\(`([^`]+)`\)", v)
                     for host in hosts:
                         url = "https://" + host
                         skey = "web_" + host.replace(".", "_").replace("-", "_")
-                        status = "ONLINE" if ctr.name in running else "OFFLINE"
+                        status = "ONLINE" if cname in running else "OFFLINE"
                         with lock:
                             ex = registry["services"].get(skey, {})
                             entry = {
@@ -6755,7 +6761,7 @@ def website_pinger():
                                 "status": status,
                                 "last_heartbeat": now if status == "ONLINE" else ex.get("last_heartbeat", ""),
                                 "registered_at": ex.get("registered_at", now),
-                                "metadata": {"container": ctr.name},
+                                "metadata": {"container": cname},
                             }
                             if status == "OFFLINE":
                                 # Preserve existing clock; start it only if not already running
