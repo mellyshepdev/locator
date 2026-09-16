@@ -148,6 +148,7 @@ BALANCE_COOLDOWN = int(os.environ.get("BALANCE_COOLDOWN", "300"))  # seconds bef
 BALANCE_DIFF     = float(os.environ.get("BALANCE_DIFF", "25"))     # % spread between busiest/least busy to trigger balance
 BALANCE_STRIKES  = int(os.environ.get("BALANCE_STRIKES", "1"))      # consecutive overloaded checks before migrating
 OOM_THRESHOLD    = float(os.environ.get("OOM_THRESHOLD", "80"))     # % mem — emergency migration, bypasses anti-flap/cooldown
+DISK_CRIT_PERCENT = float(os.environ.get("DISK_CRIT_PERCENT", "95")) # % disk — same emergency treatment; a full disk crashes the whole unit
 
 # Proactive pre-staging: watch nodes trending toward BALANCE_HIGH *before* they
 # get there, and validate (not execute) a migration ahead of time so the real
@@ -4183,18 +4184,22 @@ def load_balancer():
 
         for src_id, src_load, src_info in overloaded:
             is_oom = (src_info.get("mem_percent") or 0) >= OOM_THRESHOLD
+            is_diskcrit = (src_info.get("disk_percent") or 0) >= DISK_CRIT_PERCENT
             if is_oom:
                 print(f"🚨 BALANCE: OOM emergency on {src_id} mem={src_info.get('mem_percent'):.1f}% — bypassing anti-flap/cooldown")
+            elif is_diskcrit:
+                print(f"🚨 BALANCE: DISK emergency on {src_id} disk={src_info.get('disk_percent'):.1f}% — bypassing anti-flap/cooldown")
+            emergency = is_oom or is_diskcrit
 
-            # Cooldown check (skipped in OOM emergency)
+            # Cooldown check (skipped in OOM/disk emergency)
             last_mig = node_last_migrated.get(src_id)
-            if not is_oom and last_mig and (now - last_mig).total_seconds() < BALANCE_COOLDOWN:
+            if not emergency and last_mig and (now - last_mig).total_seconds() < BALANCE_COOLDOWN:
                 remaining = int(BALANCE_COOLDOWN - (now - last_mig).total_seconds())
                 print(f"⏳ BALANCE: {src_id} in cooldown ({remaining}s remaining)")
                 continue
 
-            # Anti-flap: require consecutive overloaded checks (skipped in OOM emergency)
-            if not is_oom:
+            # Anti-flap: require consecutive overloaded checks (skipped in OOM/disk emergency)
+            if not emergency:
                 overload_strikes[src_id] = overload_strikes.get(src_id, 0) + 1
                 if overload_strikes[src_id] < BALANCE_STRIKES:
                     print(f"⚠️  BALANCE: {src_id} at {src_load:.1f}% — strike {overload_strikes[src_id]}/{BALANCE_STRIKES}, watching")
