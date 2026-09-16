@@ -1,0 +1,11 @@
+Service:
+
+  # ── Edge + state services — pinned 2026-09-11 ─────────────────────────
+  # unit4's front-of-house pair: varnish caches in front of apache, haproxy
+  # terminates/steers on :443-adjacent paths. Both are bound to unit4 by the
+  # routes that point at them.
+  varnish:
+    deployment_type: essential
+    location_type: stationary
+    units: "4"
+    instances: 1

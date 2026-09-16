@@ -1,0 +1,10 @@
+Service:
+
+  # pdns's backing store. These are NOT interchangeable: the primary holds the
+  # writable copy that pdnsutil edits, the replica9 copy is fed by replication.
+  # Migrating either moves the compose file and leaves the volume behind.
+  mariadb-pdns-primary:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1

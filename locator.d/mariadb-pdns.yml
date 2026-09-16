@@ -1,0 +1,7 @@
+Service:
+
+  mariadb-pdns:
+    deployment_type: essential
+    location_type: stationary
+    units: "9"
+    instances: 1

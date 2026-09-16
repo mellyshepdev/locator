@@ -1,0 +1,31 @@
+Service:
+
+  # ── Stationary: bound to a unit's identity or network position ─────────
+  # ── DNS + reverse proxy: the fleet's front door ────────────────────────
+  # Filled out 2026-08-28. Verified live against every unit on that date:
+  #   unit8  pdns, mariadb-pdns-primary, dnsdist, traefik, traefik-certs-dumper
+  #   unit7  traefik
+  #   unit9  pdns, mariadb-pdns-replica9, mariadb-pdns
+  #
+  # Every entry here is stationary AND carries a units: list that names each
+  # unit it really runs on. Both matter, for different reasons:
+  #   - stationary keeps the rebalancer from moving a compose file away from
+  #     the volume holding the zone data.
+  #   - units: is what _is_multi_unit_service() reads, and that is the ONLY
+  #     thing that exempts a service from _enforce_dedup. traefik was declared
+  #     units: "8" while a second traefik has been running on unit7 for days,
+  #     which is exactly the shape that produced the nasa eviction loop above.
+  #
+  # QUOTE every underscore form. A bare 8_9 is the integer 89 (YAML 1.1 digit
+  # separators) and matches no unit at all.
+  # ── Control plane, identity and secrets — never migratable ────────────
+  # Added 2026-09-11: these were ONLINE but undeclared, which left them
+  # migratable and — for the multi-unit ones — exposed to dedup eviction.
+  # locator dying mid-migration strands the whole fleet; the lokeys execute
+  # every queued command, so stopping one blinds that unit entirely.
+
+  locator:
+    deployment_type: essential
+    location_type: stationary
+    units: "4"
+    instances: 1

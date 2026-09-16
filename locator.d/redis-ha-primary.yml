@@ -1,0 +1,10 @@
+Service:
+
+  # The redis HA set on unit7: primary + 2 replicas + 3 sentinels, one
+  # failure domain by design. Sentinels hold quorum state, replicas hold
+  # data — moving any one of them splits the cluster's brain.
+  redis-ha-primary:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1

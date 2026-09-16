@@ -1,0 +1,34 @@
+Service:
+
+  # The search backend behind the main site's search bar. Its Postgres holds
+  # the index on local disk, hence stationary, and is named in wake_with
+  # because a search app with a stopped database answers 500, not "starting".
+  searchsearcher-app:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    # Always-on (owner call 2026-09-16): no idle-stop. The wake path stays
+    # armed for recovery — a visitor to the main site, the welcome page, or
+    # search.theofficialblacksheepco.com itself still wakes it if it dies.
+    # searchsearcher-postgres matches the "postgres" entry in _PINNED_NAMES
+    # in locator.py, so its idle reports are dropped anyway — and the app
+    # answers 500, not "starting", if its database is down (wake_with).
+    idle_stop: false
+    idle_timeout: 15m
+    public_wake: true
+    project_dir: /home/swoopg111/projects/searchsearcher
+    git_remote: git@github.com:mellyshepdev/searchsearcher.git
+    wake_with: [searchsearcher-postgres]
+    wake_triggers:
+      domain:
+        - search.theofficialblacksheepco.com
+        - www.theofficialblacksheepco.com
+        - theofficialblacksheepco.com
+      link:
+        - welcome:search
+        # The apex/www domains are ALSO declared by store-site, which sits
+        # earlier in this file, and /api/wake/triggers returns the first
+        # match — so the main site's domain lookup resolves to the store.
+        # main:search gives its wake.js a trigger that cannot be shadowed.
+        - main:search

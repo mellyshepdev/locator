@@ -1,0 +1,7 @@
+Service:
+
+  postgres:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1

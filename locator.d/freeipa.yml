@@ -1,0 +1,8 @@
+Service:
+
+  # Kerberos/LDAP identity for the fleet.
+  freeipa:
+    deployment_type: essential
+    location_type: stationary
+    units: "4"
+    instances: 1

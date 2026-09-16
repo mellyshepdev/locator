@@ -1,0 +1,19 @@
+Service:
+
+  # The public store is separate from the main site so it can be migrated
+  # independently and stopped when it has been idle for 15 minutes.
+  store-site:
+    deployment_type: optional
+    location_type: mobile
+    units: "8"
+    instances: 1
+    idle_stop: true
+    idle_timeout: 15m
+    public_wake: true
+    project_dir: /home/swoopg111/server/networking/store-site
+    wake_triggers:
+      domain:
+        - theofficialblacksheepco.com
+        - www.theofficialblacksheepco.com
+        - theofficialblacksheepco.store
+        - www.theofficialblacksheepco.store

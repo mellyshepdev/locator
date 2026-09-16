@@ -1,0 +1,9 @@
+Service:
+
+  # SSO. One node per unit, a cluster by design - units lists all three so
+  # _is_multi_unit_service() keeps dedup from "cleaning up" two of them.
+  keycloak:
+    deployment_type: essential
+    location_type: stationary
+    units: "4_7"
+    instances: 1

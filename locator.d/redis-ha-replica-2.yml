@@ -1,0 +1,7 @@
+Service:
+
+  redis-ha-replica-2:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1

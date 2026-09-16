@@ -1,0 +1,19 @@
+Service:
+
+  # ── unit7 databases — pinned 2026-09-15 ───────────────────────────────
+  # Found ONLINE on unit7 with no policy entry, so the balancer saw them as
+  # movable: none match _PINNED_NAMES ("pgdb" is not "postgres", cockroach and
+  # the wazuh OpenSearch indexer are not listed at all). pgdb-18.3 is the
+  # inventory source of truth. Migration moves the compose file and NOT the
+  # volume, so every one of these would have arrived empty.
+  #
+  # restart_when_stopped: lokey's keep_alive() starts the container whenever
+  # unit7 is up and it is found stopped - including after a deliberate
+  # docker stop, which an unless-stopped restart policy never comes back from.
+
+  pgdb-18.3:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    restart_when_stopped: true

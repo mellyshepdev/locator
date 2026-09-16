@@ -1,0 +1,12 @@
+Service:
+
+  # ops-dashboard's database (postgres:16-alpine on unit8). Spelled "pgdb", it
+  # walked past every name pin and was migrated live 2026-09-16 — compose down
+  # removed the container while the volume stayed, leaving the app up and its
+  # DB gone. The movable filter now checks stateful images too, and this stanza
+  # is the explicit record. Restored in place same day.
+  ops-pgdb:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1

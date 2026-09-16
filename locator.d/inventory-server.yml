@@ -1,0 +1,12 @@
+Service:
+
+  # scanner.theofficialblacksheepco.online backend — the web scanner page and
+  # the Inventory Backend 1 card both land here.
+  inventory-server:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    idle_stop: false
+    idle_timeout: 15m
+    public_wake: true

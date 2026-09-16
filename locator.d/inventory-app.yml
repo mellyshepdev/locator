@@ -1,0 +1,7 @@
+Service:
+
+  # The edge's name for that app — borrows the container's registry placement
+  # so inventory-app.yml can point at inventory-app@http and follow a move.
+  inventory-app:
+    edge_host: inventory-inventory-1
+    edge_port: 8082

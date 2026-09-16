@@ -1,0 +1,9 @@
+Service:
+
+  # Authoritative DNS. unit8 is primary, unit9 is the AXFR secondary - both
+  # answer on :53, so losing either is a real outage, not a degraded read.
+  pdns:
+    deployment_type: essential
+    location_type: stationary
+    units: "8_9"
+    instances: 1

@@ -1,0 +1,57 @@
+Service:
+
+  # ── Wake-on-request ────────────────────────────────────────────────────
+  # The other half of idle auto-stop above. Everything that STARTS a container
+  # for a visitor is declared here, because it used to be spread across Traefik
+  # query strings, frontend constants and card props with no single file saying
+  # what the truth was — and it rotted exactly the way that invites: a welcome
+  # card still pointing at a hostname retired 2026-08-14, a Traefik router that
+  # vanished with its own container so nothing could route a wake, and a wake
+  # endpoint gated at CLIENT that answered every anonymous visitor with
+  # "insufficient clearance". None of those failed loudly.
+  #
+  # public_wake:    STRICTLY OPT-IN, same as idle_stop. Lets an anonymous
+  #                 visitor wake THIS container and nothing else. What they get
+  #                 is one verb — queue a start for a container already in the
+  #                 registry — and no registry data comes back.
+  # wake_with:      dependencies started alongside it, so a caller asks for one
+  #                 name and locator expands it. A Traefik file should never
+  #                 have to know that reech has a database.
+  # wake_triggers:  WHAT causes the wake, by kind. `domain:` is a hostname whose
+  #                 visit should wake it; `link:` is a named link in one of our
+  #                 own frontends. Served back over /api/wake/triggers so a page
+  #                 asks which container its link wakes instead of hardcoding a
+  #                 name nobody updates. New kinds need no code change.
+  # edge_port:      the tailnet port this service publishes on its hosting
+  #                 unit. /api/traefik turns it into a Traefik service upstream
+  #                 (http://<hosting unit's tailnet IP>:<edge_port>) that edges
+  #                 poll, so a migration moves the route with the registry —
+  #                 no file edit on any edge. The service is ALWAYS emitted:
+  #                 when the host cannot be resolved it points at a dead
+  #                 placeholder, which 502s into the wake middleware instead of
+  #                 dropping the router and the wake path with it.
+
+  # The Ecosystem Hub SPA on unit4, published on the tailnet at :8091 and
+  # fronted by unit8's Traefik. Stopped cleanly on 2026-09-02 and stayed down
+  # for 31 hours, during which welcome.theofficialblacksheepco.com served a bare
+  # 502 - nothing was watching, and nothing could bring it back, because it had
+  # no wake policy at all. It does now: the same errors-middleware path forge
+  # and rasa use, which is the one mechanism that works when the container a
+  # visitor actually asked for is the one that is down.
+  welcome-hub:
+    deployment_type: optional
+    location_type: stationary
+    units: "4"
+    instances: 1
+    # Front door to the internet — never idle-stopped. The wake path stays
+    # armed (public_wake) purely as recovery if it ever dies for another
+    # reason; a first-time visitor must never land on a wake page.
+    idle_stop: false
+    idle_timeout: 15m
+    public_wake: true
+    # Tailnet publish port edges reach this on; /api/traefik follows it, so the
+    # hub can move off its current unit without a file edit on the edge.
+    edge_port: 8091
+    wake_triggers:
+      domain:
+        - welcome.theofficialblacksheepco.com

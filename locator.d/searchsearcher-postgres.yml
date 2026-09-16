@@ -1,0 +1,10 @@
+Service:
+
+  searchsearcher-postgres:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    idle_stop: false
+    idle_timeout: 15m
+    public_wake: true

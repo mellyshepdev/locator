@@ -1,0 +1,48 @@
+Service:
+
+  forge:
+    # Tailnet publish port edges reach this on; /api/traefik follows it.
+    edge_port: 8090
+    deployment_type: non-essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    public_wake: true
+    # Always-on (owner call 2026-09-16): forge stays up, idle-stop exempt.
+    # The wake path stays armed — public_wake + the file-defined router and
+    # errors middleware in the edge's forge.yml — as recovery if it ever dies
+    # for another reason; a visitor's own request still brings it back.
+    # Its compose sets restart:"no"; a restart policy would resurrect it
+    # behind the idle policy's back.
+    idle_stop: false
+    idle_timeout: 15m
+    # /pad and /view are a separate container that stops independently —
+    # 2026-08-28 took down both, and waking only forge left those two prefixes
+    # dead. Naming it here means one /wake/forge starts the pair, and it also
+    # keeps the welcome-hub trigger below unambiguous: /api/wake/triggers
+    # returns the FIRST container declaring a match, so two containers sharing
+    # a domain would make the second unreachable through the trigger map.
+    wake_with: [forge-relay]
+    # The same relationship, for migration rather than wake. App.tsx opens
+    # `wss://${window.location.host}/view/default` — the pad relay, reached on
+    # forge's OWN hostname through the /pad and /view routers in the edge's
+    # forge.yml. So the tablet cursor is dead whenever forge-relay is not
+    # running, and moving forge to a unit where it is absent ships a half-broken
+    # app. This is forge's only real dependency: the card editor makes no other
+    # backend call of any kind, and the segmentation assets come from a CDN.
+    #
+    # Bare name, not forge-relay@unit8, deliberately — the relay only has to be
+    # up SOMEWHERE, since it is reached over the tailnet like everything else.
+    depends_on: [forge-relay]
+    wake_triggers:
+      domain:
+        - forge.prime-quality.online
+        # The welcome hub pre-warms forge on page load, so the card is live by
+        # the time it is clicked. This is a SECOND, independent path from the
+        # hub's own wake below: the errors middleware can only ever wake the
+        # container the visitor asked for, and forge is a different one on a
+        # different unit. So the hub's page calls /__wake/forge itself once it
+        # has rendered; see welcome-hub.yml on the edge.
+        - welcome.theofficialblacksheepco.com
+      link:
+        - welcome:forge

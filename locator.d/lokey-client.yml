@@ -1,0 +1,8 @@
+Service:
+
+  # One per reporting unit — the agents that run the command queue.
+  lokey-client:
+    deployment_type: essential
+    location_type: stationary
+    units: "3_4_5_8_9"
+    instances: 1

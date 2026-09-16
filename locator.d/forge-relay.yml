@@ -1,0 +1,23 @@
+Service:
+
+  # The pad relay behind /pad and /view. A separate container, stopped
+  # independently — 2026-08-28 took down both, and waking only forge would
+  # still have left those two prefixes dead.
+  forge-relay:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    idle_stop: false
+    idle_timeout: 15m
+    public_wake: true
+    # Tailnet publish port; the /pad and /view routers reach it as
+    # forge-relay@http so its upstream follows the registry on a migration
+    # instead of staying glued to whichever edge it happened to share.
+    edge_port: 8791
+    wake_triggers:
+      domain:
+        # Its own 502 path stays: forge.yml gives /pad and /view a middleware
+        # of their own, so a request straight to a stopped relay still wakes it.
+        # The hub pre-warm reaches it via forge's wake_with, not from here.
+        - forge.prime-quality.online

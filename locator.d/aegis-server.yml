@@ -1,0 +1,7 @@
+Service:
+
+  # aegis-server (mfa.theofficialblacksheepco.com) — real container, keeps the
+  # /healthz probe its file service always had.
+  aegis-server:
+    edge_port: 8090
+    edge_healthcheck: /healthz

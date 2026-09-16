@@ -1,0 +1,11 @@
+Service:
+
+  # inventory-api.theofficialblacksheepco.online — Inventory Backend 2.
+  inventory-api:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    idle_stop: false
+    idle_timeout: 15m
+    public_wake: true

@@ -1,0 +1,27 @@
+Service:
+
+  # ── Idle auto-stop ─────────────────────────────────────────────────────
+  # deployment_type MUST NOT be essential — locator refuses idle_stop on an
+  # essential service even when the flag is set. agent-0 does not appear in
+  # lokey NEVER_STOP (substring match), so this policy is the only gate.
+  #
+  # LLM backend (2026-09-15): every AI consumer
+  # (agent-0, forge) uses llama.cpp — llama-server on unit7 (:8085 coder,
+  # :8086 vision) with ggml rpc-server workers on unit4 and unit8. Those run
+  # under systemd, not Docker, and are never idle-stopped, so nothing needs
+  # to be woken alongside a consumer.
+  agent-0:
+    deployment_type: optional
+    location_type: stationary
+    # Home unit is 7 (2026-09-16): the container only exists there, and the
+    # oauth2-proxy on unit8 fronts it via --upstream=http://100.99.131.20:50080.
+    # The stale unit4/unit8 registry entries are for containers long deleted —
+    # the `a0` CLI (~/.local/bin/a0) picks the best ONLINE unit and starts it.
+    units: "7"
+    instances: 1
+    idle_stop: true
+    idle_timeout: 15m
+    public_wake: true
+    wake_triggers:
+      domain:
+        - a0.theofficialblacksheepco.online

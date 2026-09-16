@@ -1,0 +1,11 @@
+Service:
+
+  # Sablier stops pgAdmin 30m after its last proxied request; a wake only
+  # STARTS it (docker start), it does not fight that schedule. Stationary on
+  # unit8 because the edge reaches it by docker-network name, not tailnet.
+  pgadmin_ui:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    public_wake: true

@@ -1,0 +1,15 @@
+Service:
+
+  # unit4s public Apache front door. unit8 Traefik upstreams tech-estate and
+  # friends to 100.82.31.92:8080 and the docroot lives on /mnt/omv_storage, so
+  # a migration strands the route AND the content. No policy entry meant it
+  # was migratable - found exposed 2026-09-11 while auditing the pin set.
+  apache:
+    deployment_type: essential
+    location_type: stationary
+    units: "4"
+    instances: 1
+    # The unit4-published web stack (aegis / -apache / tech-estate / error-pages
+    # routers on the edge). Edges reach it as apache@http so a migration moves
+    # the upstream with the registry instead of stranding a hardcoded tailnet IP.
+    edge_port: 8080

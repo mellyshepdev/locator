@@ -1,0 +1,29 @@
+Service:
+
+  # ── Fleet-wide log shipper (live-logger) ───────────────────────────────
+  # Added 2026-08-23. Both were stopped and stayed stopped: fluent-bit is
+  # restart: unless-stopped and had been deliberately SIGTERMed, which that
+  # policy never recovers from, and container-names is restart: "no", so any
+  # kill is permanent.
+  #
+  # deployment_type: essential is set here but is NOT protection today. Tested
+  # 2026-08-23: policy loaded, the registry correctly saw
+  # live-logger-container-names@unit9 go OFFLINE, and
+  # nothing queued a start in 5 minutes. restart_when_stopped (lokey keep_alive)
+  # is what brings them back now. Treat any other essential service
+  # as unsupervised until that is fixed; the flag only drives the grid badge.
+  #
+  # units MUST be present and MUST be quoted. Without it
+  # _is_multi_unit_service() is false and _enforce_dedup treats the per-unit
+  # shippers as duplicates and evicts all but one — the exact loop that
+  # bug #6 fixed. A bare 4_7_8_9 is the integer 4789 (YAML 1.1 digit
+  # separators) and matches no unit at all.
+  #
+  # stationary because fluent_bit_state holds this unit's tail read-offsets
+  # and retry buffer, and migration moves the compose file, not the volume.
+  fluent-bit:
+    deployment_type: essential
+    location_type: stationary
+    units: "4_7_8_9"
+    instances: 1
+    restart_when_stopped: true

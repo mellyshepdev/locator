@@ -1,0 +1,11 @@
+Service:
+
+  # OAuth2 front door for searchsearcher on unit8 — exempt with the app.
+  searchsearcher-oauth:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    idle_stop: false
+    public_wake: true
+    wake_with: [searchsearcher-app]

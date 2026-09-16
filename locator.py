@@ -1608,6 +1608,18 @@ def list_yamls():
             "container": "locator.yml",
             "path": LOCATOR_YML,
         })
+    # Per-service policy files — the same list the loader merges.
+    try:
+        for fname in sorted(os.listdir(LOCATOR_YML_DIR)):
+            if not fname.endswith((".yml", ".yaml")) or fname.startswith("."):
+                continue
+            results.append({
+                "label": f"locator.d/{fname}",
+                "container": f"locator.d/{fname}",
+                "path": os.path.join(LOCATOR_YML_DIR, fname),
+            })
+    except OSError:
+        pass
     # The locator's own compose file, so its deployment is editable from the
     # same place as its policy.
     if os.path.isfile(LOCATOR_COMPOSE):
@@ -1695,14 +1707,59 @@ def save_yaml():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+def _policy_file_for(service):
+    """Which policy file declares this service, or None.
+
+    A stanza may live in locator.yml or in any locator.d/*.yml file; the
+    writer must edit whichever holds it rather than always touching the
+    monolith.
+    """
+    target = service.lower()
+    for path in _policy_source_files():
+        try:
+            with open(path) as fh:
+                for raw in fh:
+                    s = raw.strip()
+                    if s.endswith(":") and s[:-1].strip().lower() == target:
+                        return path
+        except OSError:
+            continue
+    return None
+
+
 def _write_policy_field(service, key, value):
-    """Set one key on one service in locator.yml, in place.
+    """Set one key on one service's policy file, in place.
 
     Done as a line edit rather than a yaml.safe_load/dump round-trip on
-    purpose: this file is mostly comments — the quoting trap on `units`, why
-    each database is stationary — and a dump would silently delete all of it.
+    purpose: these files are mostly comments — the quoting trap on `units`,
+    why each database is stationary — and a dump would silently delete all
+    of it. The stanza is edited in whichever file under locator.d/ (or
+    locator.yml) declares it; a service with no file yet gets a new
+    locator.d/<name>.yml.
     """
-    with open(LOCATOR_YML, "r") as fh:
+    path = _policy_file_for(service)
+    if path is None:
+        # Not declared anywhere yet — give it its own locator.d file rather
+        # than growing the monolith again.
+        safe = re.sub(r"[^a-z0-9_.-]", "_", service.lower())
+        path = os.path.join(LOCATOR_YML_DIR, f"{safe}.yml")
+        try:
+            os.makedirs(LOCATOR_YML_DIR, exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write(f"# added from the tactical grid "
+                         f"{datetime.now():%Y-%m-%d}\n"
+                         f"Service:\n"
+                         f"  {service}:\n"
+                         f"    deployment_type: non-essential\n"
+                         f"    location_type: mobile\n"
+                         f"    units: \"current_unit\"\n"
+                         f"    instances: 1\n"
+                         f"    {key}: {value}\n")
+        except OSError as e:
+            return False, str(e)
+        return True, None
+
+    with open(path, "r") as fh:
         lines = fh.readlines()
 
     target = service.lower()
@@ -1744,12 +1801,10 @@ def _write_policy_field(service, key, value):
             break
 
     if svc_line is None:
-        # Not in the file yet. Append a block rather than refusing: the tactical
-        # grid lets any running container be pinned, and most of them have never
-        # had a policy entry. Written as text for the same reason the rest of
-        # this function is — a yaml round-trip would strip every comment.
+        # _policy_file_for matched a stray line but the block scan disagrees —
+        # treat as not-declared and append into THIS file's Service: block.
         if blk_line is None:
-            return False, "locator.yml has no 'Service:' block"
+            return False, f"{os.path.basename(path)} has no 'Service:' block"
 
         ind = " " * (entry_indent or 2)
         fields = {
@@ -1773,7 +1828,7 @@ def _write_policy_field(service, key, value):
         block.append("\n")
         lines[at:at] = block
 
-        with open(LOCATOR_YML, "w") as fh:
+        with open(path, "w") as fh:
             fh.writelines(lines)
         return True, None
 
@@ -1788,7 +1843,7 @@ def _write_policy_field(service, key, value):
     else:
         lines.insert(svc_line + 1, f"{field_indent}{key}: {value}\n")
 
-    with open(LOCATOR_YML, "w") as fh:
+    with open(path, "w") as fh:
         fh.writelines(lines)
     return True, None
 
@@ -3761,6 +3816,12 @@ def heartbeat_reaper():
 
 # Containers that must never be migrated or deduped automatically
 LOCATOR_YML = os.environ.get("LOCATOR_YML", os.path.join(os.path.dirname(os.path.abspath(__file__)), "locator.yml"))
+# Per-service policy files, one stanza each, merged over locator.yml's
+# contents (which remains valid but is being split out — the single file
+# had grown to ~900 lines of interleaved services and nobody could find
+# anything in it). Same schema: a top-level "Service:" mapping, or a bare
+# mapping of service names.
+LOCATOR_YML_DIR = os.path.join(os.path.dirname(LOCATOR_YML), "locator.d")
 LOCATOR_COMPOSE = os.environ.get(
     "LOCATOR_COMPOSE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "docker-compose.yml"),
@@ -3870,8 +3931,27 @@ def _as_list(value):
     return [str(v).strip() for v in items if str(v).strip()]
 
 
+def _policy_source_files():
+    """Every file load_policy() merges, in precedence order.
+
+    locator.yml first (legacy single-file policy, still honoured), then the
+    per-service files under locator.d/ in sorted order — a name defined in
+    two places resolves to the LAST file read, and the collision is logged.
+    """
+    files = []
+    if os.path.isfile(LOCATOR_YML):
+        files.append(LOCATOR_YML)
+    try:
+        for fname in sorted(os.listdir(LOCATOR_YML_DIR)):
+            if fname.endswith((".yml", ".yaml")) and not fname.startswith("."):
+                files.append(os.path.join(LOCATOR_YML_DIR, fname))
+    except OSError:
+        pass
+    return files
+
+
 def load_policy():
-    """Service policy from locator.yml, keyed by lowercase service name.
+    """Service policy from locator.yml + locator.d/, keyed by lowercase name.
 
     This file existed but nothing read it, so services marked
     'location_type: stationary' were migrated anyway — which is how the
@@ -3881,29 +3961,51 @@ def load_policy():
     Tolerates the original misspellings ('deployement_type',
     'inactivity_timout_minutes') alongside the corrected ones.
     """
-    try:
-        mtime = os.path.getmtime(LOCATOR_YML)
-    except OSError:
+    files = _policy_source_files()
+    if not files:
         return {}
-    if _policy_cache["mtime"] == mtime:
-        return _policy_cache["data"]
-
     try:
-        import yaml as _yaml
-        with open(LOCATOR_YML) as fh:
-            doc = _yaml.safe_load(fh) or {}
-    except Exception as e:
-        print(f"⚠️  locator.yml unreadable: {e}")
+        fingerprint = tuple((p, os.path.getmtime(p)) for p in files)
+    except OSError:
+        return _policy_cache["data"]
+    if _policy_cache["mtime"] == fingerprint:
         return _policy_cache["data"]
 
-    # Accept "Service:" (as written) or a bare top-level mapping.
-    services = doc.get("Service") or doc.get("services") or doc
-    parsed = {}
-    if isinstance(services, dict):
-        for name, cfg in services.items():
+    import yaml as _yaml
+    services = {}
+    for path in files:
+        try:
+            with open(path) as fh:
+                doc = _yaml.safe_load(fh) or {}
+        except Exception as e:
+            print(f"⚠️  {os.path.basename(path)} unreadable: {e}")
+            continue
+        # Accept "Service:" (as written) or a bare top-level mapping. An
+        # explicit but empty Service: means "no services here" — it must NOT
+        # fall through to `doc`, which would parse the key itself as a
+        # service named "service".
+        if "Service" in doc:
+            block = doc["Service"]
+        elif "services" in doc:
+            block = doc["services"]
+        else:
+            block = doc
+        if not isinstance(block, dict):
+            continue
+        for name, cfg in block.items():
             if not isinstance(cfg, dict):
                 continue
-            parsed[str(name).lower()] = {
+            if str(name).lower() in services:
+                print(f"⚠️  policy collision: '{name}' defined in both "
+                      f"{services[str(name).lower()][0]} and {path} — "
+                      f"the latter wins")
+            services[str(name).lower()] = (path, cfg)
+
+    parsed = {}
+    for name, (_src, cfg) in services.items():
+        if not isinstance(cfg, dict):
+            continue
+        parsed[name] = {
                 "location_type": str(cfg.get("location_type", "")).lower(),
                 "deployment_type": str(
                     cfg.get("deployment_type", cfg.get("deployement_type", ""))).lower(),
@@ -4008,8 +4110,9 @@ def load_policy():
                     for k, v in cfg["wake_triggers"].items()
                 } if isinstance(cfg.get("wake_triggers"), dict) else {},
             }
-    _policy_cache.update({"mtime": mtime, "data": parsed})
-    print(f"📄 locator.yml loaded — {len(parsed)} service policies")
+    _policy_cache.update({"mtime": fingerprint, "data": parsed})
+    print(f"📄 policy loaded — {len(parsed)} service policies "
+          f"from {len(files)} file(s)")
     return parsed
 
 

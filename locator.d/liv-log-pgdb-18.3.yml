@@ -1,0 +1,8 @@
+Service:
+
+  liv-log-pgdb-18.3:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    restart_when_stopped: true

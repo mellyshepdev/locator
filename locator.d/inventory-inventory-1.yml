@@ -1,0 +1,12 @@
+Service:
+
+  # The Vite/React inventory app on unit7 (inventory.theofficialblacksheepco.
+  # online). Its edge file routes to a tailnet-published 8082.
+  inventory-inventory-1:
+    deployment_type: optional
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: false
+    idle_timeout: 15m
+    public_wake: true

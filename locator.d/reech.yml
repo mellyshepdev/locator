@@ -1,0 +1,35 @@
+Service:
+
+  # Reech, behind the client portal.
+  #
+  # Traefik terminates on reech-oauth, NOT on reech: routing straight to
+  # reech:3000 left real mail, call logs and Matrix readable by anyone who knew
+  # the hostname, which is why that was changed on 2026-08-21. So the container
+  # a visitor's 502 comes from is reech-oauth, while the container they actually
+  # want is reech — the two name each other here so either entry point brings
+  # up both. The expansion is one level deep, so this is not a loop.
+  #
+  # There is no reech-db: reech uses the SHARED postgres on unit8, which is
+  # essential and always up. The reech-db record still in the registry is a
+  # leftover and is not a container that exists.
+  reech:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    idle_stop: true
+    idle_timeout: 15m
+    public_wake: true
+    wake_with: [reech-oauth]
+    wake_triggers:
+      # Visiting the client portal wakes reech, because the portal Messages tab
+      # fetches reech cross-origin - by the time that fetch runs, a stopped
+      # reech is a network error the portal cannot tell apart from "signed out".
+      # The portal itself is always up and answers 200, so no errors middleware
+      # can ever fire on that host: the portal page asks for this wake itself
+      # via /__wake/ (see client-portal.yml on unit8, and WAKE.md item 2).
+      domain:
+        - portal.theofficialblacksheepco.com
+      link:
+        - welcome:reech
+        - client-portal:enter

@@ -1,0 +1,12 @@
+Service:
+
+  # ── Communication stack — all unit8, all pinned 2026-09-11 ────────────
+  # The customer-chat chain is widget -> Chatwoot -> webhook-relay -> rasa ->
+  # site-chat; break any link and the site chat goes dark. mailserver/mail-admin
+  # run the domain's mail; synapse/element/matrix-relay are the Matrix homeserver
+  # trio. Migrating any of these strands credentials, volumes and DNS MX/A.
+  chatwoot-sidekiq:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1

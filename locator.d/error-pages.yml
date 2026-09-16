@@ -1,0 +1,10 @@
+Service:
+
+  # Same backend as apache — a second emitted service only because the edge's
+  # errors middleware needs passHostHeader off while every sibling router wants
+  # the default. edge_host points the placement lookup at apache's registry
+  # entry; no container named error-pages ever exists.
+  error-pages:
+    edge_host: apache
+    edge_port: 8080
+    edge_pass_host: false

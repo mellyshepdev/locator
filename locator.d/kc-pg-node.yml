@@ -1,0 +1,19 @@
+Service:
+
+  # The two public web front doors. Both are bound to unit8 by an A record in
+  # pdns and by Traefik's file provider, so a migration would move the compose
+  # file while DNS kept pointing here — the site would simply go dark.
+  # The Keycloak DB is a pg_auto_failover PAIR, one node on unit4 and one on
+  # unit8 -- KC_DB_URL lists both :5435 endpoints and jdbc-ping discovers the
+  # Keycloak peers THROUGH it. Without this entry the duplicate_killer read the
+  # second node as a stray copy and queued a dedup eviction every ~4 minutes
+  # ("DEDUP: kc-pg-node duplicated on unit4, keeping unit8"); 6 fired on
+  # 2026-09-04 and every one failed. Had one succeeded it would have taken out
+  # half the cluster behind SSO.
+  # stationary because it holds data on local disk: migration moves the compose
+  # file and NOT the volume.
+  kc-pg-node:
+    deployment_type: essential
+    location_type: stationary
+    units: "4_7_8"
+    instances: 1

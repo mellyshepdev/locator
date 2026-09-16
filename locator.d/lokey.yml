@@ -1,0 +1,24 @@
+Service:
+
+  # ── lokey — the host agent, every unit ─────────────────────────────────
+  # Added 2026-08-23.
+  #
+  # QUOTED: a bare 3_4_5_6_7_8_9 is the integer 3456789 (YAML 1.1 digit
+  # separators) and would match no unit at all.
+  #
+  # These three flags are a no-op FOR LOKEY SPECIFICALLY — locator.py already
+  # hardcodes all of them: "lokey"/"lokey-client" were in _WATCHDOG_SERVICES (removed 2026-09-15)
+  # (= essential) and in _PINNED_NAMES (= stationary, and dedup-exempt).
+  # Written out so the policy file states the intent rather than relying on
+  # the hardcoded floor.
+  #
+  # There is deliberately no "restart when stopped" key here. Nothing in
+  # locator.py reads one; load_policy() copies exactly seven keys out of each
+  # entry (location_type, deployment_type, units, instances, project_dir,
+  # git_remote, env) and silently drops everything else. Restart-on-stop has
+  # to be implemented before it can be configured.
+  lokey:
+    deployment_type: essential
+    location_type: stationary
+    units: "3_4_5_6_7_8_9"
+    instances: 1

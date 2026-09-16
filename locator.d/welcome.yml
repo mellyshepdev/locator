@@ -1,0 +1,11 @@
+Service:
+
+  welcome:
+    # The public landing page — the other half of the front door. Never
+    # idle-stopped: a visitor must never meet a wake page at the entrance.
+    deployment_type: optional
+    location_type: stationary
+    units: "4"
+    instances: 1
+    idle_stop: false
+    public_wake: true

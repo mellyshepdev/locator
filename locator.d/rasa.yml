@@ -1,0 +1,22 @@
+Service:
+
+  # rasa lives on unit8, not unit4. Wake-on-request is wired in unit8s Traefik
+  # (dynamic-config/rasa.yml). Its answers come from site-chat (Azure); when
+  # that cannot answer, the customer is told staff will reply in the chat.
+  rasa:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+    # idle_stop DISABLED 2026-09-04. rasa now backs the live customer chat on
+    # the website (widget -> Chatwoot -> webhook-relay -> rasa -> site-chat).
+    # webhook-relay calls http://rasa:5005 over the docker network, which never
+    # touches Traefik, so the wake_triggers domain below can never fire for a
+    # real customer. Result: the visitor who woke it got no answer at all.
+    # A live chat backend cannot cold-start on the customers dime.
+    idle_stop: false
+    idle_timeout: 15m
+    public_wake: true
+    wake_triggers:
+      domain:
+        - rasa.theofficialblacksheepco.online

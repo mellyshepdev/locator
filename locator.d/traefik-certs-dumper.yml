@@ -1,0 +1,9 @@
+Service:
+
+  # Writes the ACME cert bundle out of acme.json for the services that read
+  # PEMs off disk. Bound to unit8 because that is where acme.json lives.
+  traefik-certs-dumper:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1

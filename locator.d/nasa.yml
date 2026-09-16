@@ -1,0 +1,28 @@
+Service:
+
+
+  # ── STOP-GAP, added 2026-08-23 ─────────────────────────────────────────
+  # nasa is ONLINE on unit7 AND unit9, so _enforce_dedup tried to evict the
+  # unit7 copy with a git_push_and_stop every ~90s. It failed every time —
+  # unit7's nasa was started with `docker run`, not compose, so it carries no
+  # com.docker.compose.* labels and lokey cannot find a project dir to push.
+  # A FAILED dedup migration no longer blocks the next one, so it relaunched
+  # forever: 147 failures between 20:48 and 01:00.
+  #
+  # Declaring both units is what actually stops it. location_type: stationary
+  # does NOT — _enforce_dedup only exempts via _PINNED_NAMES or
+  # _is_multi_unit_service(), and the latter reads THIS field.
+  #
+  # This is deliberately NOT the end state: nasa is meant to be migratable.
+  # To get there, give it a real compose project on unit7 (a docker-compose.yml
+  # + `docker compose up -d` so the labels exist), add project_dir/git_remote
+  # here, then narrow units back to one. Until the labels exist, no migration
+  # of nasa can ever succeed.
+  #
+  # QUOTED on purpose: YAML 1.1 reads a bare 7_9 as the integer 79.
+  nasa:
+    deployment_type: non-essential
+    location_type: mobile
+    units: "7_9"
+    instances: 1
+    idle_stop: false

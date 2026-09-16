@@ -1,0 +1,7 @@
+Service:
+
+  postgres-inventory-backup:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1

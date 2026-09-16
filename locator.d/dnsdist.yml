@@ -1,0 +1,8 @@
+Service:
+
+  # The :53 front end on unit8 that fans queries out to pdns.
+  dnsdist:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1

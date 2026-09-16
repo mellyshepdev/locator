@@ -1,0 +1,8 @@
+Service:
+
+  # Fleet PKI / secrets broker. Mints the mTLS leaves everything else uses.
+  openbao:
+    deployment_type: essential
+    location_type: stationary
+    units: "4"
+    instances: 1

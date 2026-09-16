@@ -1,0 +1,14 @@
+Service:
+
+  reech-oauth:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    idle_stop: true
+    idle_timeout: 15m
+    public_wake: true
+    wake_with: [reech]
+    wake_triggers:
+      domain:
+        - reech.prime-quality.online
