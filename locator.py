@@ -6983,13 +6983,34 @@ def url_status_checker():
     """
     while True:
         with lock:
-            targets = [(sid, svc.get("url")) for sid, svc in registry["services"].items()
+            targets = [(sid, svc.get("url"), (svc.get("metadata") or {}).get("container"))
+                       for sid, svc in registry["services"].items()
                        if svc.get("category") in ("websites", "serverless")
                        and str(svc.get("url", "")).startswith("http")
                        and not _is_on_demand_url(svc.get("url"))]
+            # Containers the locator itself put to sleep. They leave
+            # _idle_state the moment they stop (lokey reports running
+            # containers only), so without this set the next sweep would poll
+            # a stopped service, fall into the catch-all's wake path, and
+            # bring it straight back up — a stop/wake thrash every cycle.
+            idle_stopped = {(svc.get("name") or "").lower()
+                            for svc in registry["services"].values()
+                            if (svc.get("metadata") or {}).get("idle_stopped")}
+        with _idle_lock:
+            watched = {name.lower() for _, name in _idle_state}
 
         changed = False
-        for sid, url in targets:
+        for sid, url, container in targets:
+            # The check itself is traffic. Polling a service the idle reaper
+            # is timing out resets its clock forever (a GET every 60s vs a
+            # 900s timeout — nothing could ever go idle), and polling one
+            # already stopped fires the catch-all's wake path and brings it
+            # straight back up. ON_DEMAND_HOSTS exists for the same reason;
+            # this is the general case. The entry's status keeps tracking
+            # the container through lokey registrations instead.
+            if container and (container.lower() in watched
+                             or container.lower() in idle_stopped):
+                continue
             try:
                 r = requests.get(url, timeout=10, allow_redirects=True)
                 up = r.status_code < 500
