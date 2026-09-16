@@ -1214,8 +1214,11 @@ def _enforce_dedup(new_name, new_host):
     migration. The target's lokey then receives a git_pull_only task once the
     push completes (queued by complete_migration).
     """
-    if any(p in new_name.lower() for p in _PINNED_NAMES):
-        return  # infrastructure — allowed on multiple nodes
+    if _is_pinned(new_name):
+        return  # infrastructure/stationary — allowed on multiple nodes; a
+                # stateful service that got duplicated is a problem for a
+                # human, not for an eviction queue that moves compose files
+                # and leaves volumes behind.
     if _is_multi_unit_service(new_name):
         return  # per-unit agent — locator.yml says it belongs on several units
 
@@ -2864,6 +2867,17 @@ def claim_migration(mig_id):
     data = request.get_json(silent=True) or {}
     unit = data.get("unit", "unknown")
 
+    # Re-validate at claim time: the queue is minutes-to-stale by the time a
+    # lokey polls it, and a policy pin or a newly-discovered stateful image in
+    # between means "queued" no longer means "should run". ops-pgdb was
+    # queued while unregistered-as-stateful and executed on the next poll;
+    # this check is where a late correction actually stops the stop.
+    with lock:
+        _, svc = _find_service_entry(mig.get("container") or "")
+        image = ((svc or {}).get("metadata") or {}).get("image", "").lower()
+    pinned = _is_pinned(mig.get("container") or "")
+    stateful = any(m in image for m in _STATEFUL_IMAGE_MARKERS)
+
     with migration_lock:
         mig = migration_queue.get(mig_id)
         if not mig:
@@ -2873,6 +2887,12 @@ def claim_migration(mig_id):
         owner = mig.get("unit", mig.get("from_node"))
         if unit != "unknown" and owner and owner != unit:
             return jsonify({"error": "not yours", "owner": owner}), 403
+        if pinned or stateful:
+            mig["status"] = "CANCELLED"
+            mig["cancelled_at"] = datetime.now(timezone.utc).isoformat()
+            mig["cancel_reason"] = "pinned" if pinned else "stateful image"
+            print(f"🚫 MIGRATION {mig_id}: cancelled at claim — {mig['cancel_reason']}")
+            return jsonify({"error": "cancelled", "reason": mig["cancel_reason"]}), 409
         mig["status"]     = "IN_PROGRESS"
         mig["claimed_by"] = unit
         mig["claimed_at"] = datetime.now(timezone.utc).isoformat()
@@ -4316,6 +4336,12 @@ def load_balancer():
                 and svc.get("type") in ("container", "native")
                 and not _is_pinned(svc.get("name"))
                 and not svc.get("metadata", {}).get("pinned")
+                # A stateful IMAGE means the data stays behind — migration
+                # moves the compose file, not the volume. ops-pgdb (postgres:
+                # 16-alpine) slipped the name pins because it is spelled
+                # "pgdb", and ops-dashboard lost its database live.
+                and not any(m in (svc.get("metadata", {}).get("image") or "").lower()
+                            for m in _STATEFUL_IMAGE_MARKERS)
                 and svc.get("name") not in in_flight
                 and (migration_failed_at.get(svc.get("name"))
                      or datetime.min.replace(tzinfo=timezone.utc)) < fail_cutoff

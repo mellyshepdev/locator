@@ -46,6 +46,26 @@ Service:
     units: "8"
     instances: 1
 
+  # ops-dashboard's database (postgres:16-alpine on unit8). Spelled "pgdb", it
+  # walked past every name pin and was migrated live 2026-09-16 — compose down
+  # removed the container while the volume stayed, leaving the app up and its
+  # DB gone. The movable filter now checks stateful images too, and this stanza
+  # is the explicit record. Restored in place same day.
+  ops-pgdb:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
+  # The app half of the same incident: it talks to ops-pgdb over the project's
+  # own docker network, so anywhere the DB is not, the dashboard is broken.
+  # Pinned to the DB's host, not because it holds data itself.
+  ops-dashboard:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+
   # Not in _PINNED_NAMES and had no locator.yml entry at all until now — the
   # exact same unprotected shape as the mariadb-11.4 incident (2026-08-09,
   # see BALANCE_ENABLED history): local vault DB, migration moves the compose
