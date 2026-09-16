@@ -427,6 +427,7 @@ Service:
     location_type: mobile
     units: "7_9"
     instances: 1
+    idle_stop: false
 
   # ── Fleet-wide log shipper (live-logger) ───────────────────────────────
   # Added 2026-08-23. Both were stopped and stayed stopped: fluent-bit is
@@ -650,15 +651,13 @@ Service:
     units: "7"
     instances: 1
     public_wake: true
-    # Idle-stopped after 15m of no traffic. Safe to do here and not elsewhere
-    # because forge is the one service with a COMPLETE wake path: a file-defined
-    # router in the edge's forge.yml that survives the container, an errors
-    # middleware on it, and public_wake below — so a visitor's own request
-    # brings it back. Its compose sets restart:"no" for the same reason; a
-    # restart policy would resurrect it behind the idle policy's back.
-    # deployment_type stays 'optional': locator refuses idle_stop outright on an
-    # essential service, and forge is not one.
-    idle_stop: true
+    # Always-on (owner call 2026-09-16): forge stays up, idle-stop exempt.
+    # The wake path stays armed — public_wake + the file-defined router and
+    # errors middleware in the edge's forge.yml — as recovery if it ever dies
+    # for another reason; a visitor's own request still brings it back.
+    # Its compose sets restart:"no"; a restart policy would resurrect it
+    # behind the idle policy's back.
+    idle_stop: false
     idle_timeout: 15m
     # /pad and /view are a separate container that stops independently —
     # 2026-08-28 took down both, and waking only forge left those two prefixes
@@ -699,7 +698,7 @@ Service:
     location_type: stationary
     units: "8"
     instances: 1
-    idle_stop: true
+    idle_stop: false
     idle_timeout: 15m
     public_wake: true
     # Tailnet publish port; the /pad and /view routers reach it as
@@ -721,16 +720,13 @@ Service:
     location_type: stationary
     units: "8"
     instances: 1
-    # Idle-stops after 15m of no traffic; a visitor to the main site, the
-    # welcome page, or search.theofficialblacksheepco.com itself wakes it.
-    # Only the app carries idle_stop: searchsearcher-postgres matches the
-    # "postgres" entry in _PINNED_NAMES in locator.py, so its idle reports are
-    # dropped and it would never be reaped anyway — and the app answers 500,
-    # not "starting", if its database is down (which is why it is wake_with).
-    # project_dir+git_remote make it deployable, which is only safe alongside
-    # idle_stop because placement skips entries flagged idle_stopped — that
-    # guard did not exist before 2026-09-14 and store-site looped on it.
-    idle_stop: true
+    # Always-on (owner call 2026-09-16): no idle-stop. The wake path stays
+    # armed for recovery — a visitor to the main site, the welcome page, or
+    # search.theofficialblacksheepco.com itself still wakes it if it dies.
+    # searchsearcher-postgres matches the "postgres" entry in _PINNED_NAMES
+    # in locator.py, so its idle reports are dropped anyway — and the app
+    # answers 500, not "starting", if its database is down (wake_with).
+    idle_stop: false
     idle_timeout: 15m
     public_wake: true
     project_dir: /home/swoopg111/projects/searchsearcher
@@ -754,9 +750,19 @@ Service:
     location_type: stationary
     units: "8"
     instances: 1
-    idle_stop: true
+    idle_stop: false
     idle_timeout: 15m
     public_wake: true
+
+  # OAuth2 front door for searchsearcher on unit8 — exempt with the app.
+  searchsearcher-oauth:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    idle_stop: false
+    public_wake: true
+    wake_with: [searchsearcher-app]
 
   # Reech, behind the client portal.
   #
@@ -842,7 +848,7 @@ Service:
     location_type: stationary
     units: "8"
     instances: 1
-    idle_stop: true
+    idle_stop: false
     idle_timeout: 15m
     public_wake: true
 
@@ -852,7 +858,7 @@ Service:
     location_type: stationary
     units: "8"
     instances: 1
-    idle_stop: true
+    idle_stop: false
     idle_timeout: 15m
     public_wake: true
 
@@ -863,7 +869,7 @@ Service:
     location_type: stationary
     units: "7"
     instances: 1
-    idle_stop: true
+    idle_stop: false
     idle_timeout: 15m
     public_wake: true
 
