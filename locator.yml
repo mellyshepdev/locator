@@ -599,6 +599,8 @@ Service:
     location_type: stationary
     units: "4"
     instances: 1
+    idle_stop: true
+    idle_timeout: 15m
     public_wake: true
     # Tailnet publish port edges reach this on; /api/traefik follows it, so the
     # hub can move off its current unit without a file edit on the edge.
@@ -664,6 +666,8 @@ Service:
     location_type: stationary
     units: "8"
     instances: 1
+    idle_stop: true
+    idle_timeout: 15m
     public_wake: true
     # Tailnet publish port; the /pad and /view routers reach it as
     # forge-relay@http so its upstream follows the registry on a migration
@@ -717,6 +721,8 @@ Service:
     location_type: stationary
     units: "8"
     instances: 1
+    idle_stop: true
+    idle_timeout: 15m
     public_wake: true
 
   # Reech, behind the client portal.
@@ -736,6 +742,8 @@ Service:
     location_type: stationary
     units: "8"
     instances: 1
+    idle_stop: true
+    idle_timeout: 15m
     public_wake: true
     wake_with: [reech-oauth]
     wake_triggers:
@@ -756,6 +764,8 @@ Service:
     location_type: stationary
     units: "8"
     instances: 1
+    idle_stop: true
+    idle_timeout: 15m
     public_wake: true
     wake_with: [reech]
     wake_triggers:
@@ -799,6 +809,8 @@ Service:
     location_type: stationary
     units: "8"
     instances: 1
+    idle_stop: true
+    idle_timeout: 15m
     public_wake: true
 
   # inventory-api.theofficialblacksheepco.online — Inventory Backend 2.
@@ -807,6 +819,8 @@ Service:
     location_type: stationary
     units: "8"
     instances: 1
+    idle_stop: true
+    idle_timeout: 15m
     public_wake: true
 
   # The Vite/React inventory app on unit7 (inventory.theofficialblacksheepco.
@@ -816,6 +830,8 @@ Service:
     location_type: stationary
     units: "7"
     instances: 1
+    idle_stop: true
+    idle_timeout: 15m
     public_wake: true
 
   # The edge's name for that app — borrows the container's registry placement
@@ -832,6 +848,8 @@ Service:
     location_type: stationary
     units: "7"
     instances: 1
+    idle_stop: true
+    idle_timeout: 15m
     public_wake: true
     edge_port: 8094
     git_remote: https://gitlab.com/gbonds1/pro-pieces.git

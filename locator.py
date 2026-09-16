@@ -289,6 +289,22 @@ def _base_name(container_name: str) -> str:
     return name
 
 def _max_instances(container_name: str) -> int:
+    # A loadbalanced service's replicas ARE the point — cap them at
+    # units x instances rather than the singleton/triple rules below, or the
+    # dedup pass would evict the very backends the edge is spreading across.
+    cfg = _policy_for(container_name)
+    if cfg.get("loadbalance"):
+        try:
+            inst = max(1, int(cfg.get("instances") or 1))
+        except (TypeError, ValueError):
+            inst = 1
+        with lock:
+            online = [u for u, i in registry.get("nodes", {}).items()
+                      if i.get("status") == "ONLINE"]
+        units = _expand_unit_spec(cfg.get("units"), online)
+        # No unit fan-out means same-host replicas only, and same host shares
+        # the published edge_port — the extras can't serve anyway.
+        return max(1, len(units) * inst) if units else 1
     base = _base_name(container_name)
     for known in TRIPLE_ALLOWED:
         if known in base:
@@ -1003,6 +1019,43 @@ def _edge_upstream(name, cfg, port):
     return f"http://{ip}:{port}"
 
 
+def _edge_upstreams(name, cfg, port):
+    """Every live backend for an edge service — the loadbalance:true path.
+
+    _edge_upstream picks ONE host; this collects every ONLINE registry entry
+    for the service and emits a server per host so Traefik round-robins them.
+    Entries dedupe by host: two replicas on one unit share the published
+    edge_port anyway, so the second would just be a duplicate URL.
+
+    OFFLINE entries are already excluded — the heartbeat reaper owns that
+    transition, so a unit going dark stops being emitted without any check
+    here. With no live replica at all we fall back to _edge_upstream's
+    dead/units resolution, which keeps the wake-on-502 path working.
+
+    Caller must hold `lock` (same rule as _edge_upstream).
+    """
+    cfg = cfg or {}
+    lookup = cfg.get("edge_host") or name
+    urls = []
+    seen_hosts = set()
+    for key, svc in registry["services"].items():
+        if key.split("@")[0] != lookup and svc.get("name") != lookup:
+            continue
+        if svc.get("status") != "ONLINE":
+            continue
+        host = svc.get("host") or ((svc.get("hosts") or [None])[0])
+        if not host or host in seen_hosts:
+            continue
+        ip = _node_probe_addr(registry["nodes"].get(host) or {})
+        if not ip:
+            continue
+        seen_hosts.add(host)
+        urls.append({"url": f"http://{ip}:{port}"})
+    if not urls:
+        urls = [{"url": _edge_upstream(name, cfg, port)}]
+    return urls
+
+
 @app.route("/api/traefik", methods=["GET"])
 def traefik_all_services():
     """Traefik HTTP-provider view of every edge-routed service in the fleet.
@@ -1019,7 +1072,12 @@ def traefik_all_services():
             port = cfg.get("edge_port")
             if not port:
                 continue
-            lb = {"servers": [{"url": _edge_upstream(name, cfg, port)}]}
+            if cfg.get("loadbalance"):
+                lb = {"servers": _edge_upstreams(name, cfg, port)}
+            else:
+                lb = {"servers": [{"url": _edge_upstream(name, cfg, port)}]}
+            if cfg.get("edge_sticky"):
+                lb["sticky"] = {"cookie": {"name": re.sub(r"[^A-Za-z0-9_-]", "_", f"lb_{name}")[:32]}}
             pass_host = cfg.get("edge_pass_host")
             if pass_host is not None:
                 # YAML gives a bool; a quoted "false" would arrive as a
@@ -1069,10 +1127,13 @@ def traefik_service(name):
     502s, which is exactly what the wake errors-middleware watches for.
     """
     port = request.args.get("port", "80")
+    cfg = _policy_for(name)
     with lock:
-        url = _edge_upstream(name, _policy_for(name), port)
-    return jsonify({"http": {"services": {
-        name: {"loadBalancer": {"servers": [{"url": url}]}}}}})
+        lb = {"servers": (_edge_upstreams(name, cfg, port) if cfg.get("loadbalance")
+                          else [{"url": _edge_upstream(name, cfg, port)}])}
+        if cfg.get("edge_sticky"):
+            lb["sticky"] = {"cookie": {"name": re.sub(r"[^A-Za-z0-9_-]", "_", f"lb_{name}")[:32]}}
+    return jsonify({"http": {"services": {name: {"loadBalancer": lb}}}})
 
 
 # Images whose containers hold state on local disk. Matched against the IMAGE
@@ -3105,6 +3166,21 @@ def balance_status():
     with prestage_lock:
         prestage = dict(prestage_state)
 
+    # Per-service backend counts for loadbalanced services — answers "why did
+    # my traffic split" without reading /api/traefik.
+    policy = load_policy()
+    backends = {}
+    with lock:
+        for name, cfg in policy.items():
+            if not cfg.get("loadbalance") or not cfg.get("edge_port"):
+                continue
+            backends[name] = sorted({
+                s.get("host") or (s.get("hosts") or ["?"])[0]
+                for k, s in registry["services"].items()
+                if (k.split("@")[0] == name or s.get("name") == name)
+                and s.get("status") == "ONLINE"
+            })
+
     return jsonify({
         "enabled":          BALANCE_ENABLED,
         "high_threshold":   BALANCE_HIGH,
@@ -3117,6 +3193,7 @@ def balance_status():
         "prestage_enabled":   BALANCE_PRESTAGE_ENABLED,
         "prestage_threshold": BALANCE_HIGH - BALANCE_PRESTAGE_MARGIN,
         "prestage":           prestage,
+        "edge_backends":      backends,
     })
 
 
@@ -3595,6 +3672,18 @@ YAML_TEMPLATES = {
 #                  ALWAYS QUOTE the underscore form — YAML 1.1 reads a bare
 #                  7_8_9 as the integer 789 and the policy matches nothing.
 # instances:       how many per unit (default 1)
+# idle_stop:       opt-in - queue a stop after the container's net traffic has
+#                  been quiet for idle_timeout. Never fires on essential
+#                  services or the last live replica of a loadbalanced one.
+# idle_timeout:    per-service idle window ("15m", "2h", "5400").
+# loadbalance:     opt-in - emit EVERY ONLINE replica as a backend in
+#                  /api/traefik so edges round-robin across units, instead of
+#                  pinning to the first live host. Pairs with a multi-unit
+#                  'units:' spec; replicas on the same unit share the published
+#                  edge_port and collapse to one backend.
+# edge_sticky:     opt-in - add a Traefik sticky cookie so a visitor stays on
+#                  whichever backend they first hit. For services whose
+#                  replicas hold per-visitor state (ws rooms, sessions).
 # project_dir /
 # git_remote:      opt in to placement enforcement. Without one of these the
 #                  locator will NOT fan a service out, because a queued deploy
@@ -3764,6 +3853,18 @@ def load_policy():
                 # 15s/5s probe.
                 "edge_pass_host": cfg.get("edge_pass_host"),
                 "edge_healthcheck": str(cfg.get("edge_healthcheck", "")),
+                # loadbalance: emit EVERY ONLINE replica as a backend server in
+                # /api/traefik instead of just the first live host, so Traefik
+                # round-robins across units. Replica liveness comes free from
+                # the heartbeat reaper — a dead instance stops heartbeating,
+                # goes OFFLINE, and falls out of the emitted list on the edge's
+                # next poll. Strictly opt-in like idle_stop.
+                "loadbalance": bool(cfg.get("loadbalance", False)),
+                # edge_sticky: pin a visitor to whichever backend they first
+                # hit via a Traefik sticky cookie. Needed when replicas keep
+                # per-connection or in-memory state (ws rooms, sessions) that
+                # the other unit knows nothing about.
+                "edge_sticky": bool(cfg.get("edge_sticky", False)),
                 # ── Wake-on-request ──────────────────────────────────────
                 # Same argument as idle_stop above, and the other half of the
                 # same feature: the thing that STOPS a container is declared
@@ -6246,6 +6347,18 @@ def idle_reaper():
                 idle_for = (now - st["last_active"]).total_seconds()
                 if idle_for < st["timeout"]:
                     continue
+                # A loadbalanced service may shed idle replicas — they drop out
+                # of the emitted backend list while stopped — but the LAST one
+                # carries the wake-on-502 path: stopping it too would leave the
+                # emitted dead-upstream pointing nowhere wake can reach.
+                if _policy_for(name).get("loadbalance"):
+                    with lock:
+                        online_replicas = sum(
+                            1 for k, s in registry["services"].items()
+                            if (k.split("@")[0] == name or s.get("name") == name)
+                            and s.get("status") == "ONLINE")
+                    if online_replicas <= 1:
+                        continue
                 print(f"💤 IDLE: '{name}' on {unit} quiet {int(idle_for / 60)}m "
                       f"(limit {int(st['timeout'] / 60)}m) — queueing stop")
                 _queue_command(unit, name, "stop", source="idle")
