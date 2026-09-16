@@ -6318,9 +6318,24 @@ def _wake_companions(container):
     Kept here rather than in each caller so a Traefik file or a link asks for
     ONE name: /wake/reech starts reech's database too, without reech.yml or the
     portal's HTML having to know that the database exists.
+
+    Also follows the oauth naming convention automatically: an edge router
+    fronts the service through <name>-oauth2-proxy (or -oauth), and opt-out
+    idle-stop can now stop that proxy on its own — waking only the app left
+    the front door dead (agent-0 2026-09-16). The reverse holds too: waking
+    the proxy also brings up the app behind it.
     """
-    return [d for d in _wake_policy(container).get("wake_with", [])
+    deps = [d for d in _wake_policy(container).get("wake_with", [])
             if d and d != container]
+    base = re.sub(r"-(oauth2-proxy|oauth)$", "", container)
+    candidates = {f"{base}-oauth2-proxy", f"{base}-oauth", base}
+    candidates.discard(container)
+    with lock:
+        known = {svc.get("name") for svc in registry["services"].values()}
+    for cand in candidates:
+        if cand in known and cand not in deps:
+            deps.append(cand)
+    return deps
 
 
 @app.route("/api/wake/triggers", methods=["GET"])
