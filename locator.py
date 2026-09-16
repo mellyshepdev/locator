@@ -149,6 +149,7 @@ BALANCE_DIFF     = float(os.environ.get("BALANCE_DIFF", "25"))     # % spread be
 BALANCE_STRIKES  = int(os.environ.get("BALANCE_STRIKES", "1"))      # consecutive overloaded checks before migrating
 OOM_THRESHOLD    = float(os.environ.get("OOM_THRESHOLD", "80"))     # % mem — emergency migration, bypasses anti-flap/cooldown
 DISK_CRIT_PERCENT = float(os.environ.get("DISK_CRIT_PERCENT", "95")) # % disk — same emergency treatment; a full disk crashes the whole unit
+MIGRATION_FAIL_BACKOFF = int(os.environ.get("MIGRATION_FAIL_BACKOFF", "1800"))  # s before re-trying a service whose last migration FAILED
 
 # Proactive pre-staging: watch nodes trending toward BALANCE_HIGH *before* they
 # get there, and validate (not execute) a migration ahead of time so the real
@@ -386,6 +387,11 @@ migration_queue: dict = {}
 migration_lock  = threading.Lock()
 # Cooldown: when each node last had a container migrated OUT of it
 node_last_migrated: dict = {}
+# Fail backoff: container name -> last failure time. A service that cannot
+# migrate (no compose dir on source, target rejects it, ...) used to re-queue
+# every balance cycle and burn the node's one-migration-per-cooldown slot
+# forever. Stamped at both FAILED transitions.
+migration_failed_at: dict = {}
 # Anti-flap: how many consecutive balance checks a node has been overloaded
 overload_strikes: dict = {}
 
@@ -2918,6 +2924,7 @@ def _verify_migration(mig_id):
             mig["verified"]     = False
             mig["error"]        = reason
             mig["completed_at"] = datetime.now(timezone.utc).isoformat()
+            migration_failed_at[container] = datetime.now(timezone.utc)
     print(f"❌ MIGRATION {mig_id}: {reason}")
 
     if from_node and from_node != to_node:
@@ -2957,6 +2964,8 @@ def complete_migration():
             else:
                 mig["status"]       = "DONE" if success else "FAILED"
                 mig["completed_at"] = datetime.now(timezone.utc).isoformat()
+                if not success:
+                    migration_failed_at[mig.get("container", "")] = datetime.now(timezone.utc)
                 print(f"{'✅' if success else '❌'} MIGRATION {mig_id}: {'DONE' if success else 'FAILED'}")
             # Deferred while VERIFYING — _verify_migration emits the failure
             # event itself, and a success event here would announce an outcome
@@ -4217,6 +4226,10 @@ def load_balancer():
                     for m in migration_queue.values()
                     if m.get("status") in ("PENDING", "IN_PROGRESS")
                 }
+            # A service that keeps failing (no compose dir on source, target
+            # rejects it) sits out one backoff window instead of eating this
+            # node's one-migration-per-cooldown slot every cycle forever.
+            fail_cutoff = now - timedelta(seconds=MIGRATION_FAIL_BACKOFF)
             movable = [
                 (svc_id, svc)
                 for svc_id, svc in services_snap.items()
@@ -4226,6 +4239,8 @@ def load_balancer():
                 and not _is_pinned(svc.get("name"))
                 and not svc.get("metadata", {}).get("pinned")
                 and svc.get("name") not in in_flight
+                and (migration_failed_at.get(svc.get("name"))
+                     or datetime.min.replace(tzinfo=timezone.utc)) < fail_cutoff
                 and not resolve_migration_order(svc_id, services_snap)[1]  # no missing deps
             ]
 
