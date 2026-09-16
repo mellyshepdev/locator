@@ -464,6 +464,32 @@ Service:
     instances: 1
     restart_when_stopped: true
 
+  # The log receiver + web UI on unit8. Found Exited for 4h on 2026-09-16
+  # (graceful stop, no command on record) with nothing to bring them back —
+  # fluent-bit kept shipping into a dead API the whole time.
+  live-logger:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+    restart_when_stopped: true
+
+  live-logger-api:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+    restart_when_stopped: true
+
+  # Scale-to-zero proxy (pgAdmin). When it is down everything it fronts is
+  # stranded: the containers stay stopped AND nothing can wake them.
+  sablier:
+    deployment_type: essential
+    location_type: stationary
+    units: "8"
+    instances: 1
+    restart_when_stopped: true
+
   # ── lokey — the host agent, every unit ─────────────────────────────────
   # Added 2026-08-23.
   #

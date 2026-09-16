@@ -2831,6 +2831,13 @@ def update_node_metrics(node_id):
         for _addr_field in ("ip", "private_ip", "tailscale_ip", "openvpn_ip"):
             if data.get(_addr_field):
                 node[_addr_field] = data[_addr_field]
+        # The unit's docker ps -a truth (running AND stopped). Per-container
+        # service records only refresh while a container runs, so a stopped
+        # one and a deleted one both look stale — this list is what tells them
+        # apart, and the wake path refuses to queue starts for names absent
+        # from it (deleted containers used to fail-and-requeue forever).
+        if data.get("containers") is not None:
+            node["containers"] = data["containers"]
         node["last_seen"]     = now
         node["status"]        = "ONLINE"
         registry["updated"]   = now
@@ -6163,12 +6170,40 @@ def _find_container_unit(container):
     return None
 
 
+def _container_exists_on_unit(unit, container):
+    """Is this name in the unit's reported docker ps -a?
+
+    The node's `containers.all` snapshot is the only fleet truth that covers
+    STOPPED containers: service records stop heartbeating the moment a
+    container exits, so the registry cannot tell "stopped" from "deleted"
+    without it. wake_page used to queue a start for anything the stale web_*
+    map pointed at, and a deleted container (insight, ebay-endpoint,
+    nasa-web — 2026-09-16) failed on every monitor sweep forever.
+
+    A node that has never sent the list (older lokey, non-docker unit) gets
+    the benefit of the doubt: absence of the FIELD is not absence of the
+    container. Only an explicit list that omits the name is a "gone".
+    """
+    if not unit:
+        return False
+    with lock:
+        node = registry["nodes"].get(unit) or {}
+        listing = (node.get("containers") or {}).get("all")
+    if listing is None:
+        return True
+    names = {e.get("name") for e in listing if isinstance(e, dict)}
+    names |= {e for e in listing if isinstance(e, str)}
+    return container in names
+
+
 @app.route("/api/idle/wake/<container>", methods=["POST"])
 def idle_wake(container):
     """Queue a start command so the hosting unit's lokey wakes the container."""
     unit = _find_container_unit(container)
     if not unit:
         return jsonify({"error": f"unknown container '{container}'"}), 404
+    if not _container_exists_on_unit(unit, container):
+        return jsonify({"error": f"'{container}' no longer exists on {unit}"}), 410
     cmd = _queue_command(unit, container, "start", source="wake")
     return jsonify({"ok": True, "command": cmd})
 
@@ -6483,11 +6518,17 @@ def wake_page(container):
         extra_unit = _find_container_unit(extra)
         # A dependency that is unknown to the registry must never block the
         # primary from waking - best effort, and the primary still proceeds.
-        if extra_unit:
+        # Same for one whose name survives only in a stale web_* entry after
+        # the container itself was deleted: no start is queued for a name the
+        # unit no longer has.
+        if extra_unit and _container_exists_on_unit(extra_unit, extra):
             _queue_command(extra_unit, extra, "start", source="wake")
     unit = _find_container_unit(container)
     if not unit:
         return Response(f"Unknown container '{container}'", status=404)
+    if not _container_exists_on_unit(unit, container):
+        return Response(f"'{container}' no longer exists on {unit}",
+                        status=410, mimetype="text/plain")
     _queue_command(unit, container, "start", source="wake")
     # Optional explicit redirect target (?to=...), restricted to our own domains
     target = request.args.get("to", "")
