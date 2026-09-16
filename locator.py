@@ -4203,6 +4203,15 @@ def load_balancer():
             # Find movable services on this node — container OR native, as long as
             # their declared dependencies (if any) are satisfied somewhere in the
             # registry. Native services used to be hard-excluded here entirely.
+            # OOM bypasses cooldown, so without this check the same service
+            # gets re-queued every tick while its first migration is still
+            # being claimed/executed by the source lokey.
+            with migration_lock:
+                in_flight = {
+                    m.get("container")
+                    for m in migration_queue.values()
+                    if m.get("status") in ("PENDING", "IN_PROGRESS")
+                }
             movable = [
                 (svc_id, svc)
                 for svc_id, svc in services_snap.items()
@@ -4211,6 +4220,7 @@ def load_balancer():
                 and svc.get("type") in ("container", "native")
                 and not _is_pinned(svc.get("name"))
                 and not svc.get("metadata", {}).get("pinned")
+                and svc.get("name") not in in_flight
                 and not resolve_migration_order(svc_id, services_snap)[1]  # no missing deps
             ]
 
