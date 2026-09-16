@@ -163,6 +163,13 @@ PUBLIC = {
     # the container name they are already allowed to wake — no registry record,
     # no addressing, nothing that is not public by construction.
     "wake_triggers",
+    # The catch-all's backend: a label-routed container that stopped loses its
+    # router, so the request arrives here carrying only its Host. It answers
+    # pre-auth for the same reason wake_page does, and it is not open either —
+    # wake_by_host resolves Host through the registry and hands off to
+    # wake_page, which applies _may_wake: anonymous can only ever start a
+    # container that already has a public route.
+    "wake_by_host",
 }
 
 # Ingest endpoints — written to by unattended agents. Gated by ENFORCE_INGEST

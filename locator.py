@@ -1102,6 +1102,7 @@ def traefik_all_services():
         # the deployment's node currently lives. Two claims on one subdomain
         # collapse to a single router; the later registration wins.
         routers = {}
+        middlewares = {}
         for svc in registry["services"].values():
             sub, dom = svc.get("subdomain"), svc.get("domain")
             if not sub or not dom:
@@ -1111,15 +1112,33 @@ def traefik_all_services():
             url = f"http://{ip}:{svc.get('port') or 80}" if ip else EDGE_DEAD_UPSTREAM
             rname = f"deploy-{sub}"
             out[rname] = {"loadBalancer": {"servers": [{"url": url}]}}
+            # The router is emitted here, not by the container's labels, so it
+            # survives a stopped backend — attach the wake middleware and the
+            # deployment gets the same errors→/wake path the file-defined
+            # routers hand-write.
+            target = svc.get("name") or rname
+            wname = f"{rname}-wake"
+            middlewares[wname] = {
+                "errors": {
+                    "status": ["500-599"],
+                    # locator-wake is defined by the edge's file provider;
+                    # unqualified here it would resolve inside @http and miss.
+                    "service": "locator-wake@file",
+                    "query": f"/wake/{target}",
+                }
+            }
             routers[rname] = {
                 "rule": f"Host(`{sub}.{dom}`)",
                 "entryPoints": ["websecure"],
                 "service": rname,
+                "middlewares": [wname],
                 "tls": {"certResolver": "myresolver"},
             }
     body = {"http": {"services": out}}
     if routers:
         body["http"]["routers"] = routers
+    if middlewares:
+        body["http"]["middlewares"] = middlewares
     return jsonify(body)
 
 
@@ -3207,29 +3226,88 @@ def balance_status():
     })
 
 
+def _routed_containers():
+    """Names of containers a public hostname resolves to.
+
+    The web_* registry entries (lokey registers one per Traefik Host() label)
+    and user deployments (subdomain+domain) are the two maps that outlive the
+    container itself — which is exactly what a wake path needs: the label
+    router dies with the container, the request falls through to the edge
+    catch-all, and /wake resolves Host back to this name and starts it.
+
+    A container with NO route has no way back up once stopped, so routing is
+    the line between 'idle-stoppable by default' and 'needs idle_stop: true'.
+
+    Caller must hold `lock`.
+    """
+    out = set()
+    for key, svc in registry["services"].items():
+        if key.startswith("web_"):
+            container = (svc.get("metadata") or {}).get("container")
+            if container:
+                out.add(container.lower())
+        elif svc.get("subdomain") and svc.get("domain") and svc.get("name"):
+            out.add(svc["name"].lower())
+    return out
+
+
 @app.route("/api/idle/policy", methods=["GET"])
 def idle_policy():
-    """Which containers a unit is ALLOWED to idle-stop, straight from locator.yml.
+    """Which containers a unit is ALLOWED to idle-stop.
 
-    lokey calls this each tick instead of reading the locator.idle.stop label.
-    The label still works and is unioned in on the agent side, but this is the
-    path that makes the policy file authoritative.
+    Opt-out, not opt-in: every ONLINE container on the unit is eligible unless
+    something says it is not — an essential or stationary policy stanza, a
+    name matching _PINNED_NAMES, a stateful-looking image, or an explicit
+    `idle_stop: false`.
 
-    Two floors, both deliberate:
-      * opt-in only — a service is returned solely because it carries
-        idle_stop: true, so an undeclared service is never eligible;
-      * deployment_type: essential is refused even when idle_stop is set, so
-        the two keys cannot contradict each other into stopping a critical
-        service.
+    The one positive requirement is a way back up: a container nobody can wake
+    (no public_wake stanza, no public route in the registry) is only watched
+    when it opted in with `idle_stop: true`, because stopping it is a silent
+    outage until a human notices. Explicit `idle_stop: true` is therefore kept
+    as 'stop it even though nothing can wake it'.
+
+    lokey's NEVER_STOP list is the independent second check on the unit side:
+    the locator decides, but the stop runs there.
     """
     unit = (request.args.get("unit") or "").strip().lower()
     if unit and not unit.startswith("unit"):
         unit = "unit" + unit
     out = {}
+    with lock:
+        routed = _routed_containers()
+        for key, svc in registry["services"].items():
+            if svc.get("type") != "container":
+                continue
+            if svc.get("status") != "ONLINE":
+                continue
+            host = svc.get("host") or ((svc.get("hosts") or [None])[0])
+            if unit and host != unit:
+                continue
+            name = (svc.get("name") or key.split("@")[0]).lower()
+            cfg = _policy_for(name)
+            if cfg.get("idle_stop") is False or cfg.get("restart_when_stopped"):
+                continue
+            # _PINNED_NAMES substring — NOT _is_pinned: 'stationary' means
+            # never MIGRATE (volumes don't move), but stopping one is safe —
+            # the data stays and the wake restarts it on the same host.
+            if is_essential(cfg) or any(p in name for p in _PINNED_NAMES):
+                continue
+            image = ((svc.get("metadata") or {}).get("image") or "").lower()
+            if any(m in image for m in _STATEFUL_IMAGE_MARKERS):
+                continue
+            if not cfg.get("idle_stop") and not (
+                    cfg.get("public_wake") or name in routed):
+                continue
+            out[name] = {"timeout": cfg.get("idle_timeout") or ""}
+    # Policy-declared opt-ins that are not (yet) in the registry — the
+    # registry pass above only sees ONLINE containers, while a declared
+    # service is eligible by name whether or not it has registered yet.
     for name, cfg in load_policy().items():
-        if not cfg.get("idle_stop"):
+        if not cfg.get("idle_stop") or name in out:
             continue
-        if is_essential(cfg):
+        if cfg.get("restart_when_stopped"):
+            continue
+        if is_essential(cfg) or any(p in name for p in _PINNED_NAMES):
             continue
         spec = cfg.get("units") or ""
         if unit and spec not in ("", "all", "current_unit"):
@@ -6131,6 +6209,26 @@ def _wake_policy(container):
     return load_policy().get(str(container).strip().lower(), {})
 
 
+def _is_publicly_routed(container):
+    """True when a public hostname resolves to this container.
+
+    That is what lets an anonymous caller wake it: reaching a wake URL under
+    the service's own hostname means the visitor IS the public this route
+    exists for. Two maps qualify — a web_* registry entry (label-routed
+    container) or a deployment's subdomain+domain claim.
+    """
+    low = str(container).lower()
+    with lock:
+        for key, svc in registry["services"].items():
+            if key.startswith("web_"):
+                if ((svc.get("metadata") or {}).get("container") or "").lower() == low:
+                    return True
+            elif svc.get("subdomain") and svc.get("domain"):
+                if (svc.get("name") or "").lower() == low:
+                    return True
+    return False
+
+
 def _may_wake(container):
     """CLIENT and above may wake anything; anonymous only the opted-in.
 
@@ -6138,13 +6236,54 @@ def _may_wake(container):
     change, so opting a new service in is a YAML edit rather than a rebuild of
     an image that has the list frozen inside it. PUBLIC_WAKE stays as the
     escape hatch for a container with no policy stanza at all.
+
+    The third leg is routing itself: a container with a public hostname is
+    wakeable by construction, because the only requests that can arrive for it
+    are the public's own. This is what makes opt-out idle-stop safe — every
+    container the policy returns by default has a route back up.
     """
     principal = getattr(g, "principal", None)
     if principal is not None and principal.level >= clearance.CLIENT:
         return True
     if _wake_policy(container).get("public_wake"):
         return True
-    return container in PUBLIC_WAKE
+    if container in PUBLIC_WAKE:
+        return True
+    return _is_publicly_routed(container)
+
+
+def _container_for_domain(host):
+    """Which container a public hostname should wake, or None.
+
+    Declared wake_triggers in locator.yml answer first; the fallback is the
+    registry's web_* map, which every unit's lokey feeds from container
+    Traefik labels and which OUTLIVES the container — the whole point of this
+    lookup, since the label router is gone precisely when the container is
+    down. Declared triggers winning also keeps the deliberate cases right:
+    two services sharing a domain stay unambiguous because the policy says
+    which one owns it.
+    """
+    host = (host or "").split(":")[0].strip().lower()
+    if not host:
+        return None
+    for name, cfg in load_policy().items():
+        if not cfg.get("public_wake"):
+            continue
+        for d in (cfg.get("wake_triggers") or {}).get("domain", []):
+            if str(d).lower() == host:
+                return name
+    with lock:
+        for key, svc in registry["services"].items():
+            if not key.startswith("web_"):
+                continue
+            url = svc.get("url") or ""
+            url_host = url.split("://", 1)[-1].split("/")[0].split(":")[0].lower()
+            if url_host != host:
+                continue
+            container = (svc.get("metadata") or {}).get("container")
+            if container:
+                return container
+    return None
 
 
 def _wake_companions(container):
@@ -6218,9 +6357,38 @@ def wake_triggers():
             "wake_url": f"/wake/{name}",
         }
     if query:
+        # Declared triggers missed — the registry fallback covers every
+        # label-routed container, whose domain→container map exists whether
+        # or not anyone wrote a policy stanza for it.
+        if "domain" in query:
+            container = _container_for_domain(query["domain"])
+            if container:
+                return jsonify({
+                    "matched": query,
+                    "container": container,
+                    "wake_url": f"/wake/{container}",
+                    "wake_with": _wake_companions(container),
+                })
         return jsonify({"matched": query, "container": None,
                         "error": "no container declares this trigger"}), 404
     return jsonify({"containers": out, "count": len(out)})
+
+
+@app.route("/wake", methods=["GET", "POST"])
+def wake_by_host():
+    """Wake whatever container the requested Host routes to.
+
+    This is what the edge catch-all points at: when a label-routed container
+    stops, its router disappears and the request falls through every other
+    router to here — so the Host header is the only identifier of what was
+    asked for. _may_wake still applies through wake_page, so an anonymous
+    hit can only start a container that is genuinely public.
+    """
+    container = _container_for_domain(request.host)
+    if not container:
+        return Response("Nothing is registered for this host.",
+                        status=404, mimetype="text/plain")
+    return wake_page(container)
 
 
 @app.route("/wake/<container>", methods=["GET"])

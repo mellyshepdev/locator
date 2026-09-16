@@ -73,7 +73,16 @@ services:
       # gap found: vaultwarden had no locator.yml entry at all.
       - BALANCE_ENABLED=true
       - ELECTION_DRY_RUN=false
-      - DISK_VETO_PERCENT=97
+      # Veto at 90, not 97: the goal is never sitting at 96%, and a target at
+      # 90%+ receiving a migration IS how a unit gets there. Below this the
+      # balancer already treats disk as the primary load; past it a unit can
+      # shed but never receive.
+      - DISK_VETO_PERCENT=90
+      # Emergency drain starts at 92 — between the veto and a genuinely full
+      # disk — so a climbing unit gets migrated off on the OOM path (cooldown
+      # and anti-flap bypassed) instead of waiting for strikes while the disk
+      # fills. lokey's janitor escalates to image-prune -a at 93.
+      - DISK_CRIT_PERCENT=92
       - DATABASE_URL=${DATABASE_URL}
       - LOCATOR_CANONICAL_URL=https://locator.prime-quality.online
       # Traccar runs on unit9 as a systemd service on :8082. Nothing has served
