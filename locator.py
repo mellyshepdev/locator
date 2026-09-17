@@ -4317,6 +4317,13 @@ _PINNED_NAMES = {
     # DNS keeps pointing at unit8 — the site just goes dark. locator.yml already
     # pins them; this makes it uneditable from the grid as well.
     "main-site", "client-portal",
+    # socat publish-sidecars — the '*-pub' naming convention for containers
+    # that expose another service onto the tailnet. Pure plumbing: no traffic
+    # pattern of their own, so the idle reaper sees a forwarder with no
+    # requests and stops it, silently breaking whatever it publishes
+    # (locator-tailnet-pub, searchsearcher-oauth-pub — both reaped 2026-09-17
+    # while their upstreams were still up).
+    "-pub",
 }
 
 
@@ -7247,7 +7254,7 @@ def website_pinger():
             all_ctrs = docker_client.api.containers(all=True)
             running = {s["Names"][0].lstrip("/") for s in all_ctrs
                        if s.get("State") == "running" and s.get("Names")}
-            _unit = os.environ.get("UNIT_NAME", "unknown")
+            _unit = UNIT_NAME or "unknown"
             import re as _re
             for ctr in all_ctrs:
                 cname = (ctr.get("Names") or [""])[0].lstrip("/")
