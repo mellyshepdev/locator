@@ -1,0 +1,13 @@
+Service:
+
+  # glances-web — nicolargo/glances monitoring UI on unit7. Pure convenience
+  # dashboard; nothing depends on it. Idle-stopped after 15m per owner call
+  # 2026-09-16; start it manually on the unit when wanted (no public route —
+  # tailnet-only, so no domain wake trigger).
+  glances-web:
+    deployment_type: optional
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: true
+    idle_timeout: 15m

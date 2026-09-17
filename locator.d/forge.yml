@@ -8,13 +8,13 @@ Service:
     units: "7"
     instances: 1
     public_wake: true
-    # Always-on (owner call 2026-09-16): forge stays up, idle-stop exempt.
-    # The wake path stays armed — public_wake + the file-defined router and
-    # errors middleware in the edge's forge.yml — as recovery if it ever dies
-    # for another reason; a visitor's own request still brings it back.
+    # Idle-stopped (owner call 2026-09-16, superseding the earlier always-on
+    # pin): forge reaps after 15 idle minutes. The wake path stays armed —
+    # public_wake + the file-defined router and errors middleware in the
+    # edge's forge.yml — so a visitor's own request still brings it back.
     # Its compose sets restart:"no"; a restart policy would resurrect it
     # behind the idle policy's back.
-    idle_stop: false
+    idle_stop: true
     idle_timeout: 15m
     # /pad and /view are a separate container that stops independently —
     # 2026-08-28 took down both, and waking only forge left those two prefixes

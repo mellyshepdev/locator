@@ -1,0 +1,11 @@
+Service:
+
+  # inventory-api-standby — hot standby for the inventory API on unit7.
+  # Owner call 2026-09-16: stays up 24/7 — essential so idle-stop can never
+  # touch it, restart_when_stopped so lokey resurrects it after any stop.
+  inventory-api-standby:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    restart_when_stopped: true
