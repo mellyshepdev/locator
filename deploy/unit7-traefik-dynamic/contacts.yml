@@ -1,0 +1,31 @@
+# contacts.theofficialblacksheepco.com — standalone host for the site's
+# contact page (html/contactpage.html inside the main-website container).
+# Root path serves the page directly so the bare domain shows it; other
+# paths (favicon etc.) pass through to the site docroot normally.
+# Cert comes from the myresolver ACME resolver once DNS points here.
+http:
+  routers:
+    contacts-root:
+      rule: "Host(`contacts.theofficialblacksheepco.com`) && Path(`/`)"
+      entryPoints: [websecure]
+      tls:
+        certResolver: myresolver
+      middlewares: [contacts-to-page]
+      service: main-website
+    contacts-assets:
+      rule: "Host(`contacts.theofficialblacksheepco.com`)"
+      entryPoints: [websecure]
+      tls:
+        certResolver: myresolver
+      service: main-website
+
+  middlewares:
+    contacts-to-page:
+      replacePath:
+        path: /html/contactpage.html
+
+  services:
+    main-website:
+      loadBalancer:
+        servers:
+          - url: "http://main-website:80"
