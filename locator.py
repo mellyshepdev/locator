@@ -4731,8 +4731,11 @@ def local_docker_scanner():
                         registry["services"][service_id]["last_heartbeat"] = now
                         registry["services"][service_id].pop("offline_since", None)
 
-            # Mark the local node ONLINE since we can see its containers
-            _local_unit = os.environ.get("UNIT_NAME", "unknown")
+            # Mark the local node ONLINE since we can see its containers.
+            # Resolved UNIT_NAME, not the env — a stale env value marked a
+            # FOREIGN node's last_seen fresh (env said unit4 on a unit7
+            # daemon), which made its dead service records outrank live ones.
+            _local_unit = UNIT_NAME or "unknown"
             with lock:
                 if _local_unit and _local_unit != "unknown" and _local_unit in registry["nodes"]:
                     registry["nodes"][_local_unit]["status"] = "ONLINE"
@@ -6384,9 +6387,20 @@ def _find_service_entry(container):
         except (TypeError, ValueError):
             return 0.0
 
+    def _on_live_node(key, s):
+        # A service record's status is only as fresh as the node reporting it —
+        # 'name@unit4' kept claiming ONLINE for hours after unit4 died, so a
+        # wake resolved to a unit whose lokey could never execute the start.
+        unit = s.get("host") or (s.get("hosts") or [None])[0]
+        if not unit and "@" in key:
+            unit = key.split("@", 1)[1]
+        node = registry["nodes"].get(unit) if unit else None
+        return bool(node) and _node_is_fresh(node)
+
     def rank(item):
         key, s = item
-        return (0 if s.get("status") == "ONLINE" else 1,
+        return (0 if _on_live_node(key, s) else 1,
+                0 if s.get("status") == "ONLINE" else 1,
                 0 if "@" in key else 1,
                 -_hb_epoch(s.get("last_heartbeat")))
 
@@ -6398,8 +6412,13 @@ def _find_container_unit(container):
     """Best-effort: which unit hosts this container?"""
     with _idle_lock:
         for unit, name in _idle_state:
-            if name == container:
+            if name != container:
+                continue
+            node = registry["nodes"].get(unit) or {}
+            if not node or _node_is_fresh(node):
                 return unit
+            # Stale idle entry from a dead lokey — fall through to the
+            # service records, which now prefer live-node entries too.
     with lock:
         key, svc = _find_service_entry(container)
         if svc:

@@ -8,13 +8,12 @@ Service:
     location_type: stationary
     units: "8"
     instances: 1
-    # Always-on (owner call 2026-09-16): no idle-stop. The wake path stays
-    # armed for recovery — a visitor to the main site, the welcome page, or
-    # search.theofficialblacksheepco.com itself still wakes it if it dies.
-    # searchsearcher-postgres matches the "postgres" entry in _PINNED_NAMES
-    # in locator.py, so its idle reports are dropped anyway — and the app
+    # Wake-on-visit (owner call 2026-09-17): the app may idle-stop; a visitor
+    # landing on the main site, the welcome page, or search.…com itself wakes
+    # it via wake_triggers below + js/wake.js on the page. The postgres stays
+    # up — it matches the "postgres" entry in _PINNED_NAMES, and the app
     # answers 500, not "starting", if its database is down (wake_with).
-    idle_stop: false
+    idle_stop: true
     idle_timeout: 15m
     public_wake: true
     project_dir: /home/swoopg111/projects/searchsearcher
