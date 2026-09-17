@@ -35,7 +35,7 @@ services:
               "--access-logfile", "-", "--error-logfile", "-", "--log-level", "debug",
               "locator:app"]
     environment:
-      - UNIT_NAME=unit4
+      - UNIT_NAME=${UNIT_NAME:?Set UNIT_NAME in .env or environment}
       # Run the fleet refresh with the script's own debug tracing on
       # (refresh honours DEBUG=1 -> its debug() helper). Without this the
       # per-unit run logs only its "==>" milestones.

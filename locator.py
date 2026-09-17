@@ -160,7 +160,80 @@ BALANCE_PRESTAGE_ENABLED = os.environ.get("BALANCE_PRESTAGE_ENABLED", "true").lo
 BALANCE_PRESTAGE_MARGIN  = float(os.environ.get("BALANCE_PRESTAGE_MARGIN", "15"))  # % below BALANCE_HIGH that triggers pre-staging
 PRESTAGE_STALE_SECONDS   = int(os.environ.get("PRESTAGE_STALE_SECONDS", "600"))    # re-validate if older than this
 
-UNIT_NAME             = os.environ.get("UNIT_NAME", "unknown")
+_DOCKER_DAEMON_NAME_CACHE = None
+
+def _docker_daemon_name():
+    """The Docker daemon's own host name, queried once over the socket.
+
+    Unlike UNIT_NAME this cannot be copied to the wrong machine: a compose
+    file or .env travels, the daemon's identity does not. Returns "" when
+    the socket is absent (native runs) or the query fails.
+    """
+    global _DOCKER_DAEMON_NAME_CACHE
+    if _DOCKER_DAEMON_NAME_CACHE is not None:
+        return _DOCKER_DAEMON_NAME_CACHE
+    name = ""
+    try:
+        if os.path.exists("/var/run/docker.sock"):
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(3)
+            s.connect("/var/run/docker.sock")
+            s.sendall(b"GET /info HTTP/1.0\r\nHost: localhost\r\n\r\n")
+            raw = b""
+            while True:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                raw += chunk
+            s.close()
+            name = json.loads(raw.split(b"\r\n\r\n", 1)[1]).get("Name") or ""
+    except Exception:
+        pass
+    _DOCKER_DAEMON_NAME_CACHE = name
+    return name
+
+
+def _daemon_matches(host):
+    """True when a registry unit name resolves to THIS Docker host.
+
+    Normalized containment both ways so 'unit7' matches daemon
+    'BlackSheepUnit7' and vice versa; unmatched daemon names ('my-vps')
+    make the guard inert.
+    """
+    daemon = _docker_daemon_name()
+    if not daemon or not host:
+        return False
+    d = re.sub(r"[^a-z0-9]", "", daemon.lower())
+    h = re.sub(r"[^a-z0-9]", "", str(host).lower())
+    # Length floor: '7' would substring-match 'blacksheepunit7' without it.
+    return len(h) >= 3 and bool(d) and (h in d or d in h)
+
+
+def _resolve_unit_name():
+    """Real unit identity — the Docker daemon outranks the env var.
+
+    UNIT_NAME=unit4 hardcoded in docker-compose.yml travelled with every
+    deployment: unit7's standby ran believing it WAS unit4, so its
+    election treated the lokey-registered 'locator@unit7' — the locator
+    on its own physical host — as a rival and killed it. Twice observed:
+    once via a queued stop its own lokey executed ("keeping unit4,
+    evicting unit7"), once via _stop_self ("unit7 healthier than unit4").
+    Both locators ended up dead. When the daemon name clearly identifies
+    a unit it wins; env is only the fallback for hosts that don't name
+    their daemon after the unit.
+    """
+    env_name = os.environ.get("UNIT_NAME", "unknown")
+    m = re.search(r"unit\d+", _docker_daemon_name().lower())
+    if m:
+        if m.group(0) != env_name.lower():
+            print(f"⚠️  UNIT_NAME={env_name} but Docker daemon is "
+                  f"'{_docker_daemon_name()}' — using daemon-derived "
+                  f"'{m.group(0)}'")
+        return m.group(0)
+    return env_name
+
+
+UNIT_NAME             = _resolve_unit_name()
 LOCATOR_CANONICAL_URL = os.environ.get("LOCATOR_CANONICAL_URL", "https://locator.prime-quality.online")
 
 # ── ALERT / TELEMETRY CONFIG ─────────────────────────────────────────────────
@@ -748,7 +821,14 @@ def _node_health(unit):
 
 
 def _locator_hosts():
-    """Units currently reporting an ONLINE locator, ourselves always included."""
+    """Units currently reporting an ONLINE locator, ourselves always included.
+
+    Entries hosted on our own Docker daemon are excluded even if they carry
+    a foreign unit name: a locator on this physical host IS us (or a local
+    duplicate), never a rival to evict. That is the suicide guard for any
+    identity confusion _resolve_unit_name cannot repair — e.g. a daemon not
+    named after its unit.
+    """
     base = _base_name(SELF_CONTAINER_NAME)
     hosts = {UNIT_NAME}
     with lock:
@@ -758,7 +838,7 @@ def _locator_hosts():
             if _base_name(svc.get("name", "")) != base:
                 continue
             host = svc.get("host") or (svc.get("hosts") or [None])[0]
-            if host:
+            if host and host != UNIT_NAME and not _daemon_matches(host):
                 hosts.add(host)
     return hosts
 
