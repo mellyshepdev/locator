@@ -1382,6 +1382,17 @@ def register_service():
             "domain": data.get("domain", existing.get("domain")),
         }
 
+        # Owner-marked public surface: a policy `visibility: public|shared` in
+        # locator.d stamps the row every heartbeat, so anonymous readers of
+        # /api/registry (e.g. the lokey-android grid, which holds no credential)
+        # see exactly the services the owner opted in — and redact() strips
+        # host/IPs/ports/telemetry from what they do see. Re-registering wipes
+        # record-level keys not written here, which is why the mark lives in
+        # policy instead of being PATCHed onto the row.
+        _vis = (_policy_for(name).get("visibility") or "").strip().lower()
+        if _vis in ("public", "shared"):
+            registry["services"][service_id]["visibility"] = _vis
+
         # Self-registered devices (phones/tablets/laptops via /register-device) are also
         # first-class nodes, so they show up on the Tactical Grid's Devices & Nodes panel
         # (node cards + table), not just in the plain services list.
@@ -1400,6 +1411,8 @@ def register_service():
                 "public_ip": _client_public_ip(),
                 "metadata": meta,
             }
+            if _vis in ("public", "shared"):
+                registry["nodes"][host]["visibility"] = _vis
 
         # Update the node as ONLINE whenever any service heartbeats from it
         if host != "unknown" and host in registry["nodes"]:
@@ -4109,6 +4122,11 @@ def load_policy():
                     str(k).lower(): _as_list(v)
                     for k, v in cfg["wake_triggers"].items()
                 } if isinstance(cfg.get("wake_triggers"), dict) else {},
+                # visibility: "public"|"shared" opts the row into the
+                # anonymous-readable surface — register_service stamps it onto
+                # the record every heartbeat and clearance.visible() honours it
+                # for level-0 callers. Anything else stays internal.
+                "visibility": str(cfg.get("visibility", "")).lower(),
             }
     _policy_cache.update({"mtime": fingerprint, "data": parsed})
     print(f"📄 policy loaded — {len(parsed)} service policies "

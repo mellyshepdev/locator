@@ -1,0 +1,12 @@
+Service:
+
+  # lokey-mobile — the Android app's heartbeat registration
+  # (name="lokey-mobile", host=<device name>). Not a container: nothing to
+  # place, migrate, or idle-stop. `visibility: public` opts every registered
+  # device into the anonymous-readable surface so the app's Tactical Grid
+  # (no credential) can render it — see clearance.visible() and the stamping
+  # in register_service.
+  lokey-mobile:
+    deployment_type: optional
+    instances: 1
+    visibility: public

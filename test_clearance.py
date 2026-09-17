@@ -222,8 +222,19 @@ class TestRoutePolicy(unittest.TestCase):
     def test_public_route_needs_nothing(self):
         self.assertEqual(self.c.get("/health").status_code, 200)
 
-    def test_anonymous_gets_401(self):
+    def test_anonymous_sees_only_public_marked_rows(self):
+        # get_full_registry sits in PUBLIC so the lokey-android grid can read
+        # it with no credential; anonymous still sees only rows whose owner
+        # marked them visibility=public/shared, redacted to level-0 fields.
         r = self.c.get("/api/registry")
+        self.assertEqual(r.status_code, 200)
+        got = r.get_json()
+        self.assertEqual(set(got), {"status-page@unit3"})
+        self.assertNotIn("internal", got["status-page@unit3"])
+        self.assertNotIn("host", got["status-page@unit3"])
+
+    def test_anonymous_gets_401_on_gated_route(self):
+        r = self.c.get("/api/yaml")
         self.assertEqual(r.status_code, 401)
         self.assertEqual(r.get_json()["reason"], "no credentials presented")
 
@@ -255,7 +266,7 @@ class TestRoutePolicy(unittest.TestCase):
         self.assertIn("no clearance policy", r.get_json()["error"])
 
     def test_invalid_token_reports_401_with_reason(self):
-        r = self.c.get("/api/registry", headers=auth("not.a.token"))
+        r = self.c.get("/api/yaml", headers=auth("not.a.token"))
         self.assertEqual(r.status_code, 401)
         self.assertIn("malformed", r.get_json()["reason"])
 

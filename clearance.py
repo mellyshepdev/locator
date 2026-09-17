@@ -170,6 +170,13 @@ PUBLIC = {
     # wake_page, which applies _may_wake: anonymous can only ever start a
     # container that already has a public route.
     "wake_by_host",
+    # The lokey-android native grid reads this anonymously — it holds no token
+    # and there is no device credential it could carry. Anonymous still sees
+    # nothing by default: visible() below only lets level-0 through for rows
+    # explicitly marked visibility=public/shared, and redact() strips every
+    # field below STAFF (host, IPs, ports, env, labels, GPS, battery). What an
+    # anonymous caller gets back is a status board, not a registry dump.
+    "get_full_registry",
 }
 
 # Ingest endpoints — written to by unattended agents. Gated by ENFORCE_INGEST
@@ -773,7 +780,11 @@ def visible(record, principal=None):
     if not ENFORCE or principal.sees_all_rows:
         return True
     if principal.level <= ANON:
-        return False
+        # Anonymous sees a row only when its owner opted it into the public
+        # surface (visibility=public|shared on the record or its metadata).
+        # Everything else is hidden — this is what makes get_full_registry
+        # safe to leave in PUBLIC for the lokey-android grid.
+        return _is_public(record)
     if _is_public(record):
         return True
     owner = _owner_of(record)
