@@ -210,7 +210,7 @@ def _daemon_matches(host):
 
 
 def _resolve_unit_name():
-    """Real unit identity — the Docker daemon outranks the env var.
+    """Real unit identity — discovered from the host, never trusted config.
 
     UNIT_NAME=unit4 hardcoded in docker-compose.yml travelled with every
     deployment: unit7's standby ran believing it WAS unit4, so its
@@ -218,19 +218,58 @@ def _resolve_unit_name():
     on its own physical host — as a rival and killed it. Twice observed:
     once via a queued stop its own lokey executed ("keeping unit4,
     evicting unit7"), once via _stop_self ("unit7 healthier than unit4").
-    Both locators ended up dead. When the daemon name clearly identifies
-    a unit it wins; env is only the fallback for hosts that don't name
-    their daemon after the unit.
+    Both locators ended up dead.
+
+    Resolution order:
+      1. /etc/hostname — the machine's own name on native runs. Inside a
+         container it is the container id (hex), which is detected and
+         skipped — a container's hostname is not its host's.
+      2. The Docker daemon's name — the host's hostname when containerized
+         (docker info Name defaults to it), the same truth /etc/hostname
+         would have told a native process.
+      3. UNIT_NAME env — last-resort override for hosts that name neither
+         the machine nor the daemon after their unit.
+
+    A 'unitN' token inside the name wins (the fleet's naming convention);
+    a name with no unit token ('my-vps') is only used when env also has
+    nothing better to say.
     """
-    env_name = os.environ.get("UNIT_NAME", "unknown")
-    m = re.search(r"unit\d+", _docker_daemon_name().lower())
-    if m:
-        if m.group(0) != env_name.lower():
-            print(f"⚠️  UNIT_NAME={env_name} but Docker daemon is "
-                  f"'{_docker_daemon_name()}' — using daemon-derived "
-                  f"'{m.group(0)}'")
-        return m.group(0)
-    return env_name
+    env_name = (os.environ.get("UNIT_NAME") or "").strip()
+
+    def _unit_token(name):
+        m = re.search(r"unit\d+", (name or "").lower())
+        return m.group(0) if m else ""
+
+    try:
+        host_name = open("/etc/hostname").read().strip()
+    except OSError:
+        host_name = ""
+    container_id = re.fullmatch(r"[0-9a-f]{12,64}", host_name.lower()) is not None
+    daemon = _docker_daemon_name()
+
+    sources = []
+    if not container_id and host_name:
+        sources.append(("hostname", host_name))
+    if daemon:
+        sources.append(("daemon", daemon))
+    for source, name in sources:
+        token = _unit_token(name)
+        if token:
+            if env_name and token != env_name.lower():
+                print(f"⚠️  UNIT_NAME={env_name} but {source} is "
+                      f"'{name}' — using discovered '{token}'")
+            return token
+
+    # No unitN anywhere — env gets its say before raw names, since fleet
+    # convention is unitN and a raw 'my-vps' would fork the node's identity
+    # away from what its lokey reports.
+    if env_name:
+        return env_name
+    if not container_id and host_name:
+        return host_name.lower()
+    if daemon:
+        return daemon.lower()
+    return "unknown"
 
 
 UNIT_NAME             = _resolve_unit_name()

@@ -35,7 +35,13 @@ services:
               "--access-logfile", "-", "--error-logfile", "-", "--log-level", "debug",
               "locator:app"]
     environment:
-      - UNIT_NAME=${UNIT_NAME:?Set UNIT_NAME in .env or environment}
+      # Identity is discovered at runtime (/etc/hostname natively, the
+      # Docker daemon name containerized) — see _resolve_unit_name() in
+      # locator.py. UNIT_NAME remains only as a last-resort override for
+      # hosts that name neither after their unit; do NOT hardcode a unit
+      # here — a compose file that travels carries the wrong identity
+      # (that exact bug made unit7's standby elect to stop itself).
+      - UNIT_NAME=${UNIT_NAME:-}
       # Run the fleet refresh with the script's own debug tracing on
       # (refresh honours DEBUG=1 -> its debug() helper). Without this the
       # per-unit run logs only its "==>" milestones.

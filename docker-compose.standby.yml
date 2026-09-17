@@ -5,9 +5,10 @@
 # Unlike docker-compose.yml (which assumes the old unit1 Traefik/Keycloak
 # stack), this publishes port 5000 directly and has no external network or
 # reverse-proxy dependency, so it can come up standalone on any unit.
-# UNIT_NAME must be set per-unit (e.g. via .env) so locator's own cross-node
-# dedup can tell it apart from the canonical Fly instance and from other
-# units' standbys.
+# Identity needs no configuration: locator discovers its unit name at
+# runtime (Docker daemon name / /etc/hostname — _resolve_unit_name()),
+# which is what lets this file come up correctly on ANY unit. UNIT_NAME
+# remains only as a last-resort override.
 services:
   locator:
     build: .
@@ -17,8 +18,13 @@ services:
       - "${LOCATOR_STANDBY_PORT:-5000}:5000"
     volumes:
       - ./registry_data:/app/data
+      # Required for identity discovery (daemon name = the host's real
+      # hostname) and for _stop_self()'s Docker-API path. Without it the
+      # container sees only its own id in /etc/hostname and resolves
+      # UNIT_NAME to "unknown".
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      - UNIT_NAME=${UNIT_NAME:?Set UNIT_NAME in .env}
+      - UNIT_NAME=${UNIT_NAME:-}
       - LOCATOR_IS_PRIMARY=false
       - SELF_CONTAINER_NAME=locator
       - LOCATOR_CANONICAL_URL=${LOCATOR_CANONICAL_URL:-https://tobsco-locator.fly.dev}
