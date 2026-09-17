@@ -1,0 +1,91 @@
+# Keycloak on unit8's Traefik — round-robins BOTH Keycloaks (2026-09-04).
+#
+# unit7's Keycloak publishes 8081->8080 and 9000 on the tailnet (it used to
+# publish only the 7800 jgroups port, so it was unreachable from here). That is
+# what makes the two backends below symmetrical.
+#
+# Backends are MagicDNS names, verified resolvable from inside THIS Traefik
+# container (unit8's host resolv.conf uses 100.100.100.100). Do NOT copy this
+# addressing to unit7's Traefik: that host resolves via the AWS VPC resolver
+# 172.31.0.2, names do not resolve there, and trying it took auth down with 503s.
+http:
+  routers:
+    # ── PUBLIC (2026-09-04) ────────────────────────────────────────────────
+    # auth.* was served by unit7's Traefik and its A records pointed there, so
+    # shutting unit7 down took SSO with it. The records now point here and these
+    # routers serve them, with Traefik obtaining its own Let's Encrypt cert via
+    # TLS-ALPN-01 on :443. One router per hostname deliberately: a failure to
+    # issue for one zone must not block the other.
+    #
+    # This is a step sideways from the "unit4 edge is the front door" design —
+    # it puts auth alongside every other public hostname on unit8. Moving them
+    # to the HAProxy edge is one project, not a special case for auth; see
+    # haproxy.cfg, whose auth ACLs already target the two-node mesh backend.
+    keycloak-public-com:
+      rule: "Host(`auth.theofficialblacksheepco.com`)"
+      entryPoints:
+        - websecure
+      service: keycloak-mesh
+      middlewares:
+        - compress@file
+      tls:
+        certResolver: myresolver
+
+    keycloak-public-online:
+      rule: "Host(`auth.theofficialblacksheepco.com`)"
+      entryPoints:
+        - websecure
+      service: keycloak-mesh
+      middlewares:
+        - compress@file
+      tls:
+        certResolver: myresolver
+
+    # ── MESH (mTLS from the unit4 HAProxy edge) ───────────────────────────
+    keycloak-mesh:
+      rule: "Host(`auth.theofficialblacksheepco.com`)"
+      entryPoints:
+        - mesh
+      service: keycloak-mesh
+      middlewares:
+        - compress@file
+      tls:
+        options: mesh
+
+    # The .online twin of the router above. It already had a public router
+    # (keycloak-public-online) but no mesh one, so auth.*.online answered 302
+    # via unit8:443 and 404 through the unit4 HAProxy edge - a break that only
+    # shows up once DNS moves to unit4. Mirrors the public pair deliberately.
+    keycloak-mesh-online:
+      rule: "Host(`auth.theofficialblacksheepco.com`)"
+      entryPoints:
+        - mesh
+      service: keycloak-mesh
+      middlewares:
+        - compress@file
+      tls:
+        options: mesh
+
+  services:
+    keycloak-mesh:
+      loadBalancer:
+        passHostHeader: true
+        # Default strategy is weighted round-robin over both servers. The
+        # sticky cookie pins an established client to one backend; new clients
+        # still distribute. The Infinispan cluster is formed and sharing
+        # sessions (ISPN100010, two members, verified 2026-09-04), so a
+        # round-robin hop does not lose a login.
+        sticky:
+          cookie:
+            name: KC_STICKY
+            secure: true
+            httpOnly: true
+            sameSite: lax
+        healthCheck:
+          path: /health/ready
+          port: 9000
+          interval: 10s
+          timeout: 3s
+        servers:
+          - url: "http://keycloak:8080"
+          - url: "http://100.82.31.92:8081"

@@ -1,0 +1,19 @@
+http:
+  middlewares:
+    compress:
+      compress:
+        encodings:
+          - br
+          - gzip
+        defaultEncoding: br
+        minResponseBodyBytes: 1024
+        includedContentTypes:
+          - text/html
+          - text/plain
+          - text/css
+          - application/javascript
+          - text/javascript
+          - application/json
+          - application/xml
+          - application/xhtml+xml
+          - image/svg+xml

@@ -1,0 +1,25 @@
+http:
+  routers:
+    inventory-api:
+      rule: "Host(`inventory.theofficialblacksheepco.online`) || Host(`inventory-api.theofficialblacksheepco.online`) || Host(`scanner.theofficialblacksheepco.com`) || Host(`inventory-api.theofficialblacksheepco.com`)"
+      entryPoints:
+        - websecure
+      service: inventory-api
+      tls:
+        certResolver: myresolver
+    inventory-ui:
+      rule: "Host(`inventory.theofficialblacksheepco.com`) || Host(`scanner.theofficialblacksheepco.online`)"
+      entryPoints:
+        - websecure
+      service: inventory-ui
+      tls:
+        certResolver: myresolver
+  services:
+    inventory-api:
+      loadBalancer:
+        servers:
+          - url: "http://172.17.0.1:8444"
+    inventory-ui:
+      loadBalancer:
+        servers:
+          - url: "http://172.17.0.1:8082"

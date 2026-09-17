@@ -1,0 +1,10 @@
+# Static certificate for auth.theofficialblacksheepco.com — originally
+# obtained on the old edge and duplicated into dynamic/certs/ by
+# sync-certs.sh. Referenced here so unit7 can serve auth.* publicly
+# while unit8 (the previous public edge) is offline. Valid until
+# 2026-12-04; ACME can still take over once it can issue.
+tls:
+  certificates:
+    - certFile: /dynamic/certs/auth-chain.crt
+      keyFile: /dynamic/certs/auth-chain.key
+# chain refreshed 1789656011

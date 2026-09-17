@@ -1,0 +1,43 @@
+# Wake-on-visit proxy for the main site (was main-site.yml on unit8's
+# file provider). The site's js/wake.js calls same-origin paths:
+#
+#   GET /__wake/triggers?domain=<host>   -> locator /api/wake/triggers
+#   GET /__wake/<container>              -> locator /wake/<container>
+#
+# which ask locator which container this hostname wakes (searchsearcher-app
+# via its wake_triggers domain entries) and then queue the start. The
+# triggers router must stay the longer rule so Traefik evaluates it first.
+#
+# Upstream is the tailnet-published locator port (locator-tailnet-pub
+# sidecar on unit7), which answers every locator path — /wake/* and
+# /api/wake/* are PUBLIC routes in clearance, gated per-container by
+# public_wake in locator.d.
+http:
+  routers:
+    main-site-wake-triggers:
+      rule: "(Host(`theofficialblacksheepco.com`) || Host(`www.theofficialblacksheepco.com`)) && PathPrefix(`/__wake/triggers`)"
+      entryPoints: [websecure]
+      tls: {}
+      middlewares: [wake-triggers-to-api]
+      service: locator-tailnet
+    main-site-wake:
+      rule: "(Host(`theofficialblacksheepco.com`) || Host(`www.theofficialblacksheepco.com`)) && PathPrefix(`/__wake`)"
+      entryPoints: [websecure]
+      tls: {}
+      middlewares: [wake-strip-prefix]
+      service: locator-tailnet
+
+  middlewares:
+    wake-triggers-to-api:
+      replacePath:
+        path: /api/wake/triggers
+    wake-strip-prefix:
+      replacePathRegex:
+        regex: "^/__wake/(.*)"
+        replacement: "/wake/$1"
+
+  services:
+    locator-tailnet:
+      loadBalancer:
+        servers:
+          - url: "http://100.99.131.20:15000"

@@ -1,0 +1,14 @@
+http:
+  routers:
+    store-portal:
+      rule: "Host(`theofficialblacksheepco.store`) || Host(`www.theofficialblacksheepco.store`)"
+      entryPoints:
+        - websecure
+      service: store-portal
+      tls:
+        certResolver: myresolver
+  services:
+    store-portal:
+      loadBalancer:
+        servers:
+          - url: "http://client-portal:80"

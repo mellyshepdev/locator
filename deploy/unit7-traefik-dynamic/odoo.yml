@@ -1,0 +1,14 @@
+http:
+  routers:
+    odoo:
+      rule: "Host(`odoo.theofficialblacksheepco.store`) || Host(`app.prime-quality.online`)"
+      entryPoints:
+        - websecure
+      service: odoo
+      tls:
+        certResolver: myresolver
+  services:
+    odoo:
+      loadBalancer:
+        servers:
+          - url: "http://odoo:8069"

@@ -1,0 +1,45 @@
+# Traefik mesh entrypoint — the mTLS inner door for HAProxy on unit4.
+# Hot-reloaded by the file provider; the :8443 entrypoint is static (compose).
+#
+# HOW THE HANDSHAKE RESOLVES (this is what the first draft got wrong):
+# HAProxy forwards the request's ORIGINAL public SNI (ssl_fc_sni), so the TLS
+# SNI here EQUALS the Host header — no 421, and the SNI matches the router's
+# Host() rule, which is what makes Traefik apply this router's tls.options
+# (client-cert verification). The served cert is the fleet mesh cert below,
+# offered as the entrypoint default: HAProxy checks it chains to the fleet CA
+# (it does not pin the CN), so an internal cert name is fine.
+tls:
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /dynamic/mesh/unit7-mesh.crt
+        keyFile: /dynamic/mesh/unit7-mesh.key
+    mesh:
+      defaultCertificate:
+        certFile: /dynamic/mesh/unit7-mesh.crt
+        keyFile: /dynamic/mesh/unit7-mesh.key
+  options:
+    mesh:
+      clientAuth:
+        # No fleet client cert → handshake refused. The "mutual" in mTLS.
+        caFiles:
+          - /dynamic/mesh/fleet-ca.pem
+        clientAuthType: RequireAndVerifyClientCert
+      minVersion: VersionTLS12
+
+
+http:
+  routers:
+    unit4-apache-mesh:
+      rule: "Host(`unit4.prime-quality.online`)"
+      entryPoints:
+        - mesh
+      service: unit4-apache-mesh
+      tls:
+        options: mesh
+  services:
+    unit4-apache-mesh:
+      loadBalancer:
+        servers:
+          - url: "http://100.82.31.92:8080"
+        passHostHeader: true
