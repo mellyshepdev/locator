@@ -197,6 +197,14 @@ INGEST = {
     "get_pending_migrations",
     "claim_migration",
     "complete_migration",
+    # Power-drain gate for compute jobs (crew-builder). An unattended agent
+    # like the rest of this set — it authenticates inside the handler with
+    # X-Power-Token, not a user token, so it cannot satisfy ROUTE_CLEARANCE.
+    "power_drain",
+    "power_restore",
+    # Read-only ack poll; listed with its mutating pair so a caller that can
+    # drain can also observe the drain it started.
+    "power_drain_status",
 }
 
 # Routes a lokey reaches with its PER-UNIT key (X-Lokey-Unit + X-Lokey-Key),

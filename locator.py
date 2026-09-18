@@ -3474,27 +3474,20 @@ def _routed_containers():
     return out
 
 
-@app.route("/api/idle/policy", methods=["GET"])
-def idle_policy():
-    """Which containers a unit is ALLOWED to idle-stop.
+def _stoppable_containers(unit):
+    """Containers a unit is allowed to stop, keyed by name -> {"timeout": ...}.
 
-    Opt-out, not opt-in: every ONLINE container on the unit is eligible unless
-    something says it is not — an essential or stationary policy stanza, a
-    name matching _PINNED_NAMES, a stateful-looking image, or an explicit
-    `idle_stop: false`.
+    Shared by /api/idle/policy and /api/power/drain. Opt-out, not opt-in:
+    every ONLINE container on the unit is eligible unless something says it
+    is not — an essential or stationary policy stanza, a name matching
+    _PINNED_NAMES, a stateful-looking image, or an explicit `idle_stop: false`.
 
     The one positive requirement is a way back up: a container nobody can wake
     (no public_wake stanza, no public route in the registry) is only watched
     when it opted in with `idle_stop: true`, because stopping it is a silent
     outage until a human notices. Explicit `idle_stop: true` is therefore kept
     as 'stop it even though nothing can wake it'.
-
-    lokey's NEVER_STOP list is the independent second check on the unit side:
-    the locator decides, but the stop runs there.
     """
-    unit = (request.args.get("unit") or "").strip().lower()
-    if unit and not unit.startswith("unit"):
-        unit = "unit" + unit
     out = {}
     with lock:
         routed = _routed_containers()
@@ -3537,9 +3530,22 @@ def idle_policy():
             if unit not in _expand_unit_spec(spec, []):
                 continue
         out[name] = {"timeout": cfg.get("idle_timeout") or ""}
+    return out
+
+
+@app.route("/api/idle/policy", methods=["GET"])
+def idle_policy():
+    """Which containers a unit is ALLOWED to idle-stop.
+
+    lokey's NEVER_STOP list is the independent second check on the unit side:
+    the locator decides, but the stop runs there.
+    """
+    unit = (request.args.get("unit") or "").strip().lower()
+    if unit and not unit.startswith("unit"):
+        unit = "unit" + unit
     return jsonify({
         "unit": unit,
-        "containers": out,
+        "containers": _stoppable_containers(unit),
         "default_timeout": IDLE_DEFAULT_TIMEOUT,
     })
 
@@ -3571,6 +3577,119 @@ def idle_status():
         "watched":           watched,
         "recent_commands":   recent,
     })
+
+
+# ── POWER DRAIN ─────────────────────────────────────────────────────────────
+# Bulk resource gate for compute-bound jobs (e.g. puffbase's crew-builder):
+# the caller asks for a drain, the locator queues a stop for every
+# policy-stoppable container on the target units, and the caller polls the
+# drain until every queued command reports back — that is the "approval to
+# continue". After the job, /api/power/restore starts everything that was
+# stopped. Wake-on-502 stays live throughout, so a drained service that gets
+# real traffic comes back on its own.
+POWER_TOKEN  = os.environ.get("POWER_TOKEN", "")
+power_drains = {}   # drain_id -> record; records are kept with command history
+POWER_DRAIN_RETENTION = 50
+
+
+def _power_authorized():
+    # Unset POWER_TOKEN means tailnet-internal default, same posture as
+    # /api/commands/pending. Setting it requires X-Power-Token on both
+    # mutating endpoints.
+    return not POWER_TOKEN or hmac.compare_digest(
+        request.headers.get("X-Power-Token", ""), POWER_TOKEN)
+
+
+def _normalize_units(raw):
+    if isinstance(raw, str):
+        raw = [u.strip() for u in raw.split(",") if u.strip()]
+    units = []
+    for u in raw or []:
+        u = str(u).strip().lower()
+        if u:
+            units.append(u if u.startswith("unit") else f"unit{u}")
+    return units
+
+
+@app.route("/api/power/drain", methods=["POST"])
+def power_drain():
+    if not _power_authorized():
+        return jsonify({"error": "bad power token"}), 403
+    data = request.get_json(silent=True) or {}
+    units = _normalize_units(data.get("units")) or [_resolve_unit_name()]
+    drain_id = str(uuid.uuid4())[:8]
+    rec = {
+        "id": drain_id,
+        "reason": str(data.get("reason") or "")[:120],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "units": {},
+        "commands": [],
+        "restored": False,
+    }
+    for unit in units:
+        names = sorted(_stoppable_containers(unit).keys())
+        rec["units"][unit] = names
+        for name in names:
+            cmd = _queue_command(unit, name, "stop", source=f"power:{drain_id}")
+            rec["commands"].append(cmd["id"])
+    with command_lock:
+        power_drains[drain_id] = rec
+        if len(power_drains) > POWER_DRAIN_RETENTION:
+            oldest = sorted(power_drains.values(), key=lambda r: r["created_at"])
+            for old in oldest[: len(power_drains) - POWER_DRAIN_RETENTION]:
+                power_drains.pop(old["id"], None)
+    print(f"🔌 POWER DRAIN {drain_id}: queued {len(rec['commands'])} stops on {units} ({rec['reason']})")
+    return jsonify({"drain_id": drain_id, "units": rec["units"], "total": len(rec["commands"])})
+
+
+@app.route("/api/power/drain/<drain_id>", methods=["GET"])
+def power_drain_status(drain_id):
+    with command_lock:
+        rec = power_drains.get(drain_id)
+        cmds = [command_queue.get(cid) for cid in rec["commands"]] if rec else []
+    if not rec:
+        return jsonify({"error": "unknown drain_id"}), 404
+    stopped, failed, waiting = [], [], []
+    for c in cmds:
+        if not c:
+            continue
+        if c["status"] == "DONE" and c.get("success"):
+            stopped.append(f"{c['unit']}/{c['container']}")
+        elif c["status"] in ("DONE", "FAILED"):
+            failed.append(f"{c['unit']}/{c['container']}")
+        else:
+            waiting.append(f"{c['unit']}/{c['container']}")
+    return jsonify({
+        "drain_id": drain_id,
+        "acknowledged": not waiting,
+        "stopped": stopped,
+        "failed": failed,
+        "waiting": waiting,
+        "restored": rec["restored"],
+    })
+
+
+@app.route("/api/power/restore", methods=["POST"])
+def power_restore():
+    if not _power_authorized():
+        return jsonify({"error": "bad power token"}), 403
+    data = request.get_json(silent=True) or {}
+    drain_id = data.get("drain_id")
+    with command_lock:
+        rec = power_drains.get(drain_id)
+        cmds = [command_queue.get(cid) for cid in rec["commands"]] if rec else []
+    if not rec:
+        return jsonify({"error": "unknown drain_id"}), 404
+    if rec["restored"]:
+        return jsonify({"drain_id": drain_id, "restored": [], "already": True})
+    restarted = []
+    for c in cmds:
+        if c and c["status"] == "DONE" and c.get("success"):
+            _queue_command(c["unit"], c["container"], "start", source=f"power-restore:{drain_id}")
+            restarted.append(f"{c['unit']}/{c['container']}")
+    rec["restored"] = True
+    print(f"🔌 POWER RESTORE {drain_id}: queued {len(restarted)} starts")
+    return jsonify({"drain_id": drain_id, "restored": restarted})
 
 
 # ── PERSISTENCE ─────────────────────────────────────────────────────────────

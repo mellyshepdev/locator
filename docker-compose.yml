@@ -131,6 +131,9 @@ services:
       - KC_admin-cli_CLIENT_ID=${KC_ADMIN_CLIENT_ID:-clearance-admin}
       - KC_admin-cli_CLIENT_SECRET=${KC_ADMIN_CLIENT_SECRET:-}
       - LOCATOR_CLIENT_SECRET=${LOCATOR_CLIENT_SECRET}
+      # Gate for /api/power/drain + /api/power/restore (crew-builder holds the
+      # matching LOCATOR_TOKEN). Empty = tailnet-internal default.
+      - POWER_TOKEN=${POWER_TOKEN:-}
       - LOCATOR_CLIENT_ID=${LOCATOR_CLIENT_ID}
     labels:
       - "traefik.enable=true"
