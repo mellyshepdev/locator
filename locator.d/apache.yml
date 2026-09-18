@@ -4,10 +4,18 @@ Service:
   # friends to 100.82.31.92:8080 and the docroot lives on /mnt/omv_storage, so
   # a migration strands the route AND the content. No policy entry meant it
   # was migratable - found exposed 2026-09-11 while auditing the pin set.
+  # Repinned to unit2 on 2026-09-18. unit4 is unreachable and both its Apache and
+  # the /mnt/omv_storage docroot were lost, so the front door was rebuilt on unit2
+  # serving the tech-estate checkout instead of the stranded omv mount. Staying
+  # pinned to "4" would have had lokey dedup stop the unit2 container as a stray
+  # copy, the same way it repeatedly killed nasa-web.
+  #
+  # Still stationary/essential: the docroot is a local bind mount, so this is no
+  # more migratable on unit2 than it was on unit4.
   apache:
     deployment_type: essential
     location_type: stationary
-    units: "4"
+    units: "2"
     instances: 1
     # The unit4-published web stack (aegis / -apache / tech-estate / error-pages
     # routers on the edge). Edges reach it as apache@http so a migration moves

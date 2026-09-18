@@ -1,0 +1,16 @@
+Service:
+
+  # Consolidated comms DB on unit7 (created 2026-09-18 during the unit8
+  # migration): pgvector/pg16 container holding the chatwoot_production and
+  # synapse databases restored from the unit8-offload volumes, with the
+  # chatwoot and synapse roles carried over by pg_dumpall -r. Data lives on
+  # the xvdg disk at /home/swoopg111/mnt/xvdg/comms-db; tailnet endpoint is
+  # 100.99.131.20:5436 for services on other units. stationary because it
+  # holds data on local disk: migration moves the compose file and NOT the
+  # volume.
+  comms-db:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    restart_when_stopped: true

@@ -3,5 +3,5 @@ Service:
   mail-admin:
     deployment_type: essential
     location_type: stationary
-    units: "8"
+    units: "2"
     instances: 1

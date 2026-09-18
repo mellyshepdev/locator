@@ -1,8 +1,14 @@
 Service:
 
   # Fleet PKI / secrets broker. Mints the mTLS leaves everything else uses.
+  #
+  # Repinned 2026-09-18: the pin said "4" but the vault already runs on unit7 —
+  # unit4's copy went offline when that box died. A stale pin risks lokey dedup
+  # stopping the unit7 container as a stray copy, the same failure that kept
+  # killing nasa-web. Same day its storage moved from the file backend
+  # (named volume, now deleted) to pgdb-18.3's "openbao" database.
   openbao:
     deployment_type: essential
     location_type: stationary
-    units: "4"
+    units: "7"
     instances: 1

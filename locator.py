@@ -3061,6 +3061,19 @@ def claim_migration(mig_id):
     data = request.get_json(silent=True) or {}
     unit = data.get("unit", "unknown")
 
+    # Fetch before validating: the pin/stateful re-check below reads
+    # mig["container"], so mig must exist first — the previous order raised
+    # UnboundLocalError on every claim and the queue could never execute.
+    with migration_lock:
+        mig = migration_queue.get(mig_id)
+        if not mig:
+            return jsonify({"error": "not found"}), 404
+        if mig["status"] != "PENDING":
+            return jsonify({"error": "already claimed", "status": mig["status"]}), 409
+        owner = mig.get("unit", mig.get("from_node"))
+        if unit != "unknown" and owner and owner != unit:
+            return jsonify({"error": "not yours", "owner": owner}), 403
+
     # Re-validate at claim time: the queue is minutes-to-stale by the time a
     # lokey polls it, and a policy pin or a newly-discovered stateful image in
     # between means "queued" no longer means "should run". ops-pgdb was
@@ -3073,14 +3086,10 @@ def claim_migration(mig_id):
     stateful = any(m in image for m in _STATEFUL_IMAGE_MARKERS)
 
     with migration_lock:
-        mig = migration_queue.get(mig_id)
-        if not mig:
-            return jsonify({"error": "not found"}), 404
+        # Re-check under the lock — another claim could have landed in the
+        # gap between the first check and now.
         if mig["status"] != "PENDING":
             return jsonify({"error": "already claimed", "status": mig["status"]}), 409
-        owner = mig.get("unit", mig.get("from_node"))
-        if unit != "unknown" and owner and owner != unit:
-            return jsonify({"error": "not yours", "owner": owner}), 403
         if pinned or stateful:
             mig["status"] = "CANCELLED"
             mig["cancelled_at"] = datetime.now(timezone.utc).isoformat()
