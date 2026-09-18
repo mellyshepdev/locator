@@ -1,0 +1,8 @@
+Service:
+  # Same failure class as suricata (pinned same day): host-interface sensor
+  # with sibling config the stacks repo does not carry.
+  zeek:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1

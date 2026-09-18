@@ -1,0 +1,11 @@
+Service:
+  # Pinned 2026-09-18 after migration 565ed91e proved it unmigratable:
+  # - ./suricata.yaml and ./rules are sibling files the stacks repo does not
+  #   carry, so the container created on unit2 could not start.
+  # - command pins capture interface 'enX0'; unit2's interface is ens5.
+  # A host-interface IDS is bound to the box it watches anyway.
+  suricata:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1

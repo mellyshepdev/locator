@@ -3209,6 +3209,18 @@ def complete_migration():
                 if not success:
                     migration_failed_at[mig.get("container", "")] = datetime.now(timezone.utc)
                 print(f"{'✅' if success else '❌'} MIGRATION {mig_id}: {'DONE' if success else 'FAILED'}")
+                # A start-type failure leaves the source stopped — the same
+                # hole _verify_migration covers on timeout, but reached faster.
+                # suricata/odoo (16:46) died this way: compose up failed on the
+                # target, FAILED was recorded, and nothing ever restarted the
+                # source. git_pull_only (dedup) is excluded — stopping the
+                # duplicate is its whole point.
+                if not success and mig.get("type") in MIGRATION_START_TYPES \
+                        and mig.get("from_node") and mig.get("from_node") != mig.get("to_node"):
+                    _queue_command(mig["from_node"], mig.get("container"), "start",
+                                   source="migration-rollback")
+                    print(f"↩️  ROLLBACK: queued start of '{mig.get('container')}' "
+                          f"back on {mig.get('from_node')} (start-type failure)")
             # Deferred while VERIFYING — _verify_migration emits the failure
             # event itself, and a success event here would announce an outcome
             # nothing has checked yet.
@@ -4551,6 +4563,26 @@ def _ssh_exec(host, user, cmd, timeout=20):
         return False, str(e)
 
 
+def _node_runs_containers(node_id, services_snap=None):
+    """True when the node's lokey reports as a container service —
+    i.e. docker actually exists there.
+
+    A native lokey (Surface Go, the Mac) registers type 'native' and can
+    never `docker compose up`, but it still reports near-zero disk — the
+    freest-looking target in the fleet. Sending it a container migration
+    just burns the source's cooldown on a pull that cannot run. unit5
+    was queued repeatedly for exactly this reason.
+    """
+    services = services_snap if services_snap is not None else registry["services"]
+    for svc in services.values():
+        if (svc.get("host") == node_id
+                and (svc.get("name") or "").lower() == "lokey"
+                and svc.get("type") == "container"
+                and svc.get("status") == "ONLINE"):
+            return True
+    return False
+
+
 def load_balancer():
     """
     Periodically checks node CPU/memory and queues container migrations
@@ -4601,7 +4633,7 @@ def load_balancer():
                 overloaded.append((node_id, load, info))
             elif load >= BALANCE_HIGH:
                 overloaded.append((node_id, load, info))
-            elif load <= BALANCE_LOW:
+            elif load <= BALANCE_LOW and _node_runs_containers(node_id, services_snap):
                 underloaded.append((node_id, load, info))
             elif load >= prestage_threshold and BALANCE_PRESTAGE_ENABLED:
                 # Between prestage_threshold and BALANCE_HIGH: not yet actioned,
@@ -4622,7 +4654,7 @@ def load_balancer():
         if BALANCE_PRESTAGE_ENABLED and prestage_candidates:
             with_ip_underloaded = [
                 (nid, ld, inf) for nid, ld, inf in (underloaded + all_nodes_load)
-                if _best_ip(inf)
+                if _best_ip(inf) and _node_runs_containers(nid, services_snap)
             ]
             for node_id, load, info in prestage_candidates:
                 candidates = [
@@ -4658,7 +4690,7 @@ def load_balancer():
             if busiest[1] - least[1] >= BALANCE_DIFF:
                 if busiest not in overloaded:
                     overloaded.append(busiest)
-                if least not in underloaded:
+                if least not in underloaded and _node_runs_containers(least[0], services_snap):
                     underloaded.append(least)
 
         if not overloaded or not underloaded:

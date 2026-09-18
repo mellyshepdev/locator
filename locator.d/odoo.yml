@@ -1,0 +1,14 @@
+Service:
+  # Pinned 2026-09-18 after migration e4b968b5 proved it unmigratable:
+  # - ports bind unit7's tailnet IP (100.99.131.20:8069/8072); cannot assign
+  #   on any other unit.
+  # - odoo-web-data volume plus ./config and ./addons are host-local data the
+  #   compose-only migration cannot carry — a migrated odoo arrives empty.
+  # - its postgres lives behind the external pgdb-183_default network.
+  # If odoo is ever meant to live elsewhere, migrate the volume+config by
+  # hand and repin; do not let the balancer move the compose alone.
+  odoo:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
