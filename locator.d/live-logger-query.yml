@@ -1,0 +1,18 @@
+Service:
+
+  # The dashboard's read path, split out of live-logger-api so a fluent-bit
+  # replay burst cannot saturate the one process and stop it answering
+  # queries. Same image, no ingest traffic.
+  #
+  # It was not registered here at all to begin with, so locator auto-registered
+  # it as "unknown" and applied the default 15m idle limit - which meant the
+  # dashboard's backend was being stopped by accident rather than by anyone's
+  # decision. Explicitly always-on: it is ~27MB at 0.02% CPU, and if it is
+  # down when the dashboard opens, every panel fails while the UI itself
+  # looks perfectly healthy.
+  live-logger-query:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    idle_stop: false

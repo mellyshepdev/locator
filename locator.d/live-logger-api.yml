@@ -1,8 +1,15 @@
 Service:
 
+  # The ingest endpoint every unit's fluent-bit POSTs to. Never idle-stop it:
+  # it only looks busy because logs are arriving, so a quiet spell (all
+  # shippers down, a network blip) would let the reaper stop it - and then
+  # nothing can ship logs TO it to make it busy again. It cannot wake itself,
+  # and there is no wake trigger on this hostname, so it would simply stay
+  # down and the shippers would buffer until Retry_Limit discarded the lot.
+  # The dashboard is the thing that is safe to idle-stop, not this.
   live-logger-api:
-    deployment_type: essential
+    deployment_type: optional
     location_type: stationary
     units: "8"
     instances: 1
-    restart_when_stopped: true
+    idle_stop: false

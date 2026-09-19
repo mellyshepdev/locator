@@ -1,11 +1,26 @@
 Service:
 
-  # The log receiver + web UI on unit8. Found Exited for 4h on 2026-09-16
-  # (graceful stop, no command on record) with nothing to bring them back —
-  # fluent-bit kept shipping into a dead API the whole time.
+  # The log receiver + web UI on unit8. Non-essential per owner 2026-10-11:
+  # drainable/idle-stoppable; if it dies, the health digest reports it
+  # instead of keep_alive reviving it. fluent-bit buffers while it's down.
+  # Wake-on-visit, added 2026-09-19. Idle-stopping the dashboard is the right
+  # call - nobody is looking at it most of the time - but until now the only
+  # way to get it back was to SSH in and compose up, because nothing armed the
+  # other half. A 404 on logs.prime-quality.online was the usual symptom, and
+  # it read like the app was broken rather than asleep.
+  #
+  # live-logger-api and live-logger-query are deliberately NOT idle_stop, so
+  # this container is the only one a visitor ever has to wake; it does not need
+  # wake_with. edge_port is the dashboard's tailnet publish port.
   live-logger:
-    deployment_type: essential
+    deployment_type: optional
     location_type: stationary
     units: "8"
     instances: 1
-    restart_when_stopped: true
+    idle_stop: true
+    idle_timeout: 15m
+    public_wake: true
+    edge_port: 8086
+    wake_triggers:
+      domain:
+        - logs.prime-quality.online
