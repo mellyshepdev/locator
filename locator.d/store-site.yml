@@ -1,19 +1,22 @@
 Service:
 
   # The public store is separate from the main site so it can be migrated
-  # independently and stopped when it has been idle for 15 minutes.
-  store-site:
-    deployment_type: optional
-    location_type: mobile
-    units: "8"
+  # independently. Essential: never idle-stopped or power-drained.
+  # Stanza renamed store-site -> client-portal 2026-09-19: the name must match
+  # the running container (client-portal on unit7, serving
+  # theofficialblacksheepco.store via store-portal.yml). The old stanza named
+  # the dead unit8 container and protected nothing.
+  client-portal:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
     instances: 1
-    idle_stop: true
-    idle_timeout: 15m
+    idle_stop: false
+    restart_when_stopped: true
     public_wake: true
-    project_dir: /home/swoopg111/server/networking/store-site
+    project_dir: /home/swoopg111/server/networking/client-portal
     wake_triggers:
       domain:
-        - theofficialblacksheepco.com
-        - www.theofficialblacksheepco.com
         - theofficialblacksheepco.store
         - www.theofficialblacksheepco.store
+        - portal.theofficialblacksheepco.com
