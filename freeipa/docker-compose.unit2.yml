@@ -1,0 +1,125 @@
+# ── FREEIPA on unit2 — identity source for Locator clearance levels ─────────
+#
+# Rebuilt 2026-09-21 after unit4 died (the original /data volume — and its CA —
+# went down with the host, so this is a FRESH install with a new CA).
+#
+# Post-install fixes baked into ./data (all verified surviving `docker
+# restart`; the mount below keeps them across a full recreate):
+#   - /data/etc/gss/mech — the rocky-9 image ships NO /etc/gss/mech. Without
+#     it gssproxy can't resolve its own `mechs = krb5` service entries and
+#     every Negotiate call dies with "SPNEGO cannot find mechanisms". Must
+#     point at the real soname (libgssapi_krb5.so.2 — the unversioned .so is
+#     a krb5-devel symlink that isn't installed).
+#   - /data/etc/systemd/system/httpd.service.d/zz-notmp.conf —
+#     PrivateTmp=false. httpd ships PrivateTmp=true and this image symlinks
+#     /var/lib/gssproxy -> /tmp/var/lib/gssproxy, so apache children can't
+#     see the proxymech socket and Negotiate breaks the same way.
+#   - sysrestore.state installation complete=True (server AND
+#     /data/var/lib/ipa-client) — the installer aborted at client config;
+#     without the marker ipactl reports "IPA is not configured".
+#   - LDAP: cn=<fqdn>,cn=masters service entries carry
+#     ipaConfigString=enabledService (install writes configuredService; the
+#     enable-services step it never reached is what ipactl filters on).
+#   - container-ipa.target.wants only ipa.service + sssd/gssproxy/certmonger —
+#     ipactl owns the IPA-managed units; enabling them separately races
+#     dirsrv and krb5kdc dies.
+#
+# unit2 deltas from the generic recipe:
+#   bridge networking — unit2's Traefik already publishes 80/443 on the
+#     tailnet IP and apache owns :8080, so host networking collides outright;
+#     Dogtag PKI's 8080/8443 stay container-side like the unit4 build.
+#   no integrated DNS — unit9's PowerDNS is authoritative and unit2 itself
+#     runs the secondary pdns.service on :53. --setup-dns=no.
+#   only LDAP/LDAPS + Kerberos are published (all on the tailnet IP);
+#     the admin web UI is NOT published — Traefik owns tailnet 80/443.
+#     Reach the UI via ssh -L 8443:192.168.40.10:443 unit2, or use the
+#     `ipa` CLI inside the container for admin tasks.
+#
+# Back up ./data — it holds the CA private key. Losing it means re-enrolling
+# every host. (We just learned this the hard way.)
+
+services:
+  freeipa:
+    image: freeipa/freeipa-server:rocky-9
+    container_name: freeipa
+    hostname: ipa.theofficialblacksheepco.online
+    restart: unless-stopped
+    command: ["no-exit"]
+    # Docker mounts the delegated cgroup-v2 subtree READ-ONLY, and systemd
+    # cannot manage units on a ro cgroupfs — init dies silently (exit 255)
+    # before ipa-server-configure-first ever runs. SYS_ADMIN is already
+    # granted, so remount it rw before handing off to the image's init.
+    # The entrypoint wraps /usr/local/sbin/init so `compose run freeipa
+    # ipa-server-install ...` still lands on the real init via "$@".
+    entrypoint:
+      - /bin/bash
+      - -c
+      - "mount -o remount,rw /sys/fs/cgroup 2>/dev/null || true; exec /usr/local/sbin/init \"$@\""
+      - init
+    stop_grace_period: 60s
+    # Dogtag's readiness probe fetches http://<fqdn>:8080/ca/admin/ca/getStatus
+    # against its own Tomcat — the FQDN must resolve INSIDE the container to
+    # the container itself, or the probe leaves the namespace and dies.
+    extra_hosts:
+      - "ipa.theofficialblacksheepco.online:192.168.40.10"
+    networks:
+      ipa_net:
+        ipv4_address: 192.168.40.10
+    ports:
+      # Tailnet IP only — this directory holds every fleet account.
+      - "100.64.118.105:389:389"      # LDAP   (StartTLS)
+      - "100.64.118.105:636:636"      # LDAPS  — what Keycloak federates over
+      - "100.64.118.105:88:88"        # Kerberos KDC
+      - "100.64.118.105:88:88/udp"
+      - "100.64.118.105:464:464"      # kpasswd
+      - "100.64.118.105:464:464/udp"
+    environment:
+      IPA_SERVER_HOSTNAME: ipa.theofficialblacksheepco.online
+      IPA_SERVER_IP: 100.64.118.105
+      PASSWORD: ${IPA_ADMIN_PASSWORD}
+      DEBUG_TRACE: 0
+    volumes:
+      - ./data:/data:Z
+      # GSS mech table for gssproxy's `mechs = krb5` resolution (see header).
+      # /etc/gss isn't one of the image's symlinked dirs, so without this a
+      # container recreate loses the file and Negotiate breaks again.
+      - ./data/etc/gss/mech:/etc/gss/mech:ro
+      # NOT /sys/fs/cgroup — binding the host cgroupfs over docker's delegated
+      # cgroup-v2 subtree either hides memory.max (host root has none, so
+      # ipa-server-install's memory check aborts) or kills systemd at boot.
+      # Private cgroupns (the default) + SYS_ADMIN lets systemd manage its
+      # own subtree, which is what docker mounts for it automatically.
+    tmpfs:
+      - /run
+      - /tmp
+    # NOT cgroup:host — that drops the container at the cgroup-v2 ROOT, which
+    # has no memory.max/memory.current files, and ipa-server-install's
+    # check_available_memory aborts with "Unable to determine the amount of
+    # available RAM". The default private cgroupns delegates a subtree where
+    # both files exist, and systemd manages it fine on docker 29.
+    # mem_limit also matters: with it, memory.max is a real number instead
+    # of "max", and it caps the heap Dogtag sizes against the host's 31G.
+    mem_limit: 6g
+    security_opt:
+      - seccomp:unconfined
+      # Same AppArmor exemption unit4 needed: the default profile denies the
+      # mounts systemd does for dirsrv's PrivateTmp/ProtectSystem — without it
+      # 389-ds fails 226/NAMESPACE before the directory ever comes up.
+      - apparmor:unconfined
+    cap_add:
+      - SYS_ADMIN
+      - SYS_TIME
+      - NET_ADMIN
+    healthcheck:
+      test: ["CMD", "bash", "-c", "kinit -k 2>/dev/null && ipa ping"]
+      interval: 60s
+      timeout: 15s
+      retries: 5
+      start_period: 1200s
+
+networks:
+  ipa_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.40.0/24
