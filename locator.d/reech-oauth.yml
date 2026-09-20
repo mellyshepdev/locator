@@ -1,12 +1,14 @@
 Service:
 
+  # Essential with reech — it is the front door. A stopped reech-oauth makes
+  # a running reech unreachable (this exact failure happened 2026-09-20).
   reech-oauth:
-    deployment_type: optional
+    deployment_type: essential
     location_type: stationary
     units: "2"
     instances: 1
-    idle_stop: true
-    idle_timeout: 15m
+    idle_stop: false
+    restart_when_stopped: true
     public_wake: true
     wake_with: [reech]
     wake_triggers:

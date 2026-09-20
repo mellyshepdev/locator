@@ -12,13 +12,15 @@ Service:
   # There is no reech-db: reech uses the SHARED postgres on unit8, which is
   # essential and always up. The reech-db record still in the registry is a
   # leftover and is not a container that exists.
+  # Essential per owner 2026-09-20: reech is the mailbox — it must never be
+  # idle-stopped or drained. A stopped reech is invisible missed email.
   reech:
-    deployment_type: optional
+    deployment_type: essential
     location_type: stationary
     units: "2"
     instances: 1
-    idle_stop: true
-    idle_timeout: 15m
+    idle_stop: false
+    restart_when_stopped: true
     public_wake: true
     wake_with: [reech-oauth]
     wake_triggers:
