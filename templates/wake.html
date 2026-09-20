@@ -1,33 +1,20 @@
 <!doctype html>
 <html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Please wait</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Great+Vibes&display=swap" rel="stylesheet">
 <style>
-  html, body { margin:0; height:100%; background:#000; }
-  body { display:flex; flex-direction:column; align-items:center;
-         justify-content:center; gap:20px; color:#f2ead8; }
-  .logo { height:min(34vh,260px); object-fit:contain;
-          filter:drop-shadow(0 14px 30px rgba(0,0,0,.8)) drop-shadow(0 0 30px rgba(242,234,216,.08));
-          animation:breathe 2.8s ease-in-out infinite; }
-  .script { font-family:'Great Vibes','Pinyon Script',cursive;
-            font-size:clamp(44px,7vw,76px); letter-spacing:.02em; }
-  .dot { opacity:.2; animation:dot 1.6s ease-in-out infinite; }
-  .dot:nth-child(2) { animation-delay:.25s; }
-  .dot:nth-child(3) { animation-delay:.5s; }
-  .sub { font-family:system-ui,-apple-system,sans-serif; font-size:11px;
-         letter-spacing:.24em; text-transform:uppercase; color:#6f6a5c; }
-  @keyframes breathe { 50% { transform:scale(1.05); opacity:.82; } }
-  @keyframes dot { 40% { opacity:1; } }
+  html, body { margin:0; height:100%; background:#000; overflow:hidden; }
+  body { background:#000 url('https://www.theofficialblacksheepco.com/media/loading.jpg') center/cover no-repeat fixed;
+         display:flex; align-items:flex-end; justify-content:center; }
+  .sub { font-family:Georgia,'Times New Roman',serif; font-size:12px;
+         letter-spacing:.26em; text-transform:uppercase; color:#c9a25e;
+         padding:0 16px 5vh; text-align:center;
+         text-shadow:0 1px 8px rgba(0,0,0,.9); }
 </style></head>
 <body>
-  <img class="logo" src="https://www.theofficialblacksheepco.com/media/sheldon-guide-standing.png" alt="">
-  <div class="script">please wait<span class="dot">.</span><span class="dot">.</span><span class="dot">.</span></div>
   <div class="sub" id="status">{{ container }} is waking up</div>
 <script>
-  // Brand surface for the wake page — the owner's design replaces the markup,
-  // keep the script: it is what brings the visitor back. Served under the
-  // sleeping service's own URL, so reloading IS the health check.
+  // The artwork is the page; this script is the machinery — keep it when the
+  // design changes. Served under the sleeping service's own URL, so reloading
+  // IS the health check: the service answers for itself once it's up.
   const target = {{ target | tojson }};
   const ownOrigin = {{ own_origin | tojson }};
   const RETRY_MS = 5000;
