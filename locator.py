@@ -1501,6 +1501,23 @@ def register_service():
             "domain": data.get("domain", existing.get("domain")),
         }
 
+        # Health verification tier for docker containers. Green is EARNED:
+        # only a docker HEALTHCHECK reporting 'healthy' (metadata.health from
+        # lokey/the local scanner) proves the container is well. Anything else
+        # that heartbeats while up — no HEALTHCHECK defined, 'starting', or an
+        # agent too old to send the field — is alive-but-unproven: the
+        # dashboard shows it orange ('unverified'), never green. 'unhealthy'
+        # shows red. status stays ONLINE either way — liveness and health are
+        # different axes, and idle/wake/traefik logic keys on the former.
+        if _category == "docker containers":
+            _hm = registry["services"][service_id].get("metadata") or {}
+            _dh = str(_hm.get("health") or "").strip().lower()
+            registry["services"][service_id]["health"] = _dh or None
+            registry["services"][service_id]["health_state"] = (
+                {"healthy": "verified", "unhealthy": "unhealthy"}
+                .get(_dh, "unverified")
+            )
+
         # Owner-marked public surface: a policy `visibility: public|shared` in
         # locator.d stamps the row every heartbeat, so anonymous readers of
         # /api/registry (e.g. the lokey-android grid, which holds no credential)
@@ -1685,7 +1702,21 @@ def get_compose_file(name):
 
 @app.route("/api/compose/<name>", methods=["POST", "PUT"])
 def save_compose_file(name):
-    """Store or replace a compose file. Accepts raw YAML body or JSON {content: '...'}."""
+    """Store or replace a compose file. Accepts raw YAML body or JSON {content: '...'}.
+
+    UNIT_KEY route: a unit's lokey files its own compose with X-Lokey-Unit +
+    X-Lokey-Key; admin key also passes. A unit key may not overwrite a compose
+    for a service registered to a different unit.
+    """
+    scope, denied = _unit_key_auth()
+    if denied:
+        return denied
+    if scope:
+        _, svc = _find_service_entry(name)
+        host = (svc or {}).get("host")
+        if svc and host and host != scope:
+            return jsonify({"error": f"this key belongs to {scope}, not {host}"}), 403
+
     ct = request.content_type or ""
     if "application/json" in ct:
         data = request.get_json(silent=True) or {}
@@ -4866,6 +4897,17 @@ def local_docker_scanner():
                 name = container.name
                 if name == "locator": continue
 
+                # Health verdict needs the full inspect (list() returns the
+                # summary, whose State is a bare string). Per-container guard:
+                # one vanishing container must not kill the whole sweep.
+                try:
+                    container.reload()
+                    _cst = container.attrs.get("State") or {}
+                    _dh = str((_cst.get("Health") or {}).get("Status") or "").lower()
+                except Exception:
+                    _cst, _dh = {}, ""
+                _health_state = {"healthy": "verified", "unhealthy": "unhealthy"}.get(_dh, "unverified")
+
                 # Keyed name@host, matching /register. This used to key on the
                 # bare container name, which meant a local scan would refresh
                 # whatever entry happened to own that name — including records
@@ -4884,19 +4926,34 @@ def local_docker_scanner():
                             "host": _local_unit,
                             "hosts": [_local_unit],
                             "status": "ONLINE",
+                            "health": _dh or None,
+                            "health_state": _health_state,
                             "last_heartbeat": now,
                             "registered_at": now,
                             "type": "container",
                             "metadata": {
                                 "image": container.image.tags[0] if container.image.tags else "unknown",
-                                "discovered_via": "local_docker"
+                                "discovered_via": "local_docker",
+                                "health": _dh or None,
+                                "state": _cst.get("Status"),
+                                "restart_count": container.attrs.get("RestartCount"),
+                                "oom_killed": _cst.get("OOMKilled"),
+                                "exit_code": _cst.get("ExitCode"),
                             }
                         }
                         changed = True
                     else:
                         registry["services"][service_id]["status"] = "ONLINE"
+                        registry["services"][service_id]["health"] = _dh or None
+                        registry["services"][service_id]["health_state"] = _health_state
                         registry["services"][service_id]["last_heartbeat"] = now
                         registry["services"][service_id].pop("offline_since", None)
+                        _md = registry["services"][service_id].setdefault("metadata", {})
+                        _md["health"] = _dh or None
+                        _md["state"] = _cst.get("Status")
+                        _md["restart_count"] = container.attrs.get("RestartCount")
+                        _md["oom_killed"] = _cst.get("OOMKilled")
+                        _md["exit_code"] = _cst.get("ExitCode")
 
             # Mark the local node ONLINE since we can see its containers.
             # Resolved UNIT_NAME, not the env — a stale env value marked a
@@ -6965,77 +7022,103 @@ def wake_page(container):
             _, svc = _find_service_entry(container)
             target = (svc or {}).get("url", "") or ""
     own_origin = _is_locator_origin(request.host)
-    html = f"""<!doctype html>
-<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Service starting</title>
-<style>
-  :root {{ color-scheme:dark; --ink:#eef7f1; --muted:#a6b8ad; --accent:#7de0b0; }}
-  * {{ box-sizing:border-box; }}
-  body {{ background:linear-gradient(145deg,#10251d,#172c27 52%,#0b1512);
-         color:var(--ink); font-family:system-ui,-apple-system,Segoe UI,sans-serif;
-         display:flex; align-items:center; justify-content:center;
-         min-height:100vh; margin:0; padding:24px; }}
-  .box {{ width:min(560px,100%); text-align:center; border:1px solid rgba(125,224,176,.35);
-          border-radius:24px; padding:42px 30px; background:rgba(8,18,14,.68);
-          box-shadow:0 24px 80px rgba(0,0,0,.3); }}
-  .mark {{ width:58px; height:58px; margin:0 auto 20px; border-radius:18px;
-           display:grid; place-items:center; color:#10251d; background:var(--accent);
-           font-size:27px; font-weight:800; animation:p 1.4s ease-in-out infinite; }}
-  h1 {{ margin:0; font-size:25px; letter-spacing:-.03em; }}
-  p {{ color:var(--muted); line-height:1.6; font-size:14px; }}
-  .status {{ margin-top:22px; padding:11px 14px; border-radius:12px;
-             background:rgba(125,224,176,.1); color:var(--accent); font-size:12px; }}
-  @keyframes p {{ 50% {{ transform:translateY(-5px); opacity:.65; }} }}
-</style></head>
-<body><div class="box">
-  <div class="mark">↗</div>
-  <h1>Service starting</h1>
-  <p>{container} is starting on {unit}. You will be returned automatically when it is ready.</p>
-  <div class="status" id="status">Start command queued — usually under a minute</div>
-</div>
-<script>
-  const target = {json.dumps(target)};
-  const ownOrigin = {json.dumps(bool(own_origin))};
-  const RETRY_MS = 5000;
-  const MAX_TRIES = 48;              // 4 minutes, then stop and say so
-  const el = document.getElementById("status");
-  let tries = 0;
+    # The branded wake page lives in templates/wake.html (bind-mounted, so the
+    # design can be swapped without a rebuild). Keep its <script> block when
+    # redesigning — the retry/poll loop is what returns the visitor.
+    return render_template("wake.html", container=container, unit=unit,
+                           target=target, own_origin=bool(own_origin))
 
-  function gaveUp() {{
-    el.textContent = "still starting after "
-      + Math.round(MAX_TRIES * RETRY_MS / 60000) + " min — reload to keep waiting";
-  }}
 
-  // Served under the sleeping service's own hostname: the retry IS the
-  // service answering for itself, so just ask for this URL again.
-  function retryHere() {{
-    if (++tries > MAX_TRIES) return gaveUp();
-    el.textContent = "waiting for {container} — retry " + tries + " of " + MAX_TRIES;
-    setTimeout(() => location.reload(), RETRY_MS);
-  }}
+# ── HEALTH VERIFICATION ALERTS ──────────────────────────────────────────────
+# Green is earned: only a docker HEALTHCHECK reporting 'healthy' marks a
+# container 'verified'. A running container with no confirmation is
+# 'unverified' (orange on the grid) and 'unhealthy' is red — both computed at
+# register/scan time into svc['health_state']. This worker watches transitions
+# and reports them through notifier.notify_all (Matrix → reech) as ONE digest
+# per sweep: the first pass after rollout finds ~50 unverified containers at
+# once, and fifty separate pings is a denial of service on the operator.
+#
+# _health_alerted remembers which service_ids were already reported bad and in
+# which state, so an unverified→unhealthy change re-alerts (it is a NEW fact)
+# while a steady-state unverified stays quiet until it recovers.
+_health_alerted: dict = {}   # service_id -> "unverified" | "unhealthy"
+_health_alert_lock = threading.Lock()
+HEALTH_CHECK_INTERVAL = 300  # seconds between sweeps
+# How fresh a service's last_heartbeat must be to trust its health verdict.
+# A loaded unit's tick (vitals sweep + command work + 60s sleep) can run
+# ~5min — a tighter gate flaps records across the line and the "stale"
+# branch below would clear and re-fire the same alerts every sweep.
+HEALTH_FRESH_SECONDS = 600
 
-  // On locator's own origin the registry is same-origin and the caller is
-  // already authenticated, so watch the record flip and follow the target.
-  async function poll() {{
-    if (++tries > MAX_TRIES) return gaveUp();
-    try {{
-      const r = await fetch("/services/{container}");
-      if (r.ok) {{
-        const svc = await r.json();
-        if (svc.status === "ONLINE") {{
-          el.textContent = "awake — redirecting…";
-          if (target) {{ location.href = target; return; }}
-          el.textContent = "awake ✓";
-          return;
-        }}
-      }}
-    }} catch (e) {{}}
-    el.textContent = "waiting for {container} — check " + tries + " of " + MAX_TRIES;
-    setTimeout(poll, RETRY_MS);
-  }}
 
-  if (ownOrigin) {{ poll(); }} else {{ retryHere(); }}
-</script></body></html>"""
-    return Response(html, mimetype="text/html")
+def health_alert_digest():
+    """Batched health_state transition alerts via the fleet notifier.
+
+    Read-only: iterates the registry and sends notifications. It queues no
+    commands and touches no containers — restart decisions stay in lokey's
+    keep_alive(), which is why critical_service_watchdog was removed."""
+    time.sleep(45)  # let heartbeats/scans populate health_state first
+    while True:
+        try:
+            new_bad, cleared = [], []
+            now = datetime.now(timezone.utc)
+            with lock:
+                snap = {sid: dict(s) for sid, s in registry["services"].items()}
+            with _health_alert_lock:
+                for sid, svc in snap.items():
+                    if svc.get("category") != "docker containers":
+                        continue
+                    hs = svc.get("health_state")
+                    # Ground truth is what the reporting agent measured at its
+                    # docker socket (metadata.state), NOT the registry's
+                    # derived ONLINE — which flaps, the exact reason
+                    # critical_service_watchdog was removed. Records with no
+                    # state report (old agents, seeded rows) fall back to
+                    # ONLINE so they still get watched.
+                    reported = str((svc.get("metadata") or {}).get("state") or "").lower()
+                    running = (reported == "running" if reported
+                               else svc.get("status") == "ONLINE")
+                    # A stale heartbeat means the agent went quiet, not that
+                    # the container is fine — the OFFLINE/reaper path owns
+                    # that case, don't double-report it here.
+                    try:
+                        fresh = (now - datetime.fromisoformat(
+                            svc.get("last_heartbeat") or "")).total_seconds() < HEALTH_FRESH_SECONDS
+                    except (ValueError, TypeError):
+                        fresh = False
+                    bad = fresh and running and hs in ("unverified", "unhealthy")
+                    prev = _health_alerted.get(sid)
+                    if bad and prev != hs:
+                        _health_alerted[sid] = hs
+                        new_bad.append((sid, hs))
+                    elif prev:
+                        if fresh and running and hs == "verified":
+                            # Confirmed recovery — announce it.
+                            del _health_alerted[sid]
+                            cleared.append(sid)
+                        elif not (fresh and running):
+                            # Agent went quiet or the container stopped: that
+                            # is silence, not recovery. Drop the alert state
+                            # without a notice so a later bad report re-alerts.
+                            del _health_alerted[sid]
+            if new_bad:
+                unh = sorted(s for s, h in new_bad if h == "unhealthy")
+                unv = sorted(s for s, h in new_bad if h == "unverified")
+                parts = []
+                if unh:
+                    parts.append("🔴 UNHEALTHY (docker healthcheck failing): "
+                                 + ", ".join(unh))
+                if unv:
+                    parts.append(f"🟠 UNVERIFIED ({len(unv)} running with no "
+                                 f"healthcheck confirmation): " + ", ".join(unv))
+                notifier.notify_all("LOCATOR HEALTH\n" + "\n".join(parts),
+                                    urgent=bool(unh))
+            if cleared:
+                notifier.notify_all("🟢 LOCATOR HEALTH recovered (now verified): "
+                                    + ", ".join(sorted(cleared)))
+        except Exception as e:
+            print(f"⚠️ health_alert_digest error: {e}")
+        time.sleep(HEALTH_CHECK_INTERVAL)
 
 
 def idle_reaper():
@@ -7594,6 +7677,7 @@ def start_background_workers():
         script_scheduler,           # recurring exec jobs from /api/schedule
         exec_run_reaper,            # ages out exec jobs that never reported back
         _credential_renewer,        # reissues every expiring credential 7 days out
+        health_alert_digest,        # unverified/unhealthy container digests → reech
     ]
     if BALANCE_ENABLED:
         workers.append(load_balancer)
