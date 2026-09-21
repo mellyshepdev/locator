@@ -1,0 +1,18 @@
+Service:
+
+  # scs.prime-quality.online — Secure Cyberstructures site, static build
+  # served by httpd:alpine on unit7; edge file scs-site.yml routes the host
+  # to it. Essential per owner 2026-09-21: never idle-stopped, auto-revived
+  # by lokey keep_alive if it dies.
+  scs-site:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: false
+    restart_when_stopped: true
+    public_wake: true
+    project_dir: /home/swoopg111/server/networking/scs
+    wake_triggers:
+      domain:
+        - scs.prime-quality.online
