@@ -23,4 +23,5 @@ services:
       - SELF_CONTAINER_NAME=locator
       - LOCATOR_CANONICAL_URL=${LOCATOR_CANONICAL_URL:-https://tobsco-locator.fly.dev}
       - DATABASE_URL=${DATABASE_URL:-}
+      - LOCATOR_ADMIN_KEY=${LOCATOR_ADMIN_KEY:-}
       - PYTHONUNBUFFERED=1

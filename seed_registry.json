@@ -37,12 +37,6 @@
       "port": 5004,
       "type": "container"
     },
-    "ollama": {
-      "internal": "http://ollama:11434",
-      "host": "unit1",
-      "port": 11434,
-      "type": "container"
-    },
     "openvpn": {
       "internal": "http://openvpn:1194",
       "host": "unit1",
@@ -79,7 +73,8 @@
         "provider": "Netlify",
         "description": "Static site & JAMstack hosting \u2014 dashboard at app.netlify.com",
         "health_url": "https://app.netlify.com"
-      }
+      },
+      "category": "cloud platforms"
     },
     "vercel": {
       "url": "https://vercel.com/dashboard",
@@ -94,7 +89,8 @@
         "provider": "Vercel",
         "description": "Next.js & static site hosting \u2014 dashboard at vercel.com",
         "health_url": "https://vercel.com"
-      }
+      },
+      "category": "cloud platforms"
     },
     "render": {
       "url": "https://dashboard.render.com",
@@ -109,7 +105,8 @@
         "provider": "Render",
         "description": "Container & web service hosting \u2014 dashboard at dashboard.render.com",
         "health_url": "https://dashboard.render.com"
-      }
+      },
+      "category": "cloud platforms"
     },
     "fly-io": {
       "url": "https://fly.io/dashboard",
@@ -124,7 +121,8 @@
         "provider": "Fly.io",
         "description": "Container app hosting \u2014 dashboard at fly.io/dashboard",
         "health_url": "https://fly.io"
-      }
+      },
+      "category": "cloud platforms"
     },
     "web_theofficialblacksheepco_info": {
       "name": "theofficialblacksheepco.info",

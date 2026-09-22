@@ -1,0 +1,22 @@
+# Moves apache-web off host port 8080.
+#
+# FreeIPA (server/security/freeipa) runs with network_mode: host so that
+# Kerberos, LDAP and httpd all agree on one address — under bridge networking
+# the SPNEGO handshake fails and the server cannot enrol itself as its own
+# client. Host networking means Dogtag PKI binds 8080/8443 on unit4 directly,
+# and it aborts the install outright if either is already taken.
+#
+# apache-web only ever needed a host binding so unit8's Traefik could reach it
+# over the tailnet, so the port itself is arbitrary. 8090 verified free.
+#
+# Paired change: unit8 traefik dynamic-config/unit4-apache.yml now points at
+# http://100.82.31.92:8090. Both must move together or unit4.prime-quality.online
+# 404s the way locator.theofficialblacksheepco.online did.
+#
+# An override file rather than an edit to docker-compose.yml or .env, so the
+# upstream service definition stays untouched.
+
+services:
+  apache:
+    ports:
+      - "8090:80"

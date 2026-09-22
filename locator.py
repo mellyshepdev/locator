@@ -30,7 +30,7 @@ Server environment:
   BALANCE_ENABLED, IDLE_ENABLED, GIT_AUTO_PUSH
 
 Client environment:
-  LOCATOR_URL      Registry URL (default: https://tobsco-locator.fly.dev)
+  LOCATOR_URL      Registry URL (default: https://locator.prime-quality.online)
 """
 
 # Handle -h/--help before the heavy imports so help works without deps installed
@@ -45,19 +45,27 @@ import http.client
 import threading
 import time
 import uuid
+import hmac
 import queue as _queue_module
 import requests
 import urllib3
 import re
 import io
 import ipaddress
+import tempfile
 import qrcode
 import pandas as pd
-from datetime import datetime, timezone
-from flask import Flask, request, jsonify, Response, render_template
+from datetime import datetime, timezone, timedelta
+from flask import Flask, request, jsonify, Response, render_template, g
 
 import notifier
 import db
+import clearance
+import kc_admin
+import bao
+import renewals
+import secretscan
+import unitkeys
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -100,6 +108,23 @@ DATA_DIR = os.environ.get("DATA_DIR", "/app/data")
 SEED_FILE = os.environ.get("SEED_FILE", "/app/seed_registry.json")
 EXCEL_FILE = "registry.xlsx"
 
+# Admin key gating remote-exec / scheduling — these endpoints let the locator
+# tell a unit's lokey to run an arbitrary shell command, so unlike the rest of
+# the (deliberately open) API they require X-Locator-Admin-Key. Fails closed:
+# if the key isn't configured, the endpoints refuse everything rather than
+# silently running open.
+LOCATOR_ADMIN_KEY = os.environ.get("LOCATOR_ADMIN_KEY", "")
+
+
+def _require_admin_key():
+    """Return None if the request's X-Locator-Admin-Key is valid, else a Flask response to abort with."""
+    if not LOCATOR_ADMIN_KEY:
+        return jsonify({"error": "LOCATOR_ADMIN_KEY not configured on server"}), 503
+    supplied = request.headers.get("X-Locator-Admin-Key", "")
+    if not hmac.compare_digest(supplied, LOCATOR_ADMIN_KEY):
+        return jsonify({"error": "unauthorized"}), 401
+    return None
+
 # DNS zone status/sync (unit9 runs the PowerDNS primary with a sqlite3
 # backend, at ns2.theofficialblacksheepco.online — DNS delegation for the
 # .online zone completed 2026-08-07, so this resolves publicly now;
@@ -109,19 +134,20 @@ DNS_SSH_HOST = os.environ.get("DNS_SSH_HOST", "ns2.theofficialblacksheepco.onlin
 DNS_SSH_USER = os.environ.get("DNS_SSH_USER", "root")
 DNS_ZONES = [z.strip() for z in os.environ.get(
     "DNS_ZONES",
+    "prime-quality.online"
     "theofficialblacksheepco.com,theofficialblacksheepco.info,"
     "theofficialblacksheepco.online,theofficialblacksheepco.store",
 ).split(",") if z.strip()]
 
 # Load-balancer config
 BALANCE_ENABLED  = os.environ.get("BALANCE_ENABLED", "true").lower() == "true"
-BALANCE_HIGH     = float(os.environ.get("BALANCE_HIGH", "70"))   # % — node is overloaded above this
+BALANCE_HIGH     = float(os.environ.get("BALANCE_HIGH", "50"))   # % — node is overloaded above this
 BALANCE_LOW      = float(os.environ.get("BALANCE_LOW",  "30"))   # % — node is a migration target below this
 BALANCE_INTERVAL = int(os.environ.get("BALANCE_INTERVAL", "120"))  # seconds between balance checks
 BALANCE_COOLDOWN = int(os.environ.get("BALANCE_COOLDOWN", "300"))  # seconds before re-migrating from same node
-BALANCE_DIFF     = float(os.environ.get("BALANCE_DIFF", "40"))     # % spread between busiest/least busy to trigger balance
-BALANCE_STRIKES  = int(os.environ.get("BALANCE_STRIKES", "2"))      # consecutive overloaded checks before migrating
-OOM_THRESHOLD    = float(os.environ.get("OOM_THRESHOLD", "90"))     # % mem — emergency migration, bypasses anti-flap/cooldown
+BALANCE_DIFF     = float(os.environ.get("BALANCE_DIFF", "25"))     # % spread between busiest/least busy to trigger balance
+BALANCE_STRIKES  = int(os.environ.get("BALANCE_STRIKES", "1"))      # consecutive overloaded checks before migrating
+OOM_THRESHOLD    = float(os.environ.get("OOM_THRESHOLD", "80"))     # % mem — emergency migration, bypasses anti-flap/cooldown
 
 # Proactive pre-staging: watch nodes trending toward BALANCE_HIGH *before* they
 # get there, and validate (not execute) a migration ahead of time so the real
@@ -133,7 +159,7 @@ BALANCE_PRESTAGE_MARGIN  = float(os.environ.get("BALANCE_PRESTAGE_MARGIN", "15")
 PRESTAGE_STALE_SECONDS   = int(os.environ.get("PRESTAGE_STALE_SECONDS", "600"))    # re-validate if older than this
 
 UNIT_NAME             = os.environ.get("UNIT_NAME", "unknown")
-LOCATOR_CANONICAL_URL = os.environ.get("LOCATOR_CANONICAL_URL", "https://locator.theofficialblacksheepco.online")
+LOCATOR_CANONICAL_URL = os.environ.get("LOCATOR_CANONICAL_URL", "https://locator.prime-quality.online")
 
 # ── ALERT / TELEMETRY CONFIG ─────────────────────────────────────────────────
 TELEMETRY_URL     = os.environ.get("TELEMETRY_URL", "http://beast-telemetry:8087")
@@ -371,6 +397,20 @@ def _list_compose_names():
     return [f[:-4] for f in os.listdir(COMPOSE_DIR) if f.endswith(".yml")]
 
 
+def _first_addr(value):
+    """First address out of a free-text node address field, or "".
+
+    Agents report these inconsistently — "10.0.0.236- sheep.client", a bare IP,
+    None, or "". The previous inline form was
+    `info.get("openvpn_ip", "").split("-")[0].strip().split()[0]`, which raises
+    IndexError on an empty string: .split() on "" returns [], so [0] blows up.
+    Any node with a blank openvpn_ip therefore 500'd the whole auto-select,
+    which is why deploying without pinning a node never worked.
+    """
+    parts = str(value or "").split("-")[0].strip().split()
+    return parts[0] if parts else ""
+
+
 def _best_available_node():
     """
     Returns (node_id, ip) for the ONLINE node with the most headroom.
@@ -385,12 +425,10 @@ def _best_available_node():
         if info.get("status") != "ONLINE":
             continue
 
-        ip = (
-            info.get("tailscale_ip")
-            or info.get("openvpn_ip", "").split("-")[0].strip().split()[0]
-            or info.get("ip", "").split("-")[0].strip().split()[0]
-        )
-        if not ip or ip in ("", "unknown"):
+        ip = _first_addr(info.get("tailscale_ip")) \
+            or _first_addr(info.get("openvpn_ip")) \
+            or _first_addr(info.get("ip"))
+        if not ip or ip == "unknown":
             continue
 
         cpu  = info.get("cpu_percent")
@@ -416,6 +454,43 @@ def _best_available_node():
     candidates.sort(key=lambda x: x[0])
     _, node_id, ip = candidates[0]
     return node_id, ip
+
+
+def _ranked_nodes():
+    """Every deployable node, best headroom first, as [(node_id, ip), ...].
+
+    Same scoring as _best_available_node, but the whole ranking rather than
+    just the winner — an auto-target deploy needs somewhere to fall through to
+    when the top node turns out not to run containers (unit3 is a Mac mini
+    whose non-interactive shell has no `docker` on PATH, and it frequently
+    scores best because it is idle).
+    """
+    with lock:
+        nodes_snap = {k: dict(v) for k, v in registry["nodes"].items()}
+
+    ranked = []
+    for node_id, info in nodes_snap.items():
+        if info.get("status") != "ONLINE":
+            continue
+        ip = _first_addr(info.get("tailscale_ip")) \
+            or _first_addr(info.get("openvpn_ip")) \
+            or _first_addr(info.get("ip"))
+        if not ip or ip == "unknown":
+            continue
+        cpu, mem, disk = info.get("cpu_percent"), info.get("mem_percent"), info.get("disk_percent")
+        if cpu is not None and mem is not None:
+            score = (cpu + mem + (disk or 0)) / (3 if disk is not None else 2)
+        else:
+            try:
+                ram_gb = int("".join(filter(str.isdigit,
+                                            info.get("metadata", {}).get("ram", "0").lower())))
+            except Exception:
+                ram_gb = 1
+            score = max(0, 100 - ram_gb)
+        ranked.append((score, node_id, ip))
+
+    ranked.sort(key=lambda x: x[0])
+    return [(node_id, ip) for _, node_id, ip in ranked]
 
 
 # ── SELF-ELECTION ───────────────────────────────────────────────────────────
@@ -488,6 +563,88 @@ ELECTION_MIN_RAM_MB = float(os.environ.get("ELECTION_MIN_RAM_MB", "256"))
 # Dry run logs the decision without acting, so the ranking can be observed
 # against real nodes before _stop_self() is ever armed.
 ELECTION_DRY_RUN = os.environ.get("ELECTION_DRY_RUN", "true").lower() == "true"
+
+
+# ── NODE LIVENESS ────────────────────────────────────────────────────────────
+# A missing heartbeat means "lokey is not reporting", which is NOT the same
+# fact as "the machine is down" — and the registry used to record them as the
+# same thing. unit6 runs no Docker at all, so its containerised lokey can never
+# heartbeat, and the box the operator uses every single day sat permanently at
+# OFFLINE while being up for over a day. unit3 was in the same state while
+# tailscale showed it active.
+#
+# So before a node is declared OFFLINE we now ask the network. Reachable but
+# silent is AGENT_DOWN: the machine is fine, its agent is not. Only genuinely
+# unreachable nodes get OFFLINE.
+NODE_PROBE_PORTS   = [int(p) for p in
+                      os.environ.get("NODE_PROBE_PORTS", "22,5000,41641").split(",")
+                      if p.strip().isdigit()]
+NODE_PROBE_TIMEOUT = float(os.environ.get("NODE_PROBE_TIMEOUT", "2.0"))
+
+# Node is up, agent is not reporting. Deliberately NOT "ONLINE": every
+# scheduling path in this file gates on status == "ONLINE", and a node with no
+# lokey cannot execute a deploy, migration or exec command. Keeping it distinct
+# means such a node is correctly skipped for work while still being reported as
+# the live machine it is.
+NODE_STATUS_AGENT_DOWN = "AGENT_DOWN"
+
+# Nodes already sitting at OFFLINE must be re-probed too, or a machine that is
+# genuinely up can never be corrected — unit3 and unit6 were both stuck at
+# OFFLINE while running, and nothing in the old reaper would ever look at them
+# again because it only considered ONLINE nodes. Re-probed on a slower cycle
+# than live ones so long-dead hosts (unit1 has been gone 23 days) are not
+# retried every REAPER_INTERVAL.
+NODE_REPROBE_OFFLINE_SECONDS = int(os.environ.get("NODE_REPROBE_OFFLINE_SECONDS", "300"))
+_node_probe_last: dict = {}
+_node_probe_lock = threading.Lock()
+
+
+def _node_probe_due(node_id, status):
+    """Rate-limit re-probing of already-OFFLINE nodes."""
+    if status != "OFFLINE":
+        return True
+    now = time.monotonic()
+    with _node_probe_lock:
+        last = _node_probe_last.get(node_id, 0.0)
+        if now - last < NODE_REPROBE_OFFLINE_SECONDS:
+            return False
+        _node_probe_last[node_id] = now
+    return True
+
+
+def _node_probe_addr(info):
+    """The best address to probe this node on, or None if we know of none."""
+    addr = (_first_addr(info.get("tailscale_ip"))
+            or _first_addr(info.get("openvpn_ip"))
+            or _first_addr(info.get("ip"))
+            or _first_addr(info.get("private_ip")))
+    return addr if addr and addr != "unknown" else None
+
+
+def _node_reachable(info, timeout=None):
+    """Does anything answer at this node's address?
+
+    Returns True (something accepted a TCP connection), False (nothing did on
+    any probe port), or None (no address on record, so we cannot tell and must
+    not guess). A refused connection still proves the host is UP and answering,
+    which is exactly the distinction being drawn here, so ECONNREFUSED counts
+    as reachable rather than as a failure.
+
+    Must never be called while holding `lock` — it blocks on the network.
+    """
+    addr = _node_probe_addr(info)
+    if not addr:
+        return None
+    timeout = NODE_PROBE_TIMEOUT if timeout is None else timeout
+    for port in NODE_PROBE_PORTS:
+        try:
+            with socket.create_connection((addr, port), timeout=timeout):
+                return True
+        except ConnectionRefusedError:
+            return True          # host answered, just nothing on that port
+        except OSError:
+            continue
+    return False
 
 
 def _node_is_fresh(info):
@@ -715,6 +872,13 @@ def _git_push_worker():
 
 app = Flask(__name__)
 
+# Clearance gate (levels 1-10). Inert until CLEARANCE_ENFORCE=true.
+clearance.install(app)
+
+# Identity administration for the client portal's new-accounts box.
+# Routes are gated at clearance 10 by clearance.ROUTE_CLEARANCE.
+kc_admin.register(app, clearance)
+
 
 # ── CORS ────────────────────────────────────────────────────────────────────
 
@@ -762,17 +926,22 @@ def register_device_qr():
 
 @app.route("/api/registry", methods=["GET"])
 def get_full_registry():
-    """Return the full registry — services + nodes."""
+    """Return the registry — services + nodes — scoped to the caller's clearance."""
     with lock:
-        return jsonify(registry)
+        snapshot = {
+            "services": clearance.project(registry["services"]),
+            "nodes":    clearance.project(registry["nodes"]),
+            "updated":  registry["updated"],
+        }
+    return jsonify(snapshot)
 
 
 @app.route("/services", methods=["GET"])
 @app.route("/api/services", methods=["GET"])
 def get_services():
-    """Return all registered services."""
+    """Return the registered services the caller is cleared to see."""
     with lock:
-        return jsonify(registry["services"])
+        return jsonify(clearance.project(registry["services"]))
 
 
 @app.route("/services/<name>", methods=["GET"])
@@ -782,9 +951,173 @@ def get_service(name):
         service = registry["services"].get(name)
         if not service:
             _, service = _find_service_entry(name)
-    if service:
-        return jsonify(service)
+    if service and clearance.visible(service):
+        return jsonify(clearance.redact(service))
     return jsonify({"error": f"Service '{name}' not found"}), 404
+
+
+# A service that cannot be placed right now still gets emitted, pointing at a
+# guaranteed-dead upstream: the discard port on the edge itself. Dropping the
+# service instead is the worse failure — every router referencing name@http
+# becomes invalid, Traefik removes it, and its errors middleware dies with it,
+# which turns "registry hiccup" into "the wake path is gone and nothing can
+# bring it back". A dead upstream 502s, which is precisely the signal the wake
+# middleware exists to catch.
+EDGE_DEAD_UPSTREAM = "http://127.0.0.1:9"
+
+# Deployment addressing. A registered service carrying a subdomain+domain pair
+# is emitted by /api/traefik as Host(`<sub>.<dom>`) -> its own upstream, so user
+# deployments are served at https://<sub>.<dom> with a per-host tlsChallenge
+# cert (no wildcard DNS-01 needed). Labels must be DNS-safe: they land inside a
+# Traefik rule string verbatim.
+_DEPLOY_SUBDOMAIN = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
+_DEPLOY_DOMAIN = re.compile(r"[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?")
+
+
+def _edge_upstream(name, cfg, port):
+    """The tailnet URL an edge should proxy this service to, or the dead
+    placeholder when nothing can be resolved yet.
+
+    Order: live registry host → node tailnet address → the policy's declared
+    `units:` spec (where a wake would land it) → dead upstream.
+
+    `edge_host` redirects the lookup to another service's registry entry: an
+    edge file may need several service objects over one backend (error-pages
+    carries passHostHeader: false where the sibling routers carry true), and
+    only the backend's name exists in the registry.
+    """
+    cfg = cfg or {}
+    lookup = cfg.get("edge_host") or name
+    key, svc = _find_service_entry(lookup)
+    host = (svc or {}).get("host") or ((svc or {}).get("hosts") or [None])[0]
+    node = registry["nodes"].get(host or "") or {}
+    ip = _node_probe_addr(node)
+    if not ip:
+        units = (_policy_for(lookup) if lookup != name else cfg).get("units")
+        for fallback in _expand_unit_spec(units, []):
+            ip = _node_probe_addr(registry["nodes"].get(fallback) or {})
+            if ip:
+                break
+    if not ip:
+        return EDGE_DEAD_UPSTREAM
+    return f"http://{ip}:{port}"
+
+
+@app.route("/api/traefik", methods=["GET"])
+def traefik_all_services():
+    """Traefik HTTP-provider view of every edge-routed service in the fleet.
+
+    A service joins by declaring edge_port in locator.yml; its upstream then
+    follows the registry, so a migration between units needs no file edit on
+    any edge. The single /api/traefik/<name>?port= form below stays for
+    services that never declare policy.
+    """
+    out = {}
+    policy = load_policy()
+    with lock:
+        for name, cfg in policy.items():
+            port = cfg.get("edge_port")
+            if not port:
+                continue
+            lb = {"servers": [{"url": _edge_upstream(name, cfg, port)}]}
+            pass_host = cfg.get("edge_pass_host")
+            if pass_host is not None:
+                # YAML gives a bool; a quoted "false" would arrive as a
+                # truthy string and silently invert the intent.
+                if isinstance(pass_host, str):
+                    pass_host = pass_host.strip().lower() == "true"
+                lb["passHostHeader"] = bool(pass_host)
+            if cfg.get("edge_healthcheck"):
+                lb["healthCheck"] = {"path": cfg["edge_healthcheck"],
+                                     "interval": "15s", "timeout": "5s"}
+            out[name] = {"loadBalancer": lb}
+        # User deployments: any registered service carrying a subdomain+domain
+        # gets a concrete Host rule (its own cert via tlsChallenge — a wildcard
+        # HostRegexp could not be issued one) plus an upstream pointed wherever
+        # the deployment's node currently lives. Two claims on one subdomain
+        # collapse to a single router; the later registration wins.
+        routers = {}
+        for svc in registry["services"].values():
+            sub, dom = svc.get("subdomain"), svc.get("domain")
+            if not sub or not dom:
+                continue
+            host = svc.get("host") or ((svc.get("hosts") or [None])[0])
+            ip = _node_probe_addr(registry["nodes"].get(host or "") or {})
+            url = f"http://{ip}:{svc.get('port') or 80}" if ip else EDGE_DEAD_UPSTREAM
+            rname = f"deploy-{sub}"
+            out[rname] = {"loadBalancer": {"servers": [{"url": url}]}}
+            routers[rname] = {
+                "rule": f"Host(`{sub}.{dom}`)",
+                "entryPoints": ["websecure"],
+                "service": rname,
+                "tls": {"certResolver": "myresolver"},
+            }
+    body = {"http": {"services": out}}
+    if routers:
+        body["http"]["routers"] = routers
+    return jsonify(body)
+
+
+@app.route("/api/traefik/<name>", methods=["GET"])
+def traefik_service(name):
+    """Traefik HTTP-provider view of a service's live upstream.
+
+    Edges poll this and get the upstream for wherever the container actually
+    is, so moving a service between units never means editing a dynamic file.
+    The port stays a caller convention (?port=, default 80) - what moves is
+    the unit. A stopped service still resolves to its unit: the edge then
+    502s, which is exactly what the wake errors-middleware watches for.
+    """
+    port = request.args.get("port", "80")
+    with lock:
+        url = _edge_upstream(name, _policy_for(name), port)
+    return jsonify({"http": {"services": {
+        name: {"loadBalancer": {"servers": [{"url": url}]}}}}})
+
+
+# Images whose containers hold state on local disk. Matched against the IMAGE
+# a unit actually reported, not the container's name: kc-pg-node walked straight
+# through the "postgres"/"postgresql" entries in _PINNED_NAMES on 2026-09-04
+# because it is spelled "pg", and the dedup worker queued six evictions against
+# one half of the Keycloak HA database pair. A name is a human label; the image
+# is what the thing IS.
+_STATEFUL_IMAGE_MARKERS = (
+    "postgres", "postgis", "pg-autofailover", "pgpool", "pgbouncer", "timescale",
+    "mysql", "mariadb", "maxscale", "percona",
+    "redis", "valkey", "memcached",
+    "mongo", "cassandra", "elasticsearch", "opensearch", "influxdb", "clickhouse",
+    "etcd", "consul", "vault", "openbao", "minio", "rabbitmq", "kafka", "zookeeper",
+)
+
+
+def _looks_stateful(instances):
+    """True when any reported instance runs a known data-holding image.
+
+    Migration moves the compose file and NOT the volume, so evicting one of
+    these silently separates a database from its data.
+    """
+    for svc in instances or []:
+        img = str((svc.get("metadata") or {}).get("image") or "").lower()
+        if img and any(m in img for m in _STATEFUL_IMAGE_MARKERS):
+            return True
+    return False
+
+
+def _is_multi_unit_service(name):
+    """True when locator.yml assigns this service to more than one unit.
+
+    Such a service is a per-unit agent — a log shipper, a host agent — not a
+    duplicate. _PINNED_NAMES is the hardcoded version of this idea (it is why
+    lokey survives running fleet-wide), but a name has to be added by hand,
+    and anything missing from it gets torn down: enforce_unit_placement deploys
+    the service onto every assigned unit and _enforce_dedup evicts it straight
+    back off, the two workers undoing each other indefinitely. Reading the same
+    'units:' field that drives placement keeps them from disagreeing.
+    """
+    spec = (_policy_for(name).get("units") or "").strip().lower()
+    if spec == "all":
+        return True
+    return len(_expand_unit_spec(spec, [])) > 1
 
 
 def _enforce_dedup(new_name, new_host):
@@ -796,6 +1129,8 @@ def _enforce_dedup(new_name, new_host):
     """
     if any(p in new_name.lower() for p in _PINNED_NAMES):
         return  # infrastructure — allowed on multiple nodes
+    if _is_multi_unit_service(new_name):
+        return  # per-unit agent — locator.yml says it belongs on several units
 
     with lock:
         instances = [
@@ -806,6 +1141,26 @@ def _enforce_dedup(new_name, new_host):
     hosts = {svc.get("host") for svc in instances if svc.get("host")}
     if len(hosts) <= 1:
         return  # nothing to evict
+
+    # ── The default is to do NOTHING. ──────────────────────────────────────
+    # This worker used to evict any duplicate that was not explicitly exempt,
+    # so a service running on two nodes was ASSUMED to be a mistake and intent
+    # had to be declared in advance. A forgotten locator.yml line was therefore
+    # enough to tear down half of a working HA pair — which is exactly what it
+    # tried to do to the Keycloak database on 2026-09-04, six times.
+    # Destroying something is now the case that must be justified, not the
+    # default. Everything else is reported and left alone; a real accidental
+    # duplicate still shows up in the log, it just no longer acts unsupervised.
+    if _looks_stateful(instances):
+        print(f"🛡️  DEDUP SKIPPED: '{new_name}' on {sorted(hosts)} holds data "
+              f"(image looks stateful) — migration moves the compose file, not "
+              f"the volume. Declare it in locator.yml if this is wrong.")
+        return
+    if not _policy_for(new_name):
+        print(f"🛡️  DEDUP SKIPPED: '{new_name}' running on {sorted(hosts)} with "
+              f"no locator.yml policy. Not evicting on a guess — add an entry "
+              f"with 'instances:'/'units:' if one of these should be removed.")
+        return
 
     # Oldest-first by last_heartbeat; the newest (just registered) survives
     instances.sort(key=lambda s: s.get("last_heartbeat", ""))
@@ -866,6 +1221,8 @@ def _infer_category(svc_type, url=""):
         return "serverless"
     if svc_type == "website":
         return "websites"
+    if svc_type == "external":
+        return "cloud platforms"
     if url and SERVERLESS_URL_PATTERN.search(str(url)):
         return "serverless"
     return "docker containers"
@@ -890,6 +1247,13 @@ def register_service():
     data = request.get_json(silent=True)
     if not data or "name" not in data:
         return jsonify({"error": "Missing required field: 'name'"}), 400
+
+    sub = data.get("subdomain")
+    dom = data.get("domain")
+    if sub and not _DEPLOY_SUBDOMAIN.fullmatch(str(sub)):
+        return jsonify({"error": "subdomain must be a DNS label ([a-z0-9-])"}), 400
+    if dom and not _DEPLOY_DOMAIN.fullmatch(str(dom)):
+        return jsonify({"error": "domain must be a DNS name ([a-z0-9.-])"}), 400
 
     name = data["name"]
     host = data.get("host", "unknown")
@@ -922,6 +1286,10 @@ def register_service():
             #   after a native migration (see migrate_native.py, added in Phase 2).
             "depends_on": data.get("depends_on", existing.get("depends_on", [])),
             "prereqs": data.get("prereqs", existing.get("prereqs", {})),
+            # Public deployment addressing — consumed by /api/traefik. Re-registering
+            # with an empty subdomain clears the pair and withdraws the route.
+            "subdomain": data.get("subdomain", existing.get("subdomain")),
+            "domain": data.get("domain", existing.get("domain")),
         }
 
         # Self-registered devices (phones/tablets/laptops via /register-device) are also
@@ -953,6 +1321,16 @@ def register_service():
     if host != "unknown":
         _enforce_dedup(name, host)
 
+    if _category == "docker containers":
+        _cm = data.get("metadata") or {}
+        if _cm.get("mem_usage_mb") is not None:
+            try:
+                db.insert_container_metric(service_id, host,
+                                            _cm.get("mem_usage_mb"),
+                                            _cm.get("mem_percent"))
+            except Exception as e:
+                print(f"⚠️  Failed to persist container metric: {e}")
+
     _new_battery = (registry["services"][service_id].get("metadata") or {}).get("battery_percent")
     if _new_battery is not None:
         _check_battery_threshold(service_id, _new_battery, _prev_battery)
@@ -977,6 +1355,27 @@ def deregister_service(name):
     print(f"📴 MARKED OFFLINE (90-day retention): {name}")
     return jsonify({"result": "marked_offline", "retained_for": "90 days", "service": name}), 200
 
+
+@app.route("/api/registry/<kind>/<path:entry_id>", methods=["DELETE"])
+def delete_registry_entry(kind, entry_id):
+    """Hard-delete a registry row — unlike /deregister/<name>, which only marks
+    a service OFFLINE for the 90-day reaper. Exists for stale node rows and
+    orphaned service entries that will never heartbeat again; the dashboard's
+    device sheet exposes it as the Delete button. If the thing is still alive
+    it simply re-registers on its next heartbeat."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    if kind not in ("services", "nodes"):
+        return jsonify({"error": "kind must be 'services' or 'nodes'"}), 400
+    with lock:
+        if entry_id not in registry.get(kind, {}):
+            return jsonify({"error": f"'{entry_id}' not found in {kind}"}), 404
+        del registry[kind][entry_id]
+        registry["updated"] = datetime.now(timezone.utc).isoformat()
+    persist_registry()
+    print(f"🗑️ DELETED {kind[:-1]}: {entry_id}")
+    return jsonify({"result": "deleted", "kind": kind, "id": entry_id}), 200
 
 
 @app.route("/api/container/toggle", methods=["POST"])
@@ -1111,6 +1510,35 @@ def list_yamls():
     write them unchanged.
     """
     results = []
+    # Service policy first — it governs what may migrate and where, so it is the
+    # one file most worth being editable from the dashboard.
+    if os.path.isfile(LOCATOR_YML):
+        results.append({
+            "label": "locator.yml (service policy)",
+            "container": "locator.yml",
+            "path": LOCATOR_YML,
+        })
+    # The locator's own compose file, so its deployment is editable from the
+    # same place as its policy.
+    if os.path.isfile(LOCATOR_COMPOSE):
+        results.append({
+            "label": "docker-compose.yml (locator)",
+            "container": "docker-compose.yml",
+            "path": LOCATOR_COMPOSE,
+        })
+    # Blank starting points. Served from constants rather than files so they
+    # cannot be overwritten by a stray save — "Save As" writes a copy into the
+    # compose store instead.
+    for key, label in (
+        (TEMPLATE_LOCATOR_YML, "▸ new locator.yml (blank template)"),
+        (TEMPLATE_COMPOSE_YML, "▸ new docker-compose.yml (blank template)"),
+    ):
+        results.append({
+            "label": label,
+            "container": key,
+            "path": key,
+            "readonly": True,
+        })
     try:
         for fname in sorted(os.listdir(COMPOSE_DIR)):
             if not fname.endswith((".yml", ".yaml")):
@@ -1130,6 +1558,8 @@ def list_yamls():
 @app.route("/api/yaml", methods=["GET"])
 def get_yaml():
     path = request.args.get("path", "")
+    if path in YAML_TEMPLATES:
+        return jsonify({"path": path, "content": YAML_TEMPLATES[path], "readonly": True})
     if not path or not os.path.isfile(path):
         return jsonify({"error": "Not found"}), 404
     try:
@@ -1140,19 +1570,346 @@ def get_yaml():
 
 @app.route("/api/yaml", methods=["POST"])
 def save_yaml():
+    """Write a YAML back.
+
+    `save_as` writes a new file into the compose store instead of the given
+    path — that is the only way to save a blank template, which is otherwise
+    read-only so the starting point survives being edited.
+    """
     path = request.args.get("path", "")
-    if not path:
-        return jsonify({"error": "No path"}), 400
     data = request.get_json(silent=True)
     if not data or "content" not in data:
         return jsonify({"error": "No content"}), 400
+
+    save_as = (data.get("save_as") or "").strip()
+    if save_as:
+        name = os.path.basename(save_as)
+        if not name.endswith((".yml", ".yaml")):
+            name += ".yml"
+        if name.startswith("."):
+            return jsonify({"error": "Invalid filename"}), 400
+        os.makedirs(COMPOSE_DIR, exist_ok=True)
+        path = os.path.join(COMPOSE_DIR, name)
+    elif path in YAML_TEMPLATES:
+        return jsonify({
+            "error": "Blank templates are read-only — use Save As to create a copy."
+        }), 400
+
+    if not path:
+        return jsonify({"error": "No path"}), 400
     try:
         with open(path, "w") as f:
             f.write(data["content"])
         beast_log(f"\U0001f4dd YAML saved: {path}")
-        return jsonify({"ok": True, "status": "saved"})
+        return jsonify({"ok": True, "status": "saved", "path": path})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+def _write_policy_field(service, key, value):
+    """Set one key on one service in locator.yml, in place.
+
+    Done as a line edit rather than a yaml.safe_load/dump round-trip on
+    purpose: this file is mostly comments — the quoting trap on `units`, why
+    each database is stationary — and a dump would silently delete all of it.
+    """
+    with open(LOCATOR_YML, "r") as fh:
+        lines = fh.readlines()
+
+    target = service.lower()
+    in_block = False        # inside the top-level "Service:" mapping
+    svc_line = None         # index of the "  <service>:" header
+    svc_indent = 0
+    end = len(lines)
+    blk_line = None         # index of the top-level "Service:" header itself
+    blk_end = None          # first line after the whole Service mapping
+    entry_indent = None     # indent the existing service entries use
+
+    for i, raw in enumerate(lines):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+
+        if indent == 0:
+            in_block = stripped.rstrip(":").lower() in ("service", "services")
+            if in_block:
+                blk_line = i
+            elif blk_line is not None and blk_end is None:
+                blk_end = i
+            if svc_line is not None:
+                end = i
+                break
+            continue
+        if not in_block:
+            continue
+
+        if entry_indent is None:
+            entry_indent = indent
+
+        if svc_line is None:
+            if stripped.endswith(":") and stripped[:-1].strip().lower() == target:
+                svc_line, svc_indent = i, indent
+        elif indent <= svc_indent:
+            end = i
+            break
+
+    if svc_line is None:
+        # Not in the file yet. Append a block rather than refusing: the tactical
+        # grid lets any running container be pinned, and most of them have never
+        # had a policy entry. Written as text for the same reason the rest of
+        # this function is — a yaml round-trip would strip every comment.
+        if blk_line is None:
+            return False, "locator.yml has no 'Service:' block"
+
+        ind = " " * (entry_indent or 2)
+        fields = {
+            "deployment_type": DEPLOYMENT_NON_ESSENTIAL,
+            "location_type":   "mobile",
+            "units":           "current_unit",
+            "instances":       1,
+        }
+        fields[key] = value
+
+        at = blk_end if blk_end is not None else len(lines)
+        while at > 0 and not lines[at - 1].strip():   # keep trailing blanks below
+            at -= 1
+
+        block = []
+        if at > 0 and lines[at - 1].strip():
+            block.append("\n")          # keep one blank line between entries
+        block += [f"{ind}# added from the tactical grid {datetime.now():%Y-%m-%d}\n",
+                  f"{ind}{service}:\n"]
+        block += [f"{ind}  {k}: {v}\n" for k, v in fields.items()]
+        block.append("\n")
+        lines[at:at] = block
+
+        with open(LOCATOR_YML, "w") as fh:
+            fh.writelines(lines)
+        return True, None
+
+    field_indent = " " * (svc_indent + 2)
+    for i in range(svc_line + 1, end):
+        stripped = lines[i].strip()
+        if stripped.startswith("#") or not stripped:
+            continue
+        if stripped.split(":")[0].strip().lower() == key:
+            lines[i] = f"{field_indent}{key}: {value}\n"
+            break
+    else:
+        lines.insert(svc_line + 1, f"{field_indent}{key}: {value}\n")
+
+    with open(LOCATOR_YML, "w") as fh:
+        fh.writelines(lines)
+    return True, None
+
+
+@app.route("/api/policy", methods=["GET"])
+def get_policy():
+    """Per-service essential/stationary flags for the tactical grid checkboxes."""
+    out = {}
+    for name, cfg in load_policy().items():
+        out[name] = {
+            "essential": is_essential(cfg),
+            "stationary": cfg.get("location_type") == "stationary",
+            "units": cfg.get("units", ""),
+            "instances": cfg.get("instances", 1),
+        }
+    return jsonify(out)
+
+
+def _is_name_locked(name):
+    """True when a name is pinned by code and cannot be unpinned from the grid.
+
+    _PINNED_NAMES is a substring list baked into this file, and _is_pinned()
+    consults it regardless of what locator.yml says — so unticking one of these
+    in the dashboard changed the YAML but not the behaviour. The box lied.
+    These are cemented instead: shown ticked, disabled, and refused server-side.
+    """
+    low = (name or "").lower()
+    return any(p in low for p in _PINNED_NAMES)
+
+
+@app.route("/api/policy/<unit>", methods=["GET"])
+def get_policy_for_unit(unit):
+    """Policy entries that apply to one unit — for lokey's local enforcement.
+
+    lokey enforces restart_when_stopped itself from its own Docker socket.
+    The locator-side critical_service_watchdog() that used to queue starts
+    was removed 2026-09-15: it keyed off registry OFFLINE status, which
+    flaps, so it "restarted" running services, and its hardcoded floor
+    (lokey, lokey-client, locator, apache on the long-gone unit2) named only
+    things a queued command can never restart. Serving the policy lets each
+    agent act from its own Docker socket with no round trip, and keep acting
+    from its cached copy when this locator is unreachable.
+
+    Sits in INGEST beside commands_pending: lokey presents no user token,
+    only a Host header. Exposes strictly less than /api/policy — only entries
+    naming this unit, and never the env: block, which carries credentials.
+    """
+    unit = (unit or "").strip().lower()
+    out = {}
+    for name, cfg in load_policy().items():
+        spec = (cfg.get("units") or "").strip().lower()
+        # "all" and "current_unit" are answered without consulting the
+        # registry on purpose. Resolving "all" against ONLINE nodes would
+        # reintroduce the dependency this endpoint exists to remove, and an
+        # agent can only ever start a container already present on its host.
+        if spec in ("", "all", "current_unit") or unit in _expand_unit_spec(spec, []):
+            out[name] = {
+                "restart_when_stopped": bool(cfg.get("restart_when_stopped")),
+                "deployment_type": cfg.get("deployment_type", ""),
+                "location_type": cfg.get("location_type", ""),
+            }
+    return jsonify(out)
+
+@app.route("/api/policy/locked", methods=["GET"])
+def get_policy_locked():
+    """The hardcoded pin substrings, so the grid can cement matching rows."""
+    return jsonify({"names": sorted(_PINNED_NAMES)})
+
+
+@app.route("/api/policy", methods=["POST"])
+def set_policy():
+    """Flip one flag from the dashboard.
+
+    Body: {"service": "pdns", "essential": true}  or  {"stationary": false}
+
+    Only the flag named in the body is touched, so ticking Essential cannot
+    quietly clear a service's stationary pin.
+    """
+    data = request.get_json(silent=True) or {}
+    service = (data.get("service") or "").strip()
+    if not service:
+        return jsonify({"error": "No service"}), 400
+
+    # A grid row is "name@unit"; policy is keyed on the bare service name.
+    service = service.split("@")[0]
+
+    if "essential" in data:
+        key, value = "deployment_type", DEPLOYMENT_ESSENTIAL if data["essential"] else DEPLOYMENT_NON_ESSENTIAL
+    elif "stationary" in data:
+        key, value = "location_type", "stationary" if data["stationary"] else "mobile"
+        if not data["stationary"] and _is_name_locked(service):
+            return jsonify({"error": f"'{service}' is cemented — pinned in code, "
+                                     f"cannot be unpinned"}), 409
+    else:
+        return jsonify({"error": "Nothing to set"}), 400
+
+    ok, err = _write_policy_field(service, key, value)
+    if not ok:
+        return jsonify({"error": err}), 404
+
+    _policy_cache["mtime"] = None      # force reload on next read
+    beast_log(f"\U0001f4dd policy: {service} {key}={value}")
+    return jsonify({"ok": True, "service": service, key: value})
+
+
+@app.route("/api/policy/bulk", methods=["POST"])
+def set_policy_bulk():
+    """Apply a batch of grid checkbox changes in one request.
+
+    Body: {"changes": [{"service": "forge", "stationary": true},
+                       {"service": "redis", "essential": false}, ...]}
+
+    The tactical grid stages ticks locally and sends them here on Save, so a
+    mis-click can be discarded before it ever reaches locator.yml. Each entry
+    carries exactly one flag, matching /api/policy's rule that setting Pinned
+    must never quietly clear Essential.
+
+    Partial success is normal and reported per service: one unwritable entry
+    should not discard the rest of the batch.
+    """
+    data = request.get_json(silent=True) or {}
+    changes = data.get("changes")
+    if not isinstance(changes, list) or not changes:
+        return jsonify({"error": "No changes"}), 400
+
+    saved, failed = [], []
+    for entry in changes:
+        if not isinstance(entry, dict):
+            failed.append({"service": str(entry), "error": "Malformed entry"})
+            continue
+
+        service = (entry.get("service") or "").strip().split("@")[0]
+        if not service:
+            failed.append({"service": "", "error": "No service"})
+            continue
+
+        if "essential" in entry:
+            key, value = "deployment_type", DEPLOYMENT_ESSENTIAL if entry["essential"] else DEPLOYMENT_NON_ESSENTIAL
+        elif "stationary" in entry:
+            key, value = "location_type", "stationary" if entry["stationary"] else "mobile"
+            if not entry["stationary"] and _is_name_locked(service):
+                failed.append({"service": service,
+                               "error": "cemented — pinned in code, cannot be unpinned"})
+                continue
+        else:
+            failed.append({"service": service, "error": "Nothing to set"})
+            continue
+
+        ok, err = _write_policy_field(service, key, value)
+        if ok:
+            saved.append({"service": service, key: value})
+            beast_log(f"\U0001f4dd policy: {service} {key}={value}")
+        else:
+            failed.append({"service": service, "error": err})
+
+    # One invalidation for the whole batch — every write went to the same file.
+    _policy_cache["mtime"] = None
+    return jsonify({"ok": not failed, "saved": saved, "failed": failed})
+
+
+SSH_MOUNT_DIR   = "/root/.ssh"
+SSH_RUNTIME_DIR = "/root/.ssh-run"
+_ssh_dir_cache  = {"ready": False, "opts": None}
+
+
+def _ssh_base_opts():
+    """SSH options that work from inside this container.
+
+    ~/.ssh is bind-mounted read-only from the host, where it is owned by uid
+    1000 with a group-writable config. This container runs as root, so OpenSSH
+    rejects the lot — 'Bad owner or permissions on /root/.ssh/config' — and
+    every ssh/scp call fails before it reaches the network. That is why deploy
+    failed for every node regardless of target.
+
+    Copy the mount into a root-owned directory with tight permissions and use
+    that instead. The config's IdentityFile lines point at ~/.ssh/..., which
+    would resolve straight back to the bad mount, so rewrite them to the copy.
+    """
+    if _ssh_dir_cache["ready"]:
+        return _ssh_dir_cache["opts"]
+
+    opts = ["-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"]
+    try:
+        if os.path.isdir(SSH_MOUNT_DIR):
+            os.makedirs(SSH_RUNTIME_DIR, exist_ok=True)
+            os.chmod(SSH_RUNTIME_DIR, 0o700)
+            for fname in os.listdir(SSH_MOUNT_DIR):
+                src = os.path.join(SSH_MOUNT_DIR, fname)
+                dst = os.path.join(SSH_RUNTIME_DIR, fname)
+                if not os.path.isfile(src):
+                    continue
+                with open(src, "rb") as fh:
+                    blob = fh.read()
+                if fname == "config":
+                    blob = (blob.decode(errors="replace")
+                            .replace("~/.ssh/", SSH_RUNTIME_DIR + "/")
+                            .replace("/root/.ssh/", SSH_RUNTIME_DIR + "/")
+                            .replace("/home/swoopg111/.ssh/", SSH_RUNTIME_DIR + "/")
+                            ).encode()
+                with open(dst, "wb") as fh:
+                    fh.write(blob)
+                os.chmod(dst, 0o600)
+            cfg = os.path.join(SSH_RUNTIME_DIR, "config")
+            if os.path.isfile(cfg):
+                opts = ["-F", cfg] + opts
+    except Exception as e:
+        print(f"⚠️  SSH config prep failed, falling back to defaults: {e}")
+
+    _ssh_dir_cache.update({"ready": True, "opts": opts})
+    return opts
+
 
 @app.route("/api/deploy/<name>", methods=["POST"])
 def deploy_compose(name):
@@ -1160,7 +1917,8 @@ def deploy_compose(name):
     Deploy a stored compose file to the most available node (or a pinned one).
 
     Optional JSON body:
-    { "node": "unit2" }  — pin a specific target instead of auto-selecting
+    { "node": "unit2" }        — pin a target instead of auto-selecting
+    { "networks": ["auth"] }   — join these existing (external) networks
     """
     import yaml as _yaml
     import subprocess as _sp
@@ -1171,21 +1929,28 @@ def deploy_compose(name):
 
     data = request.get_json(silent=True) or {}
     forced_node = data.get("node")
+    join_networks = [n for n in (data.get("networks") or []) if str(n).strip()]
 
     if forced_node:
         with lock:
             node_info = registry["nodes"].get(forced_node, {})
-        ip = (
-            node_info.get("tailscale_ip")
-            or node_info.get("openvpn_ip", "").split("-")[0].strip().split()[0]
-            or node_info.get("ip", "").split("-")[0].strip().split()[0]
-        )
-        if not ip or ip in ("", "unknown"):
+        # A dead node keeps its last known IP, so without this the deploy
+        # spends the full SSH timeout before failing with nothing useful.
+        if node_info.get("status") != "ONLINE":
+            return jsonify({
+                "error": f"Node '{forced_node}' is not ONLINE",
+            }), 400
+        ip = _first_addr(node_info.get("tailscale_ip")) \
+            or _first_addr(node_info.get("openvpn_ip")) \
+            or _first_addr(node_info.get("ip"))
+        if not ip or ip == "unknown":
             return jsonify({"error": f"No reachable IP for node '{forced_node}'"}), 400
-        target_node, target_ip = forced_node, ip
+        targets = [(forced_node, ip)]
     else:
-        target_node, target_ip = _best_available_node()
-        if not target_node:
+        # Ordered by headroom. Only the first few are worth trying — past that
+        # the "most available node" claim stops meaning anything.
+        targets = _ranked_nodes()[:3]
+        if not targets:
             return jsonify({"error": "No online nodes with reachable IPs"}), 503
 
     remote_dir  = f"/tmp/locator_deploy/{name}"
@@ -1193,29 +1958,87 @@ def deploy_compose(name):
     # Use the SSH config alias (node name) so per-host port/user/key from ~/.ssh/config
     # are respected (e.g. unit1 tunnels through localhost:2222 with its own key).
     # Fall back to explicit user@ip only if no config alias exists.
-    ssh_opts   = ["-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes"]
-    ssh_target = target_node   # SSH config alias: unit1, unit2, unit3 …
+    ssh_opts   = _ssh_base_opts()
 
-    try:
+    # Networks picked in the UI are injected into a copy of the compose file —
+    # the stored original is never rewritten. They are declared external
+    # because /api/networks lists networks that already exist on the host.
+    send_path = path
+    tmp_path = None
+    if join_networks:
+        try:
+            with open(path) as fh:
+                doc = _yaml.safe_load(fh) or {}
+            for cfg in (doc.get("services") or {}).values():
+                if not isinstance(cfg, dict):
+                    continue
+                existing = cfg.get("networks") or []
+                if isinstance(existing, dict):
+                    for net in join_networks:
+                        existing.setdefault(net, None)
+                else:
+                    for net in join_networks:
+                        if net not in existing:
+                            existing.append(net)
+                cfg["networks"] = existing
+            declared = doc.get("networks")
+            if not isinstance(declared, dict):
+                declared = {}
+            for net in join_networks:
+                declared.setdefault(net, {"external": True})
+            doc["networks"] = declared
+
+            fd, tmp_path = tempfile.mkstemp(suffix=".yml", prefix=f"{name}-")
+            with os.fdopen(fd, "w") as fh:
+                _yaml.safe_dump(doc, fh, sort_keys=False)
+            send_path = tmp_path
+        except Exception as e:
+            return jsonify({"error": f"Could not add networks: {e}"}), 400
+
+    def _attempt(ssh_target):
+        """Ship the compose file to one node and bring it up there."""
         _sp.run(
             ["ssh"] + ssh_opts + [ssh_target, f"mkdir -p {remote_dir}"],
             check=True, capture_output=True, timeout=15
         )
         _sp.run(
-            ["scp"] + ssh_opts + [path, f"{ssh_target}:{remote_file}"],
+            ["scp"] + ssh_opts + [send_path, f"{ssh_target}:{remote_file}"],
             check=True, capture_output=True, timeout=15
         )
-        result = _sp.run(
+        return _sp.run(
             ["ssh"] + ssh_opts + [ssh_target, f"cd {remote_dir} && docker compose up -d"],
             capture_output=True, text=True, timeout=120
         )
 
-        if result.returncode != 0:
+    try:
+        attempts = []
+        result = None
+        target_node = target_ip = None
+
+        for candidate_node, candidate_ip in targets:
+            # SSH config alias (unit1, unit3 …) so per-host user/port/key apply.
+            try:
+                outcome = _attempt(candidate_node)
+            except _sp.CalledProcessError as e:
+                stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
+                attempts.append({"node": candidate_node, "error": stderr.strip() or str(e)})
+                continue
+            if outcome.returncode != 0:
+                attempts.append({"node": candidate_node, "error": (outcome.stderr or "").strip()})
+                continue
+            result, target_node, target_ip = outcome, candidate_node, candidate_ip
+            break
+
+        if result is None:
             return jsonify({
                 "error": "docker compose up failed",
-                "stderr": result.stderr,
-                "node": target_node,
+                "stderr": "; ".join(f"{a['node']}: {a['error']}" for a in attempts),
+                "attempts": attempts,
+                "node": attempts[0]["node"] if attempts else None,
             }), 500
+
+        if len(attempts) > 0:
+            print(f"↩️  DEPLOY fell through {[a['node'] for a in attempts]} → {target_node}")
 
         # Register every service from the compose file
         now = datetime.now(timezone.utc).isoformat()
@@ -1249,11 +2072,12 @@ def deploy_compose(name):
 
         print(f"🚀 DEPLOYED: '{name}' → {target_node} ({target_ip})")
         return jsonify({
-            "result":  "deployed",
-            "name":    name,
-            "node":    target_node,
-            "ip":      target_ip,
-            "output":  result.stdout,
+            "result":   "deployed",
+            "name":     name,
+            "node":     target_node,
+            "ip":       target_ip,
+            "output":   result.stdout,
+            "skipped":  attempts,   # nodes tried first and why they failed
         }), 200
 
     except _sp.TimeoutExpired:
@@ -1263,14 +2087,77 @@ def deploy_compose(name):
         return jsonify({"error": str(e), "stderr": stderr, "node": target_node}), 500
     except Exception as e:
         return jsonify({"error": str(e), "node": target_node}), 500
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 @app.route("/nodes", methods=["GET"])
 @app.route("/api/nodes", methods=["GET"])
 def get_nodes():
-    """Return all known nodes."""
+    """Return the known nodes the caller is cleared to see."""
     with lock:
-        return jsonify(registry["nodes"])
+        return jsonify(clearance.project(registry["nodes"]))
+
+
+def _metrics_range_args():
+    """Parse since/until query params (ISO timestamps, required) shared by
+    every /api/metrics/* route. Returns (since, until) or a Flask error
+    response tuple to short-circuit the caller."""
+    since = request.args.get("since")
+    until = request.args.get("until")
+    if not since or not until:
+        return None, None, (jsonify({"error": "since and until (ISO timestamps) are required"}), 400)
+    return since, until, None
+
+
+@app.route("/api/metrics/summary", methods=["GET"])
+def metrics_summary():
+    """Distinct containers active in [since, until), broken down by host.
+    Backs the Metrics tab's time-range picker."""
+    since, until, err = _metrics_range_args()
+    if err:
+        return err
+    try:
+        result = db.metrics_summary(since, until)
+    except Exception as e:
+        print(f"⚠️  Failed to read metrics summary: {e}")
+        return jsonify({"error": "metrics unavailable"}), 503
+    if result is None:
+        return jsonify({"error": "metrics unavailable"}), 503
+    return jsonify(result)
+
+
+@app.route("/api/metrics/containers", methods=["GET"])
+def metrics_containers():
+    """Per-container rollup (first/last seen, avg/max RAM) in [since, until)."""
+    since, until, err = _metrics_range_args()
+    if err:
+        return err
+    try:
+        return jsonify(db.metrics_containers(since, until))
+    except Exception as e:
+        print(f"⚠️  Failed to read metrics containers: {e}")
+        return jsonify({"error": "metrics unavailable"}), 503
+
+
+@app.route("/api/metrics/history", methods=["GET"])
+def metrics_history():
+    """Ordered raw RAM samples for one container, for the history chart."""
+    service_id = request.args.get("service_id")
+    if not service_id:
+        return jsonify({"error": "service_id is required"}), 400
+    since, until, err = _metrics_range_args()
+    if err:
+        return err
+    try:
+        return jsonify(db.metrics_history(service_id, since, until))
+    except Exception as e:
+        print(f"⚠️  Failed to read metrics history: {e}")
+        return jsonify({"error": "metrics unavailable"}), 503
 
 
 @app.route("/nodes", methods=["POST"])
@@ -1324,6 +2211,17 @@ def health_check():
         "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT,
         "timestamp": datetime.now(timezone.utc).isoformat()
     })
+
+
+@app.route("/api/whoami", methods=["GET"])
+def whoami():
+    """Identify the caller and report what its clearance unlocks. Public."""
+    principal = clearance.current()
+    body = principal.to_dict()
+    body["levels"] = clearance.LEVEL_NAMES
+    if principal.via == "invalid-token":
+        body["token_error"] = principal.claims.get("error", "token rejected")
+    return jsonify(body)
 
 
 @app.route("/api/election", methods=["GET"])
@@ -1438,7 +2336,16 @@ def emit_event(event_type, **data):
         event = db.insert_event(event_type, data)
     except Exception as e:
         print(f"⚠️  Failed to persist event to Postgres: {e}")
+        event = None
+    if not event:
+        # insert_event returns None (does not raise) when there's no
+        # DATABASE_URL or the DB is down — this branch used to push literal
+        # "null" frames to SSE clients and leave /api/events permanently empty.
+        # The in-memory ring keeps the event box alive without Postgres.
         event = {"type": event_type, "timestamp": datetime.now(timezone.utc).isoformat(), **data}
+    with _event_lock:
+        _event_log.append(event)
+        del _event_log[:-EVENT_LOG_MAX]
     with _event_stream_lock:
         for q in _event_stream_queues:
             q.put(event)
@@ -1465,10 +2372,16 @@ def list_events_route():
         return jsonify({"result": "recorded", "timestamp": (event or {}).get("created_at")})
 
     try:
-        return jsonify(db.list_events(200))
+        events = db.list_events(200)
     except Exception as e:
         print(f"⚠️  Failed to read events from Postgres: {e}")
-        return jsonify([])
+        events = []
+    if not events:
+        # No DB (or an empty events table): serve the in-memory ring so the
+        # dashboard isn't blank on a fresh/DB-less deploy.
+        with _event_lock:
+            events = list(_event_log)
+    return jsonify(events)
 
 
 @app.route("/api/events/stream", methods=["GET"])
@@ -1494,9 +2407,13 @@ def stream_events():
 
 @app.route("/registry.json", methods=["GET"])
 def download_registry():
-    """Serve the registry as a downloadable JSON file."""
+    """Serve the registry as a downloadable JSON file, scoped to the caller."""
     with lock:
-        data = json.dumps(registry, indent=2)
+        data = json.dumps({
+            "services": clearance.project(registry["services"]),
+            "nodes":    clearance.project(registry["nodes"]),
+            "updated":  registry["updated"],
+        }, indent=2)
     return Response(data, mimetype="application/json",
                     headers={"Content-Disposition": "attachment; filename=registry.json"})
 
@@ -1535,9 +2452,19 @@ def _traccar_get(path):
 @app.route("/api/traccar-devices", methods=["GET"])
 def traccar_devices():
     """Devices + their latest position, merged, for the 3D mesh's device layer."""
+    if not TRACCAR_PASS:
+        return jsonify({"error": "TRACCAR_PASS is not set on the locator — the Traccar API needs a login",
+                        "devices": []}), 200
     try:
-        devices = _traccar_get("/api/devices").json()
-        positions = {p["deviceId"]: p for p in _traccar_get("/api/positions").json()}
+        dev_res = _traccar_get("/api/devices")
+        if dev_res.status_code != 200:
+            return jsonify({"error": f"traccar /api/devices -> HTTP {dev_res.status_code} "
+                                     "(bad login or user lacks device read)",
+                            "devices": []}), 200
+        devices = dev_res.json()
+        pos_res = _traccar_get("/api/positions")
+        positions = ({p["deviceId"]: p for p in pos_res.json()}
+                     if pos_res.status_code == 200 else {})
     except Exception as e:
         return jsonify({"error": str(e), "devices": []}), 200
 
@@ -1747,7 +2674,17 @@ def get_available_networks():
 
 @app.route("/trigger-deploy-final", methods=["POST"])
 def trigger_deploy_final():
-    """Receives user preferences and triggers the actual deployment."""
+    """Superseded by /api/deploy/<name>; the dashboard no longer calls this.
+
+    It cannot work from inside the container and never could: deploy.py runs
+    `docker-compose up -d` locally with cwd=<host folder path>, but this
+    container mounts no host filesystem and ships with neither the `docker`
+    nor the `docker-compose` binary. It also scored a target node and then
+    ignored it, deploying locally regardless of the unit picked in the UI.
+
+    Kept only so any out-of-band caller gets its old response shape rather
+    than a 404. New work belongs in deploy_compose().
+    """
     from deploy import deploy_from_browse
     data = request.get_json()
     
@@ -1795,10 +2732,15 @@ def update_node_metrics(node_id):
                       "mem_used_gb", "disk_free_gb", "mounts"):
             if data.get(field) is not None:
                 node[field] = data[field]
-        if data.get("ip"):
-            node["ip"] = data["ip"]
-        if data.get("tailscale_ip"):
-            node["tailscale_ip"] = data["tailscale_ip"]
+        # Addresses are stored only when present so a heartbeat that could not
+        # determine one does not erase a good value already on record.
+        # private_ip is accepted here too: _node_probe_addr() falls back to it,
+        # and lokey now reports a freshly-resolved local address every heartbeat
+        # (it previously sent none at all, which is why unit3's node record had
+        # no address and could not be probed).
+        for _addr_field in ("ip", "private_ip", "tailscale_ip", "openvpn_ip"):
+            if data.get(_addr_field):
+                node[_addr_field] = data[_addr_field]
         node["last_seen"]     = now
         node["status"]        = "ONLINE"
         registry["updated"]   = now
@@ -1852,6 +2794,77 @@ def claim_migration(mig_id):
     return jsonify({"result": "claimed", "id": mig_id})
 
 
+# A migration that "succeeded" is not finished — the agent only reports that its
+# commands ran, not that the service came up. agent-0 unit8→unit7 stopped on the
+# source, reported DONE, and started nowhere. These drive the verify pass that
+# turns that silent outage into a loud failure plus a rollback.
+MIGRATION_VERIFY_TIMEOUT  = int(os.environ.get("MIGRATION_VERIFY_TIMEOUT", 300))
+MIGRATION_VERIFY_INTERVAL = int(os.environ.get("MIGRATION_VERIFY_INTERVAL", 15))
+MIGRATION_START_TYPES     = ("git_pull_and_start", "native_prereq_and_start")
+
+
+def _service_online_at(container, unit):
+    """True when the registry shows `container` ONLINE on `unit`."""
+    target = (container or "").split("@")[0].lower()
+    with lock:
+        for svc in registry.get("services", {}).values():
+            if ((svc.get("name") or "").split("@")[0].lower() == target
+                    and svc.get("host") == unit
+                    and svc.get("status") == "ONLINE"):
+                return True
+    return False
+
+
+def _verify_migration(mig_id):
+    """Confirm the service actually came up on the target; roll back if not.
+
+    Runs in its own thread after a start-type migration reports success. The
+    registry only refreshes on the agent's tick, so the timeout has to outlast
+    one — hence 300s by default rather than something snappier.
+
+    On failure the source is told to start the container again. That half is the
+    whole point: the source was stopped before the target was tried, so without
+    it a failed migration leaves the service running on no node at all.
+    """
+    with migration_lock:
+        mig = migration_queue.get(mig_id)
+        if not mig:
+            return
+        container = mig.get("container", "")
+        to_node   = mig.get("to_node", "")
+        from_node = mig.get("from_node", "")
+
+    deadline = time.time() + MIGRATION_VERIFY_TIMEOUT
+    while time.time() < deadline:
+        time.sleep(MIGRATION_VERIFY_INTERVAL)
+        if _service_online_at(container, to_node):
+            with migration_lock:
+                mig = migration_queue.get(mig_id)
+                if mig:
+                    mig["status"]       = "DONE"
+                    mig["verified"]     = True
+                    mig["completed_at"] = datetime.now(timezone.utc).isoformat()
+            print(f"✅ MIGRATION {mig_id}: verified '{container}' ONLINE on {to_node}")
+            return
+
+    reason = (f"'{container}' did not come up on {to_node} within "
+              f"{MIGRATION_VERIFY_TIMEOUT}s")
+    with migration_lock:
+        mig = migration_queue.get(mig_id)
+        if mig:
+            mig["status"]       = "FAILED"
+            mig["verified"]     = False
+            mig["error"]        = reason
+            mig["completed_at"] = datetime.now(timezone.utc).isoformat()
+    print(f"❌ MIGRATION {mig_id}: {reason}")
+
+    if from_node and from_node != to_node:
+        _queue_command(from_node, container, "start", source="migration-rollback")
+        print(f"↩️  ROLLBACK: queued start of '{container}' back on {from_node}")
+    emit_event("migration", from_container=from_node, to_container=to_node,
+               unit=to_node, container=container, success=False)
+
+
 @app.route("/api/migrations/complete", methods=["POST"])
 def complete_migration():
     """
@@ -1864,15 +2877,32 @@ def complete_migration():
     mig_id  = data.get("id")
     success = data.get("success", True)
 
+    verify_after = False
     with migration_lock:
         if mig_id in migration_queue:
             mig = migration_queue[mig_id]
-            mig["status"]       = "DONE" if success else "FAILED"
-            mig["completed_at"] = datetime.now(timezone.utc).isoformat()
-            print(f"{'✅' if success else '❌'} MIGRATION {mig_id}: {'DONE' if success else 'FAILED'}")
-            emit_event("migration", from_container=mig.get("from_node", ""),
-                       to_container=mig.get("to_node", ""), unit=mig.get("to_node", ""),
-                       container=mig.get("container", ""), success=success)
+
+            # A start-type migration reporting success only means its commands
+            # ran. Hold it at VERIFYING until the registry actually shows the
+            # service up on the target — marking DONE here is what let a
+            # target-side failure read as a completed move.
+            if success and mig.get("type") in MIGRATION_START_TYPES:
+                mig["status"]      = "VERIFYING"
+                mig["verifying_at"] = datetime.now(timezone.utc).isoformat()
+                verify_after = True
+                print(f"🔎 MIGRATION {mig_id}: agent reported success — verifying "
+                      f"'{mig.get('container')}' on {mig.get('to_node')}")
+            else:
+                mig["status"]       = "DONE" if success else "FAILED"
+                mig["completed_at"] = datetime.now(timezone.utc).isoformat()
+                print(f"{'✅' if success else '❌'} MIGRATION {mig_id}: {'DONE' if success else 'FAILED'}")
+            # Deferred while VERIFYING — _verify_migration emits the failure
+            # event itself, and a success event here would announce an outcome
+            # nothing has checked yet.
+            if not verify_after:
+                emit_event("migration", from_container=mig.get("from_node", ""),
+                           to_container=mig.get("to_node", ""), unit=mig.get("to_node", ""),
+                           container=mig.get("container", ""), success=success)
 
             # When a git_push_and_stop finishes, queue the follow-on pull on the target.
             # dedup     → git_pull_only      (container already running on target, just sync state)
@@ -1915,7 +2945,13 @@ def complete_migration():
                 }
                 print(f"🔁 AUTO-QUEUED native_prereq_and_start {start_id} → {mig.get('to_node')}")
 
-    return jsonify({"result": "acknowledged"})
+    # Outside the lock: the verifier polls for minutes and takes the same lock.
+    if verify_after:
+        threading.Thread(target=_verify_migration, args=(mig_id,),
+                         daemon=True, name=f"verify-{mig_id}").start()
+
+    return jsonify({"result": "acknowledged",
+                    "verifying": verify_after})
 
 
 
@@ -1953,7 +2989,12 @@ def create_migration():
         svc = registry["services"].get(svc_id)
         if not svc:
             return jsonify({"error": f"unknown service '{svc_id}'"}), 404
-        if svc.get("name") in _PINNED_NAMES:
+        # _is_pinned(), not `in _PINNED_NAMES`: set membership only catches
+        # exact names, so "mariadb" was protected while "mariadb-11.4" was
+        # freely migratable by hand, and locator.yml's location_type:stationary
+        # was ignored entirely on this path. The balancer already uses
+        # _is_pinned(); this makes the manual path agree with it.
+        if _is_pinned(svc.get("name")):
             return jsonify({"error": f"'{svc['name']}' is pinned — never auto/manually migrated"}), 400
 
         deps, missing = resolve_migration_order(svc_id, registry["services"])
@@ -2076,6 +3117,42 @@ def balance_status():
         "prestage_enabled":   BALANCE_PRESTAGE_ENABLED,
         "prestage_threshold": BALANCE_HIGH - BALANCE_PRESTAGE_MARGIN,
         "prestage":           prestage,
+    })
+
+
+@app.route("/api/idle/policy", methods=["GET"])
+def idle_policy():
+    """Which containers a unit is ALLOWED to idle-stop, straight from locator.yml.
+
+    lokey calls this each tick instead of reading the locator.idle.stop label.
+    The label still works and is unioned in on the agent side, but this is the
+    path that makes the policy file authoritative.
+
+    Two floors, both deliberate:
+      * opt-in only — a service is returned solely because it carries
+        idle_stop: true, so an undeclared service is never eligible;
+      * deployment_type: essential is refused even when idle_stop is set, so
+        the two keys cannot contradict each other into stopping a critical
+        service.
+    """
+    unit = (request.args.get("unit") or "").strip().lower()
+    if unit and not unit.startswith("unit"):
+        unit = "unit" + unit
+    out = {}
+    for name, cfg in load_policy().items():
+        if not cfg.get("idle_stop"):
+            continue
+        if is_essential(cfg):
+            continue
+        spec = cfg.get("units") or ""
+        if unit and spec not in ("", "all", "current_unit"):
+            if unit not in _expand_unit_spec(spec, []):
+                continue
+        out[name] = {"timeout": cfg.get("idle_timeout") or ""}
+    return jsonify({
+        "unit": unit,
+        "containers": out,
+        "default_timeout": IDLE_DEFAULT_TIMEOUT,
     })
 
 
@@ -2363,6 +3440,7 @@ def heartbeat_reaper():
         now = datetime.now(timezone.utc)
         changed = False
         to_purge = []
+        stale_nodes = []
 
         with lock:
             for name, svc in list(registry["services"].items()):
@@ -2382,11 +3460,16 @@ def heartbeat_reaper():
                                 svc["offline_since"] = now.isoformat()
                             changed = True
                             print(f"💀 OFFLINE: {name}")
-                            if "lokey" in name.lower():
-                                node_id = svc.get("host", "")
-                                if node_id and node_id in registry["nodes"]:
-                                    registry["nodes"][node_id]["status"] = "OFFLINE"
-                                    print(f"💀 NODE OFFLINE: {node_id}")
+                            # A lokey service going quiet used to mark its NODE
+                            # OFFLINE right here. That is the conflation that
+                            # made the registry wrong: it reports that the agent
+                            # stopped, never that the machine stopped. Node
+                            # status now has exactly one owner — the staleness +
+                            # reachability probe below — so a silent agent on a
+                            # live box resolves to AGENT_DOWN instead of a flat
+                            # untrue OFFLINE. The node's own last_seen goes stale
+                            # on its own once lokey stops, which is what hands it
+                            # to that probe.
                     except (ValueError, TypeError):
                         pass
 
@@ -2413,19 +3496,70 @@ def heartbeat_reaper():
             # self-registered devices and any node with a stale-but-present last_seen
             # were previously stuck ONLINE forever with no way to expire.
             for node_id, node in registry["nodes"].items():
-                if node.get("status") != "ONLINE":
+                status = node.get("status")
+                # AGENT_DOWN nodes are re-examined too. A machine that was only
+                # silent can genuinely go down later, and it has to become
+                # OFFLINE when that happens instead of being pinned at
+                # AGENT_DOWN forever.
+                if status not in ("ONLINE", NODE_STATUS_AGENT_DOWN, "OFFLINE"):
+                    continue
+                if not _node_probe_due(node_id, status):
                     continue
                 last_seen = node.get("last_seen")
                 if not last_seen:
+                    # No heartbeat ever recorded. Previously skipped outright,
+                    # which is how a node could sit at OFFLINE with nothing ever
+                    # re-examining it. Probe it: an address is enough to tell
+                    # whether the machine is actually there.
+                    if _node_probe_addr(node):
+                        stale_nodes.append((node_id, dict(node)))
                     continue
                 try:
                     last = datetime.fromisoformat(last_seen)
-                    if (now - last).total_seconds() > HEARTBEAT_TIMEOUT:
-                        node["status"] = "OFFLINE"
-                        changed = True
-                        print(f"💀 NODE OFFLINE (stale heartbeat): {node_id}")
                 except (ValueError, TypeError):
-                    pass
+                    continue
+                if (now - last).total_seconds() > HEARTBEAT_TIMEOUT:
+                    # Only collected here. The probe runs after the lock is
+                    # released — _node_reachable blocks on the network for up to
+                    # NODE_PROBE_TIMEOUT per port, and holding the registry lock
+                    # across that would stall every API request locator serves.
+                    stale_nodes.append((node_id, dict(node)))
+
+        for node_id, info in stale_nodes:
+            reachable = _node_reachable(info)
+            if reachable:
+                new_status = NODE_STATUS_AGENT_DOWN
+                reason = f"reachable at {_node_probe_addr(info)}, agent not reporting"
+            elif reachable is None:
+                new_status = "OFFLINE"
+                reason = "stale heartbeat, no address on record to probe"
+            else:
+                new_status = "OFFLINE"
+                reason = "stale heartbeat and unreachable"
+
+            transitioned = False
+            with lock:
+                node = registry["nodes"].get(node_id)
+                if node is not None:
+                    # A heartbeat may have arrived while we were probing.
+                    if not _node_is_fresh(node) and node.get("status") != new_status:
+                        node["status"] = new_status
+                        changed = True
+                        transitioned = True
+
+            # Outside the lock, and only on an actual transition, so a node
+            # sitting in either state does not re-log or re-notify every
+            # REAPER_INTERVAL seconds.
+            if transitioned:
+                if new_status == NODE_STATUS_AGENT_DOWN:
+                    print(f"⚠️  NODE AGENT DOWN: {node_id} ({reason})")
+                    record_event("node_agent_down",
+                                 f"{node_id} is up but its agent is not reporting — {reason}",
+                                 unit=node_id)
+                else:
+                    print(f"💀 NODE OFFLINE: {node_id} ({reason})")
+                    record_event("node_offline", f"{node_id} is offline — {reason}",
+                                 unit=node_id)
 
         if changed:
             persist_registry()
@@ -2434,6 +3568,274 @@ def heartbeat_reaper():
 # ── LOAD BALANCER ────────────────────────────────────────────────────────────
 
 # Containers that must never be migrated or deduped automatically
+LOCATOR_YML = os.environ.get("LOCATOR_YML", os.path.join(os.path.dirname(os.path.abspath(__file__)), "locator.yml"))
+LOCATOR_COMPOSE = os.environ.get(
+    "LOCATOR_COMPOSE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "docker-compose.yml"),
+)
+
+# Pseudo-paths, not files — see list_yamls().
+TEMPLATE_LOCATOR_YML = "template:locator.yml"
+TEMPLATE_COMPOSE_YML = "template:docker-compose.yml"
+
+YAML_TEMPLATES = {
+    TEMPLATE_LOCATOR_YML: """\
+# Service policy. Read by the locator on every change (no restart needed).
+#
+# location_type:   stationary = never migrate (anything holding data on local
+#                  disk, since migration moves the compose file and NOT the
+#                  volume). mobile = may be rebalanced between units.
+# deployment_type: essential = must always be running; the locator restarts it
+#                  as soon as it is seen OFFLINE. non-essential = left alone,
+#                  and the only kind idle_stop will ever act on.
+#                  ONLY "essential" is matched; every other value, typo included,
+#                  reads as non-essential. "optional" is a legacy alias, still
+#                  accepted but no longer written.
+# units:           current_unit (default) | all | 8 | "7_8_9"
+#                  ALWAYS QUOTE the underscore form — YAML 1.1 reads a bare
+#                  7_8_9 as the integer 789 and the policy matches nothing.
+# instances:       how many per unit (default 1)
+# project_dir /
+# git_remote:      opt in to placement enforcement. Without one of these the
+#                  locator will NOT fan a service out, because a queued deploy
+#                  carries only a container name and the target would have
+#                  nothing to check out.
+# env:             .env values for the target ('common' + per-unit override).
+#                  lokey merges them and never overwrites an existing key.
+
+Service:
+  my-service:
+    deployment_type: non-essential
+    location_type: stationary
+    units: current_unit
+    instances: 1
+    # project_dir: /home/swoopg111/projects/my-service
+    # git_remote: https://gitlab.com/<group>/my-service.git
+    # env:
+    #   common:
+    #     SOME_KEY: value
+    #   unit8:
+    #     SOME_KEY: unit8-override
+""",
+    TEMPLATE_COMPOSE_YML: """\
+# Blank compose file. Save As writes it into the locator's compose store,
+# where it becomes deployable from the YAMLs tab.
+
+services:
+  my-service:
+    image: nginx:alpine
+    container_name: my-service
+    restart: unless-stopped
+    # Volumes are NOT moved by a migration — mark anything with data below as
+    # location_type: stationary in locator.yml.
+    volumes: []
+    environment:
+      - PYTHONUNBUFFERED=1
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.my-service.rule=Host(`my-service.example.com`)"
+      - "traefik.http.routers.my-service.entrypoints=websecure"
+      - "traefik.http.routers.my-service.tls=true"
+      - "traefik.http.routers.my-service.tls.certresolver=myresolver"
+      - "traefik.http.services.my-service.loadbalancer.server.port=80"
+    networks:
+      - networking
+
+networks:
+  networking:
+    external: true
+""",
+}
+
+_policy_cache = {"mtime": None, "data": {}}
+
+
+def _as_list(value):
+    """Normalise a YAML scalar-or-list into a list of clean strings.
+
+    locator.yml is hand-edited, so `wake_with: reech-db` and
+    `wake_with: [reech-db]` both have to mean the same thing — a schema that
+    punishes the shorter spelling just produces silently-empty policy.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        items = [value]
+    return [str(v).strip() for v in items if str(v).strip()]
+
+
+def load_policy():
+    """Service policy from locator.yml, keyed by lowercase service name.
+
+    This file existed but nothing read it, so services marked
+    'location_type: stationary' were migrated anyway — which is how the
+    database behind ns1's PowerDNS came to be queued for a move. Reloaded on
+    mtime change so edits take effect without a restart.
+
+    Tolerates the original misspellings ('deployement_type',
+    'inactivity_timout_minutes') alongside the corrected ones.
+    """
+    try:
+        mtime = os.path.getmtime(LOCATOR_YML)
+    except OSError:
+        return {}
+    if _policy_cache["mtime"] == mtime:
+        return _policy_cache["data"]
+
+    try:
+        import yaml as _yaml
+        with open(LOCATOR_YML) as fh:
+            doc = _yaml.safe_load(fh) or {}
+    except Exception as e:
+        print(f"⚠️  locator.yml unreadable: {e}")
+        return _policy_cache["data"]
+
+    # Accept "Service:" (as written) or a bare top-level mapping.
+    services = doc.get("Service") or doc.get("services") or doc
+    parsed = {}
+    if isinstance(services, dict):
+        for name, cfg in services.items():
+            if not isinstance(cfg, dict):
+                continue
+            parsed[str(name).lower()] = {
+                "location_type": str(cfg.get("location_type", "")).lower(),
+                "deployment_type": str(
+                    cfg.get("deployment_type", cfg.get("deployement_type", ""))).lower(),
+                "units": str(cfg.get("units", cfg.get("Unit", "current_unit"))).lower(),
+                "instances": cfg.get("instances", 1),
+                # Read by lokey, not by this file: each agent enforces
+                # this against its own Docker socket. Must be whitelisted
+                # here or load_policy() silently drops it like any other
+                # unknown key, and the setting looks configured but is not.
+                "restart_when_stopped": bool(cfg.get("restart_when_stopped", False)),
+                # Idle auto-stop, decided HERE rather than by a per-container
+                # docker label. A label can only be changed by recreating the
+                # container; locator.yml is editable from the dashboard and is
+                # the fleet's stated source of truth, so the policy lives with
+                # the rest of the policy.
+                #
+                # STRICTLY OPT-IN. A service becomes eligible only by saying
+                # idle_stop: true here, so anything absent from this file can
+                # never be stopped by omission — which is the whole point:
+                # unit8 alone runs ~40 containers against far fewer policies.
+                "idle_stop": bool(cfg.get("idle_stop", False)),
+                # Optional per-service override, same spelling the label took
+                # ("15m", "2h", "5400"). Empty means use IDLE_DEFAULT_TIMEOUT.
+                "idle_timeout": str(cfg.get("idle_timeout", "")),
+                # Migration prerequisites: service names (or "name@unit" for a
+                # specific instance) that must have an ONLINE instance somewhere
+                # before this service may be migrated. Read by
+                # resolve_migration_order(), which gates POST /api/migrations.
+                #
+                # Whitelisted here for the reason stated above restart_when_stopped:
+                # an un-whitelisted key is dropped without a word, so declaring
+                # depends_on in locator.yml would look configured and do nothing.
+                # That is not hypothetical — it is exactly what happened on
+                # 2026-09-03, when a test dependency was declared, silently
+                # discarded here, and the migration it should have blocked went
+                # through and stopped the service.
+                "depends_on": (cfg.get("depends_on")
+                               if isinstance(cfg.get("depends_on"), list) else []),
+                # Needed to deploy onto a unit that has never hosted the
+                # service — a queued command carries only a container name,
+                # so without these there is nothing to check out there.
+                "project_dir": str(cfg.get("project_dir", "")),
+                "git_remote": str(cfg.get("git_remote", "")),
+                # {"common": {...}, "unit9": {...}} — compose .env values the
+                # target needs. Gitignored on nearly every project, so a fresh
+                # clone has none and every ${VAR} resolves empty.
+                "env": cfg.get("env") if isinstance(cfg.get("env"), dict) else {},
+                # Tailnet publish port an edge should reach this service on.
+                # Read by /api/traefik: the locator answers where the service
+                # IS, and this says on which port. Same opt-in shape as the
+                # rest of the policy - undeclared means not edge-routed.
+                "edge_port": cfg.get("edge_port"),
+                # Resolve this service's placement through ANOTHER service's
+                # registry entry. Several edge file-services can sit on one
+                # backend — error-pages carries passHostHeader:false where its
+                # siblings carry true — and only the backend's name ever
+                # registers a container.
+                "edge_host": str(cfg.get("edge_host", "")),
+                # loadBalancer options the emitted service carries.
+                # edge_pass_host: None leaves Traefik's default (true);
+                # edge_healthcheck is a path, emitted with the fleet's usual
+                # 15s/5s probe.
+                "edge_pass_host": cfg.get("edge_pass_host"),
+                "edge_healthcheck": str(cfg.get("edge_healthcheck", "")),
+                # ── Wake-on-request ──────────────────────────────────────
+                # Same argument as idle_stop above, and the other half of the
+                # same feature: the thing that STOPS a container is declared
+                # here, so the thing that starts it belongs here too rather
+                # than being spread across Traefik query strings and frontend
+                # constants, which is where it used to live and why it silently
+                # rotted (a retired hostname in one place, a missing prop in
+                # another, and no single file that said what the truth was).
+                #
+                # public_wake — STRICTLY OPT-IN, exactly like idle_stop. Lets an
+                # anonymous visitor wake this one container and nothing else.
+                "public_wake": bool(cfg.get("public_wake", False)),
+                # wake_with — dependencies started alongside it. reech needs
+                # reech-oauth; forge needs forge-relay. Declared here so a caller asks for
+                # ONE name and locator expands it, instead of every Traefik file
+                # and every link having to know the dependency list.
+                "wake_with": _as_list(cfg.get("wake_with")),
+                # wake_triggers — WHAT causes the wake, keyed by trigger kind so
+                # new kinds need no code change. `domain:` is the kind in use:
+                # the hostnames whose visit should wake this container. Serving
+                # it back over /api/wake/triggers is what lets a page ask which
+                # container its link needs rather than hardcoding a name that
+                # nobody updates when the container is renamed.
+                "wake_triggers": {
+                    str(k).lower(): _as_list(v)
+                    for k, v in cfg["wake_triggers"].items()
+                } if isinstance(cfg.get("wake_triggers"), dict) else {},
+            }
+    _policy_cache.update({"mtime": mtime, "data": parsed})
+    print(f"📄 locator.yml loaded — {len(parsed)} service policies")
+    return parsed
+
+
+def _policy_for(name):
+    """Policy entry for a container, matching on name or base name."""
+    pol = load_policy()
+    low = (name or "").lower()
+    if low in pol:
+        return pol[low]
+    base = _base_name(low)
+    if base in pol:
+        return pol[base]
+    # Allow a policy key to match a versioned container (mariadb -> mariadb-11.4)
+    for key, cfg in pol.items():
+        if key and key in low:
+            return cfg
+    return {}
+
+
+def _is_pinned(name):
+    """True when a container must never be migrated.
+
+    Honours locator.yml first — anything marked 'location_type: stationary' is
+    immovable — then falls back to the built-in list.
+
+    Substring match, not set membership. The balancer used `name in
+    _PINNED_NAMES`, which only catches bare names: "postgres" was protected but
+    "comms-postgres" was not, and "mariadb" was protected while "mariadb-11.4"
+    — the database behind ns1's PowerDNS — was freely migratable. It was queued
+    for a move to unit9 that would have taken DNS down for four domains and left
+    the only copy of an unbacked-up database behind, because migration moves the
+    compose file and not the volume.
+
+    Elsewhere in this file the same list is already applied as a substring test;
+    this makes the balancer agree with it.
+    """
+    low = (name or "").lower()
+    if _policy_for(low).get("location_type") == "stationary":
+        return True
+    return any(p in low for p in _PINNED_NAMES)
+
+
 _PINNED_NAMES = {
     "traefik", "apache", "apache2", "httpd", "varnish", "bind9", "bind",
     "openvpn", "openvpn-client", "headscale", "tailscale", "wireguard-client", "wireguard",
@@ -2443,15 +3845,29 @@ _PINNED_NAMES = {
     "matrix_synapse", "matrix_element", "matrix_sms_bridge",
     "lokey", "lokey-client",
     "wg-easy", "crowdsec", "fail2ban",
+    # Added 2026-08-23, ahead of idle shutdown moving from opt-in to opt-out.
+    # None of these has a wake-on-request path, so once stopped they stay
+    # stopped until a human notices:
+    #   openbao    — the secrets broker every bao:// reference resolves
+    #                through; stopping it breaks the next deploy on any unit.
+    #   fluent-bit — the log shippers. A quiet shipper is the one you most need
+    #                running, and unit8's being down 36h is why its containers
+    #                were missing from the log filter lists entirely.
+    #   keycloak / freeipa — identity. Stopping either locks people out of
+    #                everything that authenticates against them.
+    "openbao", "fluent-bit", "keycloak", "freeipa",
+    # Public web front doors. Both are bound to unit8 by an A record in pdns and
+    # by Traefik's file provider, so migrating one moves the compose file while
+    # DNS keeps pointing at unit8 — the site just goes dark. locator.yml already
+    # pins them; this makes it uneditable from the grid as well.
+    "main-site", "client-portal",
 }
 
 
 def _clean_ip(raw):
     """Strip description suffixes like '10.0.0.1- hostname'."""
-    if not raw:
-        return None
-    clean = raw.split("-")[0].strip().split()[0]
-    return clean if clean and clean not in ("unknown", "") else None
+    clean = _first_addr(raw)
+    return clean if clean and clean != "unknown" else None
 
 
 def _best_ip(info):
@@ -2478,7 +3894,44 @@ def resolve_migration_order(svc_id, services_snap):
     """
     svc = services_snap.get(svc_id, {})
     deps = svc.get("depends_on", []) or []
-    missing = [d for d in deps if services_snap.get(d, {}).get("status") != "ONLINE"]
+
+    # Fall back to locator.yml when the registry record carries nothing, which
+    # is every record today: depends_on only ever reaches the registry through
+    # the /register payload, and no agent sends it -- 0 of 415 services had it
+    # populated on 2026-09-03. That made this gate vacuously pass for every
+    # migration, which reads as "dependencies satisfied" and is really
+    # "dependencies never declared".
+    #
+    # Policy is the right home for it rather than a per-unit file on each agent:
+    # locator.yml is already the single source of truth for placement, already
+    # hot-reloads on mtime, is already editable from the dashboard's YAMLs tab,
+    # and already expresses this exact shape as wake_with. A file on each unit
+    # would scatter the truth across nine boxes and go unreadable precisely when
+    # a unit is down, which is when you most need to know what it carried.
+    #
+    # The registry still wins when set, so an agent that starts sending
+    # depends_on keeps overriding policy without a code change here.
+    if not deps:
+        deps = list((_policy_for(svc.get("name") or "") or {}).get("depends_on") or [])
+
+    # A dependency may be written either way, and both are useful:
+    #   "pdns@unit8" — that exact instance, on that node
+    #   "pdns"       — any ONLINE instance anywhere, which is the common case and
+    #                  the only form policy can express, since locator.yml is
+    #                  keyed on bare service names and says nothing about hosts.
+    # The bare form matches the co-location rule above: services reach each other
+    # over the tailnet, so where a dependency runs does not matter, only that it
+    # is up somewhere.
+    def _dep_online(dep):
+        if "@" in dep:
+            return services_snap.get(dep, {}).get("status") == "ONLINE"
+        low = dep.lower()
+        return any(
+            (v.get("name") or "").lower() == low and v.get("status") == "ONLINE"
+            for v in services_snap.values()
+        )
+
+    missing = [d for d in deps if not _dep_online(d)]
     return deps, missing
 
 
@@ -2586,7 +4039,7 @@ def load_balancer():
                     if svc.get("host") == node_id
                     and svc.get("status") == "ONLINE"
                     and svc.get("type") in ("container", "native")
-                    and svc.get("name") not in _PINNED_NAMES
+                    and not _is_pinned(svc.get("name"))
                     and not svc.get("metadata", {}).get("pinned")
                 ]
                 for svc_id, svc in candidates:
@@ -2655,7 +4108,7 @@ def load_balancer():
                 if svc.get("host") == src_id
                 and svc.get("status") == "ONLINE"
                 and svc.get("type") in ("container", "native")
-                and svc.get("name") not in _PINNED_NAMES
+                and not _is_pinned(svc.get("name"))
                 and not svc.get("metadata", {}).get("pinned")
                 and not resolve_migration_order(svc_id, services_snap)[1]  # no missing deps
             ]
@@ -2816,8 +4269,15 @@ def local_docker_scanner():
 
 def duplicate_killer():
     """
-    Detects containers running the same image more than once and stops the oldest.
+    Detects the *same service* running more than once and stops the oldest.
     Skips infrastructure services listed in _PINNED_NAMES.
+
+    Grouping is by compose project+service, NOT by image alone: several
+    distinct services legitimately share one image (e.g. every oauth2-proxy
+    guard runs quay.io/oauth2-proxy/oauth2-proxy but fronts a different
+    upstream). Keying on the image made those look like duplicates of each
+    other and silently stopped all but the newest, taking their sites down.
+    Only containers with no compose labels fall back to the image key.
     """
     if not docker_client:
         return
@@ -2836,7 +4296,11 @@ def duplicate_killer():
                     continue
                 tags = ctr.image.tags
                 image_key = tags[0].split(":")[0] if tags else ctr.image.id[:12]
-                by_image.setdefault(image_key, []).append(ctr)
+                labels = ctr.labels or {}
+                project = labels.get("com.docker.compose.project")
+                service = labels.get("com.docker.compose.service")
+                group_key = f"compose:{project}/{service}" if project and service else f"image:{image_key}"
+                by_image.setdefault(group_key, []).append(ctr)
 
             for image_key, ctrs in by_image.items():
                 if len(ctrs) < 2:
@@ -2882,23 +4346,141 @@ COMMAND_RETRY_SECONDS = 180   # re-serve DISPATCHED commands the lokey never com
 COMMAND_RETENTION     = 100   # completed commands kept for history
 
 
-def enforce_units_all():
-    """Background: scan registry for services with 'units: all' and queue deploy commands."""
+PLACEMENT_FAIL_BACKOFF = 1800   # don't retry a failed deploy for 30 minutes
+
+
+def _expand_unit_spec(spec, online_units):
+    """locator.yml's 'units:' value → the set of unit names it names.
+
+    Accepts 'all', a single unit ('8' or 'unit8'), or the underscore-separated
+    list the file actually uses ('4_7_8_9'). Bare numbers get the 'unit'
+    prefix because that is how every entry has always been written.
+    'current_unit' — the default when the key is absent — means "wherever it
+    already runs", i.e. no fan-out.
+    """
+    spec = (spec or "").strip().lower()
+    if not spec or spec == "current_unit":
+        return set()
+    if spec == "all":
+        return set(online_units)
+    # YAML 1.1 treats underscores as digit separators, so an UNQUOTED
+    # `units: 4_7_8_9` arrives here as the integer 4789 and would silently
+    # expand to one nonexistent "unit4789". Refuse it loudly instead.
+    if spec.isdigit() and len(spec) > 2:
+        print(f"⚠️  locator.yml: units '{spec}' looks like an unquoted "
+              f"underscore list (YAML read 4_7_8_9 as 4789) — quote it")
+        return set()
+    names = set()
+    for part in re.split(r"[_,\s]+", spec):
+        if part:
+            names.add(part if part.startswith("unit") else f"unit{part}")
+    return names
+
+
+def enforce_unit_placement():
+    """Background: queue deploy commands so each service runs on every unit
+    locator.yml assigns it to.
+
+    This previously matched only the literal string 'all', and read it from
+    svc['metadata']['units'] — a key lokey never sets — so it fired for
+    nothing and locator.yml's 'units:' field was decorative. It now reads the
+    policy file itself and understands the '4_7_8_9' form used there.
+
+    Only queues for units where the service is NOT already registered, so a
+    satisfied policy goes quiet instead of re-queueing every 60s, and backs
+    off after a failure rather than hot-looping the way the matomo migration
+    did.
+    """
     time.sleep(30)  # let registry initialize
     while True:
         try:
-            online_units = [
-                unit_id for unit_id, info in registry.get("nodes", {}).items()
-                if info.get("status") == "ONLINE"
-            ]
-            for svc_id, svc in registry.get("services", {}).items():
-                units_spec = (svc.get("metadata") or {}).get("units", "")
-                if units_spec == "all" and online_units:
-                    for unit in online_units:
-                        _queue_command(unit, svc_id, "deploy", source="units_all_enforcement")
+            with lock:
+                online_units = [
+                    unit_id for unit_id, info in registry.get("nodes", {}).items()
+                    if info.get("status") == "ONLINE"
+                ]
+                services = list(registry.get("services", {}).items())
+
+            # Only ONLINE instances count as covered. Counting every registry
+            # entry meant a service that had been stopped — or evicted — left
+            # an OFFLINE row behind that read as "already there", so placement
+            # never redeployed it and the unit stayed empty indefinitely.
+            running, known = {}, set()
+            for _svc_id, svc in services:
+                nm = (svc.get("name") or "").lower()
+                known.add(nm)
+                if svc.get("status") == "ONLINE" and svc.get("host"):
+                    running.setdefault(nm, set()).add(svc.get("host"))
+
+            now = time.time()
+            for name in sorted(known):
+                pol = _policy_for(name)
+                # Opt-in only. Placement predates this enforcement, so most
+                # entries in locator.yml were written when 'units:' did
+                # nothing — switching it on for all of them at once would
+                # start deploying services nobody asked to be fanned out.
+                # A policy has to say HOW to deploy before it is acted on,
+                # and a command without these fails on the target anyway.
+                if not (pol.get("project_dir") or pol.get("git_remote")):
+                    continue
+                wanted = _expand_unit_spec(pol.get("units"), online_units)
+                if not wanted:
+                    continue
+                missing = (wanted & set(online_units)) - running.get(name, set())
+                for unit in sorted(missing):
+                    if _recent_placement_failure(unit, name, now):
+                        continue
+                    # locator itself put it to sleep — the idle reaper and
+                    # /api/shutdown both set metadata.idle_stopped, and any
+                    # successful start clears it. Deploying over that flag
+                    # resurrects the service ~60s after every quiet-hours
+                    # stop: store-site looped exactly like this until the
+                    # check existed. Wake is the way back, not placement.
+                    if _was_idle_stopped(name, unit, services):
+                        continue
+                    env_cfg = pol.get("env") or {}
+                    env_map = {**(env_cfg.get("common") or {}),
+                               **(env_cfg.get(unit) or {})}
+                    _queue_command(
+                        unit, name, "deploy", source="unit_placement",
+                        extra={
+                            "project_dir": pol.get("project_dir", ""),
+                            "git_remote": pol.get("git_remote", ""),
+                            "env": {str(k): str(v) for k, v in env_map.items()},
+                        },
+                    )
         except Exception as e:
-            print(f"⚠️  enforce_units_all error: {e}")
+            print(f"⚠️  enforce_unit_placement error: {e}")
         time.sleep(60)
+
+
+def _was_idle_stopped(name, unit, services):
+    """True when the service's registry entry on `unit` carries idle_stopped —
+    locator queued that stop itself (idle reaper or /api/shutdown) and no
+    successful start has landed since. Placement must not resurrect it."""
+    for _svc_id, svc in services:
+        if (svc.get("name") or "").lower() != name:
+            continue
+        if svc.get("host") != unit:
+            continue
+        if (svc.get("metadata") or {}).get("idle_stopped"):
+            return True
+    return False
+
+
+def _recent_placement_failure(unit, container, now):
+    """True if this unit+container deploy failed inside the backoff window."""
+    with command_lock:
+        for cmd in command_queue.values():
+            if (cmd.get("unit") == unit and cmd.get("container") == container
+                    and cmd.get("action") == "deploy" and cmd.get("status") == "FAILED"):
+                try:
+                    ts = datetime.fromisoformat(cmd.get("completed_at") or "").timestamp()
+                except (ValueError, TypeError):
+                    continue
+                if now - ts < PLACEMENT_FAIL_BACKOFF:
+                    return True
+    return False
 
 
 def _parse_duration(value, default):
@@ -2916,11 +4498,47 @@ def _parse_duration(value, default):
         return default
 
 
-def _queue_command(unit, container, action, source="idle"):
-    """Queue a container command for a unit's lokey. Deduped on unit+container+action."""
+# deployment_type has exactly two meanings, and only one of them was ever
+# written down. Every check in this file is `== "essential"`, so ANY other
+# string -- including a typo -- silently reads as not-essential and makes the
+# service eligible for idle_stop and eviction. "optional" was never a keyword
+# the code recognised; it was just the label the toggle path happened to write,
+# which made the vocabulary look richer than it is.
+#
+# The accurate word for "not essential" is NON-ESSENTIAL, so that is now what
+# the toggle writes and what the template documents. "optional" stays accepted
+# as a legacy alias -- there are existing entries carrying it and they must keep
+# working -- but nothing emits it any more.
+DEPLOYMENT_ESSENTIAL = "essential"
+DEPLOYMENT_NON_ESSENTIAL = "non-essential"
+DEPLOYMENT_ALIASES = {"optional", "nonessential", "non_essential"}
+
+
+def is_essential(cfg):
+    """True only for an explicitly essential service.
+
+    Kept as one function so the 'anything not essential is non-essential'
+    reading lives in exactly one place instead of four scattered == comparisons.
+    """
+    return str(cfg.get("deployment_type", "")).strip().lower() == DEPLOYMENT_ESSENTIAL
+
+
+def _queue_command(unit, container, action, source="idle", extra=None):
+    """Queue a container command for a unit's lokey. Deduped on unit+container+action.
+
+    `extra` carries action-specific fields through to lokey — 'deploy' needs
+    project_dir/git_remote, since a unit that has never hosted the service has
+    nothing to bring up from a container name alone.
+    """
     with command_lock:
         for cmd in command_queue.values():
-            if (cmd["unit"] == unit and cmd["container"] == container
+            # .get, not [], because _queue_exec_command shares this queue and
+            # its entries carry no "container" at all - they are {action:"exec",
+            # script:...}. Subscripting blew up with KeyError the moment any exec
+            # job was pending, and since wake_page queues through here, that made
+            # EVERY /wake/<name> return 500 - the whole wake-on-request feature,
+            # fleet-wide, silently dependent on the exec queue being empty.
+            if (cmd["unit"] == unit and cmd.get("container") == container
                     and cmd["action"] == action and cmd["status"] in ("PENDING", "DISPATCHED")):
                 return cmd
         cmd_id = str(uuid.uuid4())[:8]
@@ -2930,6 +4548,7 @@ def _queue_command(unit, container, action, source="idle"):
             "queued_at": datetime.now(timezone.utc).isoformat(),
             "dispatched_at": None, "completed_at": None, "success": None,
         }
+        cmd.update(extra or {})
         command_queue[cmd_id] = cmd
         done = [c for c in command_queue.values() if c["status"] in ("DONE", "FAILED")]
         if len(done) > COMMAND_RETENTION:
@@ -2938,6 +4557,1143 @@ def _queue_command(unit, container, action, source="idle"):
                 command_queue.pop(old["id"], None)
         print(f"📨 COMMAND QUEUED: {action} '{container}' on {unit} ({source})")
         return cmd
+
+
+EXEC_OUTPUT_RETENTION = 500   # completed exec commands kept for history (separate cap — output-bearing)
+
+# A container start/stop that hasn't reported in 3 minutes is stuck, but an exec
+# job routinely runs far longer than that — a refresh doing apt + git across a
+# dozen repos takes minutes. Re-serving it on the container clock would start a
+# SECOND copy on the same unit while the first is still running, so exec carries
+# its own, much longer retry window and its own hard timeout.
+EXEC_RETRY_SECONDS   = int(os.environ.get("EXEC_RETRY_SECONDS", 1800))
+EXEC_RUN_TIMEOUT     = int(os.environ.get("EXEC_RUN_TIMEOUT", 3600))    # DISPATCHED, never reported → TIMEOUT
+EXEC_PICKUP_TIMEOUT  = int(os.environ.get("EXEC_PICKUP_TIMEOUT", 1800))  # PENDING, never collected → MISSED
+EXEC_REAPER_INTERVAL = int(os.environ.get("EXEC_REAPER_INTERVAL", 60))
+
+
+def _record_run(cmd):
+    """Mirror a queued command into Postgres. Never let a DB hiccup break the
+    queue itself — the run must still happen if the bookkeeping fails."""
+    try:
+        db.record_command_run(cmd)
+    except Exception as e:
+        print(f"⚠️  Failed to record command run {cmd.get('id')}: {e}")
+
+
+def _update_run(cmd, error=None, duration_ms=None):
+    try:
+        db.update_command_run(cmd, error=error, duration_ms=duration_ms)
+    except Exception as e:
+        print(f"⚠️  Failed to update command run {cmd.get('id')}: {e}")
+
+
+def _output_tail(text, limit=200):
+    """Last meaningful line of a command's output, for an event-log one-liner."""
+    for line in reversed((text or "").strip().splitlines()):
+        line = line.strip()
+        if line:
+            return line[:limit]
+    return ""
+
+
+def _emit_run_event(cmd, duration_ms=None, error=None):
+    """Put an exec outcome on the event log the tactical grid reads.
+
+    A failure names the unit and carries the tail of stderr, so "which unit had
+    trouble, and roughly why" is answerable from the event feed alone without
+    going and fetching the full output.
+    """
+    label  = cmd.get("label") or "exec"
+    unit   = cmd.get("unit")
+    ok     = bool(cmd.get("success"))
+    status = cmd.get("status") or ("DONE" if ok else "FAILED")
+    if ok:
+        message = f"{label} on {unit} completed"
+        if duration_ms:
+            message += f" in {round(duration_ms / 1000)}s"
+    else:
+        message = f"{label} on {unit} {status.lower()}"
+        if cmd.get("exit_code") not in (None, 0):
+            message += f" (exit {cmd['exit_code']})"
+        detail = error or _output_tail(cmd.get("stderr")) or _output_tail(cmd.get("stdout"))
+        if detail:
+            message += f": {detail}"
+    return emit_event("exec_ok" if ok else "exec_failed",
+                      unit=unit, label=label, message=message, status=status,
+                      command_id=cmd.get("id"), exit_code=cmd.get("exit_code"),
+                      duration_ms=duration_ms, job_id=cmd.get("job_id"))
+
+
+def exec_run_reaper():
+    """Close out exec jobs that will never report.
+
+    Two distinct silences, kept distinct because they mean different things:
+    a job nobody ever collected (MISSED — that unit's lokey is not polling, so
+    the unit is effectively unmanaged) versus one collected and never reported
+    (TIMEOUT — it started and died, or is wedged). Both are removed from the
+    queue so the pending endpoint cannot re-serve them afterwards.
+    """
+    while True:
+        time.sleep(EXEC_REAPER_INTERVAL)
+        now = datetime.now(timezone.utc)
+        stale = []
+        try:
+            with command_lock:
+                for cmd in list(command_queue.values()):
+                    if cmd.get("action") != "exec":
+                        continue
+                    if cmd["status"] == "PENDING":
+                        stamp, limit, status = cmd.get("queued_at"), EXEC_PICKUP_TIMEOUT, "MISSED"
+                        reason = "no lokey collected the job — is the unit's agent running?"
+                    elif cmd["status"] == "DISPATCHED":
+                        stamp, limit, status = cmd.get("dispatched_at"), EXEC_RUN_TIMEOUT, "TIMEOUT"
+                        reason = "the unit collected the job and never reported back"
+                    else:
+                        continue
+                    try:
+                        age = (now - datetime.fromisoformat(stamp)).total_seconds()
+                    except (TypeError, ValueError):
+                        continue
+                    if age <= limit:
+                        continue
+                    cmd["status"]       = status
+                    cmd["success"]      = False
+                    cmd["completed_at"] = now.isoformat()
+                    stale.append((dict(cmd), reason))
+                    command_queue.pop(cmd["id"], None)
+            for cmd, reason in stale:
+                print(f"⌛ EXEC {cmd['status']}: '{(cmd.get('label') or cmd.get('script') or '')[:60]}' "
+                      f"on {cmd['unit']} — {reason}")
+                _update_run(cmd, error=reason)
+                _emit_run_event(cmd, error=reason)
+        except Exception as e:
+            print(f"⚠️ Error in exec run reaper: {e}")
+
+
+def _queue_exec_command(unit, script, source="manual", label=None, job_id=None):
+    """Queue an arbitrary-shell-command job for a unit's lokey. Not deduped —
+    every call is its own job, unlike the container start/stop queue above.
+    Lokey is a pure executor here: it runs whatever is queued and reports
+    stdout/stderr/exit_code back, it never decides what's allowed to run."""
+    with command_lock:
+        cmd_id = str(uuid.uuid4())[:8]
+        cmd = {
+            "id": cmd_id, "unit": unit, "action": "exec", "script": script,
+            "label": label, "source": source, "status": "PENDING", "job_id": job_id,
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+            "dispatched_at": None, "completed_at": None, "success": None,
+            "stdout": None, "stderr": None, "exit_code": None,
+        }
+        command_queue[cmd_id] = cmd
+        done = [c for c in command_queue.values() if c["status"] in ("DONE", "FAILED")]
+        if len(done) > EXEC_OUTPUT_RETENTION:
+            done.sort(key=lambda c: c["completed_at"] or "")
+            for old in done[: len(done) - EXEC_OUTPUT_RETENTION]:
+                command_queue.pop(old["id"], None)
+        print(f"📨 EXEC QUEUED: '{script[:80]}' on {unit} ({source})")
+        queued = dict(cmd)
+    _record_run(queued)
+    return queued
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  SECRETS BROKER  —  locator is the only holder of the OpenBao token
+# ═══════════════════════════════════════════════════════════════════════
+# locator.yml's env: block holds bao:// REFERENCES, never values. Deploy
+# commands carry the reference (a path is not a secret); lokey exchanges it
+# here for the value using LOCATOR_ADMIN_KEY. That split exists because
+# /api/commands/pending is unauthenticated and Traefik's locator-api router
+# bypasses Keycloak for /api/ — anything queued is world-readable.
+
+@app.route("/api/secrets/status", methods=["GET"])
+def secrets_status():
+    """Broker health. Never returns secret values.
+
+    Ungated but redacted, so the Keycloak-protected dashboard (whose browser
+    session carries no admin key) can still show whether the broker is alive.
+    Send the admin key to get the full picture.
+    """
+    try:
+        full = bao.status()
+    except Exception as e:
+        return jsonify({"reachable": False, "error": str(e)}), 200
+    if request.headers.get("X-Locator-Admin-Key") and not _require_admin_key():
+        return jsonify(full)
+    return jsonify({k: full.get(k) for k in
+                    ("reachable", "sealed", "configured", "token_ok",
+                     "token_ttl_seconds", "cached_secrets", "version")})
+
+
+@app.route("/api/secrets/resolve", methods=["POST"])
+def secrets_resolve():
+    """Exchange bao:// references for values. Admin key required.
+
+    Two body shapes:
+      {"service": "reech", "unit": "unit8"}  -> that service's whole env block
+                                                from locator.yml, resolved
+      {"refs": ["bao://secret/reech#client_secret", ...]} -> ref -> value
+
+    Returns 502 and resolves NOTHING on any failure. A partially resolved env
+    map is worse than none: it seeds a blank into .env and surfaces days later
+    as an auth error nobody can trace back to here.
+    """
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+
+    if data.get("refs"):
+        refs = data["refs"]
+        if not isinstance(refs, list):
+            return jsonify({"error": "refs must be a list"}), 400
+        out = {}
+        try:
+            for ref in refs:
+                out[ref] = bao.resolve_ref(ref)
+        except bao.BaoError as e:
+            return jsonify({"error": str(e)}), 502
+        return jsonify({"resolved": out, "count": len(out)})
+
+    service = (data.get("service") or "").strip().lower()
+    if not service:
+        return jsonify({"error": "body needs 'service' or 'refs'"}), 400
+    pol = _policy_for(service)
+    if not pol:
+        return jsonify({"error": f"no policy for '{service}' in locator.yml"}), 404
+    env_cfg = pol.get("env") or {}
+    unit = (data.get("unit") or "").strip().lower()
+    env_map = {**(env_cfg.get("common") or {}), **(env_cfg.get(unit) or {})}
+    if not env_map:
+        return jsonify({"service": service, "unit": unit, "env": {}, "refs_used": []})
+    try:
+        resolved, used = bao.resolve_env_map(env_map)
+    except bao.BaoError as e:
+        emit_event("secrets", action="resolve_failed", service=service, error=str(e))
+        return jsonify({"error": str(e), "service": service}), 502
+    return jsonify({"service": service, "unit": unit,
+                    "env": resolved, "refs_used": used})
+
+
+@app.route("/api/secrets/refresh", methods=["POST"])
+def secrets_refresh():
+    """Drop cached secrets so the next resolve re-reads OpenBao. Post-rotation."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    prefix = (request.get_json(silent=True) or {}).get("prefix")
+    dropped = bao.invalidate(prefix)
+    return jsonify({"dropped": dropped, "prefix": prefix})
+
+
+@app.route("/api/secrets/refs", methods=["GET"])
+def secrets_refs():
+    """Every bao:// reference locator.yml mentions, per service.
+
+    Paths only, never values — this is the map you check after rotating a
+    secret to see which services need a redeploy.
+    """
+    out = {}
+    for name, pol in (load_policy() or {}).items():
+        env_cfg = pol.get("env") or {}
+        refs = {}
+        for scope, block in env_cfg.items():
+            if not isinstance(block, dict):
+                continue
+            for k, v in block.items():
+                if bao.is_ref(v):
+                    refs.setdefault(scope, {})[str(k)] = str(v)
+        if refs:
+            out[name] = refs
+    return jsonify({"services": out, "count": len(out)})
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  COMPOSE SECRET SWEEP  —  find plaintext credentials, then vault them
+# ═══════════════════════════════════════════════════════════════════════
+# lokey uploads every unit's docker-compose.yml into COMPOSE_DIR and the store
+# is committed and pushed, so a password typed into an environment: block is
+# both readable on the unit and permanent in git history. The sweeper reports;
+# quarantine is a deliberate, admin-keyed act because it edits live compose
+# files on units and a bad rewrite takes a stack down.
+
+SECRETSCAN_INTERVAL = int(os.environ.get("SECRETSCAN_INTERVAL", "900"))
+SECRETSCAN_ENABLED = os.environ.get("SECRETSCAN_ENABLED", "true").lower() in ("1", "true", "yes")
+# Where a quarantined credential is filed. One secret per compose file keeps
+# the bao:// reference readable and the blast radius of a rotation small.
+SECRETSCAN_MOUNT = os.environ.get("SECRETSCAN_MOUNT", "secret")
+SECRETSCAN_PREFIX = os.environ.get("SECRETSCAN_PREFIX", "compose")
+
+_scan_cache = {"at": None, "findings": [], "files": 0}
+_scan_lock = threading.Lock()
+
+
+def _compose_store_files():
+    """(name, path) for every compose file in the store."""
+    out = []
+    try:
+        for fname in sorted(os.listdir(COMPOSE_DIR)):
+            if fname.endswith((".yml", ".yaml")):
+                out.append((os.path.splitext(fname)[0], os.path.join(COMPOSE_DIR, fname)))
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def _scan_store():
+    """Scan every stored compose file. Findings keep their raw values, so this
+    result must be passed through secretscan.public() before it leaves here."""
+    findings, files = [], 0
+    for name, path in _compose_store_files():
+        try:
+            with open(path, errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        files += 1
+        findings.extend(secretscan.scan_text(text, source=name))
+    return findings, files
+
+
+@app.route("/api/secrets/scan", methods=["GET"])
+def secrets_scan():
+    """Plaintext credentials found in the compose store. Values are masked.
+
+    ?fresh=1 rescans instead of serving the sweeper's last pass.
+    """
+    if request.args.get("fresh") in ("1", "true", "yes"):
+        findings, files = _scan_store()
+        with _scan_lock:
+            _scan_cache.update({"at": datetime.now(timezone.utc).isoformat(),
+                                "findings": findings, "files": files})
+    with _scan_lock:
+        findings = list(_scan_cache["findings"])
+        at, files = _scan_cache["at"], _scan_cache["files"]
+
+    by_file, by_sev = {}, {}
+    for f in findings:
+        by_file.setdefault(f["source"], []).append(f["key"])
+        by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+    return jsonify({
+        "scanned_at": at,
+        "files_scanned": files,
+        "total": len(findings),
+        "by_severity": by_sev,
+        "by_file": {k: sorted(set(v)) for k, v in sorted(by_file.items())},
+        "findings": secretscan.public(findings),
+    })
+
+
+def _bao_path_for(compose_name):
+    return f"{SECRETSCAN_PREFIX}/{compose_name}"
+
+
+def _unit_key_auth():
+    """Authenticate a secrets call made with the admin key or a unit's own key.
+
+    Returns (scope, None) on success — scope is None for the admin key (any
+    unit) or the unit name the key belongs to — or (None, response) to abort.
+    Fails closed: a request carrying neither credential is refused here, since
+    clearance.UNIT_KEY lets these routes past the gate for this check to run.
+    """
+    if request.headers.get("X-Locator-Admin-Key"):
+        denied = _require_admin_key()
+        return (None, denied) if denied else (None, None)
+    unit = request.headers.get("X-Lokey-Unit", "").strip()
+    key = request.headers.get("X-Lokey-Key", "")
+    if unit and key and unitkeys.verify(unit, key):
+        return unit, None
+    return None, (jsonify({"error": "unauthorized"}), 401)
+
+
+# ── INGEST: a unit hands us its .env, we file the credentials in OpenBao ──────
+#
+# The gap this closes: lokey only ever uploaded docker-compose.yml, and
+# secretscan only understood `environment:` blocks — so a credential living in a
+# unit's .env was invisible to the sweeper, to /api/secrets/scan and to
+# quarantine alike. That is where most of them are. Compose interpolates ${KEY}
+# from the .env beside it precisely so the value is NOT in the yaml, which means
+# the store scan reads clean exactly where the real secret sits on disk.
+#
+# This is the ONLY inbound route that carries raw credential values, so unlike
+# /api/compose — open by design, and its store is committed and auto-pushed —
+# it is admin-keyed and fails closed. Nothing is written to disk here and
+# nothing but key NAMES is logged: values go to OpenBao and are then dropped.
+#
+# It deliberately stops at storing. It does NOT rewrite the unit's .env and does
+# NOT queue a redaction. Filing a value is additive, idempotent and reversible;
+# editing a live service's config is none of those. Getting the secret INTO
+# OpenBao is the half that is safe to automate — taking it back out of the file
+# stays the explicit, admin-keyed act it already is in quarantine below.
+INGEST_MAX_BYTES = int(os.environ.get("SECRETSCAN_INGEST_MAX", "65536"))
+# Verbose tracing for the ingest path. Default ON: this is the only route that
+# carries raw credential values, and a rollout of it needs to be watchable in
+# live-logger rather than guessed at from a silent 200. Set SECRETSCAN_DEBUG=0
+# once it is boring. Every line below is names-and-counts only — a value must
+# never reach a log, and beast_log forwards to beast-telemetry.
+SECRETSCAN_DEBUG = os.environ.get("SECRETSCAN_DEBUG", "true").lower() in ("1", "true", "yes")
+
+
+def _ingest_log(line):
+    if SECRETSCAN_DEBUG:
+        beast_log(f"\U0001f510 ingest: {line}")
+_INGEST_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+@app.route("/api/secrets/ingest", methods=["POST"])
+def secrets_ingest():
+    """File a unit's .env credentials into OpenBao.
+
+    Body: {"unit": "unit8", "source": "pdns",
+           "path": "/home/.../pdns/.env", "content": "<raw .env text>",
+           "dry_run": false}
+
+    Returns the bao:// refs to paste into locator.yml, what was skipped, and
+    masked values only — the response is safe to log and to show in an event.
+    """
+    scope, denied = _unit_key_auth()
+    if denied:
+        return denied
+
+    body = request.get_json(silent=True) or {}
+    unit = str(body.get("unit") or "").strip() or (scope or "unknown")
+    source = str(body.get("source") or "").strip()
+    origin = str(body.get("path") or "").strip()
+    content = body.get("content")
+
+    # A unit key files under its own unit and nowhere else. Checked before
+    # anything is parsed, so a key cannot be used to write another unit's path.
+    if scope and unit != scope:
+        return jsonify({"error": f"this key belongs to {scope}, not {unit}"}), 403
+
+    if not source:
+        return jsonify({"error": "source (the compose project name) is required"}), 400
+    # `source` becomes a path segment in OpenBao, so it gets the same charset
+    # discipline as a stored compose name — a '../' here would write outside
+    # the prefix the broker policy allows.
+    if not _INGEST_NAME_RE.match(source):
+        return jsonify({"error": f"invalid source name {source!r}"}), 400
+    if not isinstance(content, str) or not content.strip():
+        return jsonify({"error": "empty content"}), 400
+    if len(content) > INGEST_MAX_BYTES:
+        return jsonify({"error": f"content exceeds {INGEST_MAX_BYTES} bytes"}), 413
+
+    _ingest_log(f"{unit} offered {source} ({len(content)} bytes) from {origin or 'unknown path'}")
+
+    findings = secretscan.scan_env_text(content, source=source)
+    actionable = [f for f in findings if f["severity"] not in ("placeholder", "hashed")]
+    skipped = [f for f in findings if f["severity"] in ("placeholder", "hashed")]
+    # Names and severities only. This is the line that tells you, mid-rollout,
+    # whether the scanner is seeing what you expect it to see on that unit.
+    _ingest_log(f"{source}: {len(findings)} finding(s) — "
+                f"store {[f['key'] for f in actionable] or 'nothing'}, "
+                f"skip {[(f['key'], f['severity']) for f in skipped] or 'nothing'}")
+
+    if not actionable:
+        # Not an error: most .env files are ports and flags. Reported so a unit
+        # can tell "nothing to file" apart from "the call never landed".
+        _ingest_log(f"{source}: nothing storable — not calling OpenBao")
+        return jsonify({"unit": unit, "source": source, "path": origin,
+                        "stored": [], "refs": {},
+                        "skipped": secretscan.public(skipped),
+                        "note": "no storable credential found"})
+
+    values = {f["key"]: f["value"] for f in actionable}
+    # Unit-key filings live under compose/units/<unit>/<source>, the one prefix
+    # /api/secrets/unit-resolve lets that same unit read back.
+    bao_path = (f"{unitkeys.secret_prefix(SECRETSCAN_PREFIX, scope)}/{source}" if scope
+                else _bao_path_for(source))
+    refs = {k: f"bao://{SECRETSCAN_MOUNT}/{bao_path}#{k}" for k in sorted(values)}
+    masked = {f["key"]: f["masked"] for f in actionable}
+
+    if body.get("dry_run"):
+        return jsonify({"unit": unit, "source": source, "path": origin, "dry_run": True,
+                        "would_store": sorted(values), "refs": refs, "masked": masked,
+                        "bao_path": f"{SECRETSCAN_MOUNT}/{bao_path}",
+                        "skipped": secretscan.public(skipped)})
+
+    try:
+        _ingest_log(f"{source}: writing {sorted(values)} -> {SECRETSCAN_MOUNT}/{bao_path}")
+        bao.write_secret(SECRETSCAN_MOUNT, bao_path, values)
+        # Read back for the same reason quarantine does: a write that reports
+        # success but stored nothing must never be reported as success, or the
+        # next step redacts a file against a secret that is not there.
+        stored = bao.read_secret(SECRETSCAN_MOUNT, bao_path, use_cache=False)
+        mismatch = sorted(k for k, v in values.items() if stored.get(k) != v)
+        _ingest_log(f"{source}: read-back {'OK' if not mismatch else 'MISMATCH ' + str(mismatch)} "
+                    f"({len(stored)} field(s) now at {SECRETSCAN_MOUNT}/{bao_path})")
+        if mismatch:
+            raise bao.BaoError(f"read-back mismatch for {mismatch}")
+    except bao.BaoError as e:
+        beast_log(f"\U0001f510 INGEST FAILED for {unit}:{source} — {e}")
+        emit_event("secrets", action="ingest_failed", unit=unit, source=source,
+                   path=origin, error=str(e))
+        return jsonify({"error": f"OpenBao write failed: {e}"}), 502
+
+    emit_event("secrets", action="ingested", unit=unit, source=source, path=origin,
+               keys=sorted(values), bao_path=f"{SECRETSCAN_MOUNT}/{bao_path}")
+    beast_log(f"\U0001f510 INGESTED {len(values)} credential(s) from "
+              f"{unit}:{origin or source} \u2192 {SECRETSCAN_MOUNT}/{bao_path} "
+              f"({', '.join(sorted(values))})")
+    # `stored` lists exactly the keys whose values OpenBao returned unchanged on
+    # read-back. It is the confirmation lokey waits for before deleting those
+    # keys from the unit's .env — and nothing absent from it may be deleted.
+    return jsonify({"unit": unit, "source": source, "path": origin,
+                    "stored": sorted(values), "verified": True, "refs": refs, "masked": masked,
+                    "bao_path": f"{SECRETSCAN_MOUNT}/{bao_path}",
+                    "skipped": secretscan.public(skipped)})
+
+
+@app.route("/api/secrets/unit-resolve", methods=["POST"])
+def secrets_unit_resolve():
+    """A unit reads back the secrets it filed — and only those.
+
+    Body: {"refs": ["bao://secret/compose/units/unit8/matomo#DB_PASSWORD", ...]}
+    Auth: X-Lokey-Unit + X-Lokey-Key. Every ref must sit under
+    compose/units/<that unit>/; one out-of-scope ref refuses the whole request,
+    and nothing is resolved on any failure (same rule as /api/secrets/resolve).
+    """
+    scope, denied = _unit_key_auth()
+    if denied:
+        return denied
+    if not scope:
+        return jsonify({"error": "unit key required; admins use /api/secrets/resolve"}), 400
+    refs = (request.get_json(silent=True) or {}).get("refs")
+    if not isinstance(refs, list) or not refs:
+        return jsonify({"error": "refs must be a non-empty list"}), 400
+    try:
+        parsed = [(r, *bao.parse_ref(r)) for r in refs]
+    except bao.BaoError as e:
+        return jsonify({"error": str(e)}), 400
+    outside = [r for r, mount, path, _f in parsed
+               if mount != SECRETSCAN_MOUNT or not unitkeys.path_in_scope(path, SECRETSCAN_PREFIX, scope)]
+    if outside:
+        _ingest_log(f"{scope} asked for {len(outside)} ref(s) outside its scope — refused")
+        return jsonify({"error": f"refs outside {scope}'s scope", "refs": outside}), 403
+    out = {}
+    try:
+        for ref in refs:
+            out[ref] = bao.resolve_ref(ref)
+    except bao.BaoError as e:
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"resolved": out, "count": len(out)})
+
+
+@app.route("/api/secrets/unit-keys", methods=["POST"])
+def secrets_unit_keys_mint():
+    """Mint or rotate a unit's ingest key. Body: {"unit": "unit8"}.
+
+    The key is in this response and nowhere else — only its hash is kept.
+    Minting again replaces (and so revokes) that unit's previous key.
+    """
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    unit = str((request.get_json(silent=True) or {}).get("unit") or "").strip()
+    try:
+        key = unitkeys.mint(unit)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    emit_event("secrets", action="unit_key_minted", unit=unit)
+    return jsonify({"unit": unit, "key": key,
+                    "note": "shown once; put it in this unit's lokey as LOKEY_UNIT_KEY"})
+
+
+@app.route("/api/secrets/unit-keys", methods=["GET"])
+def secrets_unit_keys_list():
+    """Which units hold an ingest key, and when it was minted. Never the keys."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    return jsonify({"units": unitkeys.listing()})
+
+
+@app.route("/api/secrets/quarantine", methods=["POST"])
+def secrets_quarantine():
+    """Move one compose file's plaintext credentials into OpenBao.
+
+    Body: {"file": "matomo-db", "keys": [...optional subset...],
+           "dry_run": true}
+
+    Order matters and is not negotiable: the value goes into OpenBao FIRST and
+    is read back, then the file is rewritten. Rewriting first would, on a bao
+    write failure, leave a ${VAR} with nothing behind it — the credential gone
+    from the file and never stored anywhere.
+
+    This rewrites the STORE copy and queues a redact_env command for the unit
+    that owns the container, so the real file on the unit is fixed too.
+    """
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    name = (data.get("file") or "").strip()
+    if not name:
+        return jsonify({"error": "body needs 'file'"}), 400
+    dry_run = bool(data.get("dry_run"))
+    only = set(data.get("keys") or [])
+
+    path = os.path.join(COMPOSE_DIR, f"{name}.yml")
+    if not os.path.isfile(path):
+        path = os.path.join(COMPOSE_DIR, f"{name}.yaml")
+    if not os.path.isfile(path):
+        return jsonify({"error": f"no compose file '{name}' in the store"}), 404
+    with open(path, errors="replace") as f:
+        text = f.read()
+
+    findings = secretscan.scan_text(text, source=name)
+    actionable = [f for f in findings
+                  if f["severity"] not in ("placeholder", "hashed")
+                  and (not only or f["key"] in only)]
+    skipped = [f for f in findings if f not in actionable]
+    if not actionable:
+        return jsonify({"file": name, "quarantined": [], "skipped": secretscan.public(skipped),
+                        "note": "nothing actionable"})
+
+    # Same key twice in one file (a password repeated across two services) must
+    # agree, or we cannot store one value under one field name.
+    values = {}
+    for f in actionable:
+        prev = values.get(f["key"])
+        if prev is not None and prev != f["value"]:
+            return jsonify({"error": f"'{f['key']}' appears twice in {name} with "
+                                     f"different values — resolve by hand"}), 409
+        values[f["key"]] = f["value"]
+
+    bao_path = _bao_path_for(name)
+    new_text, changed = secretscan.redact_text(text, actionable)
+    refs = {k: f"bao://{SECRETSCAN_MOUNT}/{bao_path}#{k}" for k in sorted(values)}
+
+    if dry_run:
+        return jsonify({"file": name, "dry_run": True,
+                        "would_store": sorted(values), "bao_path": f"{SECRETSCAN_MOUNT}/{bao_path}",
+                        "refs": refs, "skipped": secretscan.public(skipped),
+                        "diff_lines": sorted({f["line"] for f in actionable})})
+
+    try:
+        bao.write_secret(SECRETSCAN_MOUNT, bao_path, values)
+        # Read back before touching the file. A write that reported success but
+        # stored nothing would otherwise be discovered only after redaction.
+        stored = bao.read_secret(SECRETSCAN_MOUNT, bao_path, use_cache=False)
+        missing = [k for k, v in values.items() if stored.get(k) != v]
+        if missing:
+            raise bao.BaoError(f"read-back mismatch for {missing}")
+    except bao.BaoError as e:
+        emit_event("secrets", action="quarantine_failed", file=name, error=str(e))
+        return jsonify({"error": f"OpenBao write failed, file left untouched: {e}"}), 502
+
+    backup = f"{path}.bak-prequarantine-{int(time.time())}"
+    try:
+        with open(backup, "w") as f:
+            f.write(text)
+        with open(path, "w") as f:
+            f.write(new_text)
+    except OSError as e:
+        return jsonify({"error": f"secrets stored in OpenBao but the store file "
+                                 f"could not be rewritten: {e}"}), 500
+
+    queued = _queue_redactions(name, sorted(values), refs)
+    emit_event("secrets", action="quarantined", file=name,
+               keys=sorted(values), bao_path=f"{SECRETSCAN_MOUNT}/{bao_path}",
+               units=queued)
+    if GIT_AUTO_PUSH:
+        _git_push_event.set()
+    print(f"🔐 QUARANTINED {len(changed)} credential(s) from {name} → "
+          f"{SECRETSCAN_MOUNT}/{bao_path}; redaction queued for {queued or 'no unit'}")
+    return jsonify({"file": name, "quarantined": sorted(values),
+                    "bao_path": f"{SECRETSCAN_MOUNT}/{bao_path}", "refs": refs,
+                    "store_backup": backup, "units_queued": queued,
+                    "skipped": secretscan.public(skipped)})
+
+
+def _queue_redactions(compose_name, keys, refs):
+    """Tell whichever unit runs this container to strip the same lines locally.
+
+    The command carries only key names and bao:// references, never a value —
+    /api/commands/pending is unauthenticated.
+    """
+    units = set()
+    with lock:
+        services = dict(registry.get("services") or {})
+    for svc_name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        if (svc.get("name") or svc_name or "").lower() != compose_name.lower():
+            continue
+        # ONLINE only. The registry still carries unit1 as the host of half the
+        # estate — that laptop has been dead for months — and queuing a
+        # redaction there would park a command nobody ever collects while the
+        # unit actually running the container keeps its plaintext copy.
+        if str(svc.get("status", "")).upper() != "ONLINE":
+            continue
+        unit = svc.get("host")
+        if unit and unit != "external":
+            units.add(unit)
+    for unit in sorted(units):
+        _queue_command(unit, compose_name, "redact_env", source="secret_sweep",
+                       extra={"keys": list(keys), "refs": refs})
+    return sorted(units)
+
+
+def bao_token_renewer():
+    """Keep the broker's periodic token alive.
+
+    A periodic token never expires WHILE it is renewed, and dies without a
+    sound the moment renewal stops. Renewing at a fraction of the remaining TTL
+    means a few missed passes (a locator restart, a bao restart) cost nothing.
+    """
+    while True:
+        try:
+            st = bao.status()
+            if not st.get("token_ok"):
+                # Not configured yet is the normal state before
+                # provision-bao-broker.sh has been run; don't spam about it.
+                time.sleep(300)
+                continue
+            ttl = st.get("token_ttl_seconds") or 0
+            if ttl and ttl < 7 * 24 * 3600:
+                lease = bao.renew_self()
+                print(f"🔐 OpenBao broker token renewed — lease now {lease}s")
+            time.sleep(max(3600, min(int(ttl / 4) if ttl else 3600, 21600)))
+        except bao.BaoError as e:
+            print(f"⚠️  OpenBao token renewal failed: {e}")
+            time.sleep(600)
+        except Exception as e:
+            print(f"⚠️  token renewer error: {e}")
+            time.sleep(600)
+
+
+def secret_sweeper():
+    """Background pass over the compose store. Reports only — never edits."""
+    if not SECRETSCAN_ENABLED:
+        print("🔐 secret sweeper disabled (SECRETSCAN_ENABLED=false)")
+        return
+    known = set()
+    while True:
+        try:
+            findings, files = _scan_store()
+            with _scan_lock:
+                _scan_cache.update({"at": datetime.now(timezone.utc).isoformat(),
+                                    "findings": findings, "files": files})
+            # Alert on what is NEW since the last pass. Re-announcing 27 known
+            # findings every 15 minutes trains everyone to ignore the channel.
+            seen = {(f["source"], f["key"], f["severity"]) for f in findings}
+            fresh = seen - known
+            if fresh and known:
+                for source, key, sev in sorted(fresh):
+                    print(f"🔐 NEW plaintext credential: {source} → {key} ({sev})")
+                    emit_event("secrets", action="exposed", file=source,
+                               key=key, severity=sev)
+            elif fresh:
+                print(f"🔐 secret sweep: {len(findings)} plaintext credential(s) "
+                      f"across {files} compose file(s) — GET /api/secrets/scan")
+            known = seen
+        except Exception as e:
+            print(f"⚠️  secret sweeper error: {e}")
+        time.sleep(SECRETSCAN_INTERVAL)
+
+
+@app.route("/api/exec", methods=["POST"])
+def queue_exec():
+    """Queue a shell command/script to run on a unit's lokey. Requires admin key —
+    this is remote code execution across the fleet, gated accordingly."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    unit   = (data.get("unit") or "").strip()
+    script = data.get("script") or ""
+    label  = data.get("label")
+    if not unit or not script.strip():
+        return jsonify({"error": "Provide 'unit' and 'script'"}), 400
+    cmd = _queue_exec_command(unit, script, source="manual", label=label)
+    return jsonify({"result": "queued", "command": cmd})
+
+
+@app.route("/api/commands", methods=["GET"])
+def list_commands():
+    """List recent commands (container + exec), newest first. Requires admin key
+    since exec commands carry script text/output that may be sensitive."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    unit = request.args.get("unit")
+    with command_lock:
+        cmds = [dict(c) for c in command_queue.values() if not unit or c["unit"] == unit]
+    cmds.sort(key=lambda c: c["queued_at"], reverse=True)
+    return jsonify(cmds[:200])
+
+
+@app.route("/api/commands/<cmd_id>", methods=["GET"])
+def get_command(cmd_id):
+    """Fetch a single command's status/output — used to poll an exec job to completion."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    with command_lock:
+        cmd = command_queue.get(cmd_id)
+        if not cmd:
+            return jsonify({"error": "unknown command"}), 404
+        return jsonify(dict(cmd))
+
+
+# ── SCRIPT SCHEDULER ─────────────────────────────────────────────────────────
+# Recurring exec jobs: "run this script on this unit every N" registered once,
+# fired forever by script_scheduler() below via the same _queue_exec_command
+# path a one-off /api/exec call uses.
+#
+# Two ways to say when. `interval` (reuses _parse_duration, e.g. "24h") counts
+# forward from the last firing, so its clock drifts by however long locator was
+# restarting — a job meant for 08:00 slides later every week. `times`
+# (["08:00","20:00"], UTC) pins the job to wall-clock slots instead, which is
+# what the fleet refresh needs to keep the staggered per-unit ordering the
+# crontabs had. Still not cron: no day-of-week or day-of-month.
+
+scheduled_jobs: dict = {}
+schedule_lock = threading.Lock()
+SCHEDULE_FILE = os.path.join(DATA_DIR, "scheduled_jobs.json")
+SCHEDULE_CHECK_INTERVAL = int(os.environ.get("SCHEDULE_CHECK_INTERVAL", 30))
+
+
+def _parse_times(value):
+    """['08:00', '20:00'] or '08:00,20:00' → sorted [(h, m), …]. [] if unusable."""
+    if not value:
+        return []
+    if isinstance(value, str):
+        value = [p for p in re.split(r"[,\s]+", value) if p]
+    out = []
+    for item in value:
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})", str(item).strip())
+        if not m:
+            continue
+        hour, minute = int(m.group(1)), int(m.group(2))
+        if 0 <= hour < 24 and 0 <= minute < 60:
+            out.append((hour, minute))
+    return sorted(set(out))
+
+
+def _next_wall_clock(times, after=None):
+    """Next UTC datetime matching one of `times`, strictly after `after`."""
+    after = after or datetime.now(timezone.utc)
+    for day in (0, 1):
+        base = (after + timedelta(days=day)).replace(second=0, microsecond=0)
+        for hour, minute in times:
+            candidate = base.replace(hour=hour, minute=minute)
+            if candidate > after:
+                return candidate
+    return after + timedelta(days=1)
+
+
+def _advance_job(job, now=None):
+    """Set job['next_run'] to its next firing. Wall-clock jobs land on their
+    next slot; interval jobs count forward from now, as they always did."""
+    now = now or datetime.now(timezone.utc)
+    times = _parse_times(job.get("times"))
+    if times:
+        job["next_run"] = _next_wall_clock(times, now).isoformat()
+    else:
+        job["next_run"] = (now + timedelta(seconds=job["interval_seconds"])).isoformat()
+    return job["next_run"]
+
+
+def persist_schedule():
+    """Write scheduled_jobs to disk so registrations survive a restart/redeploy."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with schedule_lock:
+            snapshot = json.dumps(list(scheduled_jobs.values()), indent=2)
+        with open(SCHEDULE_FILE, "w") as f:
+            f.write(snapshot)
+    except Exception as e:
+        print(f"⚠️  Failed to persist schedule: {e}")
+
+
+def load_schedule():
+    """Load scheduled_jobs from disk on startup, if present.
+
+    A job whose next_run is already in the past was due while locator was down.
+    Firing every one of those on boot would stampede the fleet (every unit
+    refreshing at once, hours off schedule), so instead each is recorded as a
+    MISSED run against its unit and rolled forward to the next slot. That way a
+    locator outage shows up in the same place as a failed run rather than as
+    silence — which is exactly how the last outage went unnoticed.
+    """
+    if not os.path.exists(SCHEDULE_FILE):
+        return
+    try:
+        with open(SCHEDULE_FILE) as f:
+            jobs = json.load(f)
+        now = datetime.now(timezone.utc)
+        missed = []
+        with schedule_lock:
+            for job in jobs:
+                scheduled_jobs[job["id"]] = job
+                if not job.get("enabled", True):
+                    continue
+                try:
+                    due = datetime.fromisoformat(job["next_run"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if due < now:
+                    missed.append((dict(job), due))
+                    _advance_job(job, now)
+        print(f"📅 Loaded {len(jobs)} scheduled job(s) from disk")
+        for job, due in missed:
+            _record_missed_run(job, due, now)
+        if missed:
+            persist_schedule()
+    except Exception as e:
+        print(f"⚠️  Failed to load schedule: {e}")
+
+
+def _record_missed_run(job, due, now=None):
+    """Log a firing that never happened because locator was not running."""
+    now = now or datetime.now(timezone.utc)
+    late = round((now - due).total_seconds() / 60)
+    cmd = {
+        "id": str(uuid.uuid4())[:8], "unit": job.get("unit"), "action": "exec",
+        "label": job.get("label"), "source": "scheduled", "script": job.get("script"),
+        "job_id": job.get("id"), "status": "MISSED", "success": False,
+        "queued_at": due.isoformat(), "completed_at": now.isoformat(),
+        "exit_code": None, "stdout": None, "stderr": None,
+    }
+    reason = f"locator was not running at the scheduled time ({late} min late, run skipped)"
+    print(f"⌛ SCHEDULE MISSED: {job.get('label') or job.get('id')} on {job.get('unit')} — {reason}")
+    _record_run(cmd)
+    _update_run(cmd, error=reason)
+    _emit_run_event(cmd, error=reason)
+
+
+def script_scheduler():
+    """Fires due scheduled exec jobs. Runs forever in a daemon thread."""
+    while True:
+        time.sleep(SCHEDULE_CHECK_INTERVAL)
+        now = datetime.now(timezone.utc)
+        try:
+            with schedule_lock:
+                due = [dict(j) for j in scheduled_jobs.values()
+                       if j.get("enabled", True) and j.get("next_run")
+                       and datetime.fromisoformat(j["next_run"]) <= now]
+            for job in due:
+                cmd = _queue_exec_command(job["unit"], job["script"], source="scheduled",
+                                           label=job.get("label"), job_id=job["id"])
+                with schedule_lock:
+                    live = scheduled_jobs.get(job["id"])
+                    if live:
+                        live["last_run"] = now.isoformat()
+                        live["last_command_id"] = cmd["id"]
+                        _advance_job(live, now)
+                print(f"📅 SCHEDULED EXEC fired: job {job['id']} ('{job['script'][:60]}') on {job['unit']}")
+            if due:
+                persist_schedule()
+        except Exception as e:
+            print(f"⚠️ Error in script scheduler: {e}")
+
+
+@app.route("/api/schedule", methods=["POST"])
+def create_schedule():
+    """Register a recurring exec job.
+
+    Body: {unit, script, label?} plus EITHER 'interval' ('3600'/'90m'/'24h',
+    the same shorthand idle timeouts use) OR 'times' (["08:00","20:00"], UTC
+    wall-clock slots). Wall-clock is the right choice for anything that should
+    land at a particular hour; interval for "every N regardless of when".
+    """
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    unit     = (data.get("unit") or "").strip()
+    script   = data.get("script") or ""
+    interval = data.get("interval")
+    label    = data.get("label")
+    times    = _parse_times(data.get("times"))
+    if not unit or not script.strip() or (not interval and not times):
+        return jsonify({"error": "Provide 'unit', 'script', and either 'interval' or 'times'"}), 400
+    if data.get("times") and not times:
+        return jsonify({"error": f"Couldn't parse times {data.get('times')!r} — expected e.g. [\"08:00\",\"20:00\"]"}), 400
+
+    interval_seconds = None
+    if not times:
+        interval_seconds = _parse_duration(interval, None)
+        if not interval_seconds or interval_seconds <= 0:
+            return jsonify({"error": f"Couldn't parse interval '{interval}'"}), 400
+
+    now = datetime.now(timezone.utc)
+    job_id = str(uuid.uuid4())[:8]
+    job = {
+        "id": job_id, "unit": unit, "script": script, "label": label,
+        "interval": None if times else interval,
+        "interval_seconds": interval_seconds,
+        "times": [f"{h:02d}:{m:02d}" for h, m in times] or None,
+        "enabled": True, "created_at": now.isoformat(),
+        "next_run": None, "last_run": None, "last_command_id": None,
+    }
+    _advance_job(job, now)
+    with schedule_lock:
+        scheduled_jobs[job_id] = job
+    persist_schedule()
+    when = f"at {', '.join(job['times'])} UTC" if times else f"every {interval}"
+    print(f"📅 SCHEDULE CREATED: '{script[:60]}' on {unit} {when}")
+    return jsonify({"result": "scheduled", "job": job})
+
+
+@app.route("/api/schedule", methods=["GET"])
+def list_schedule():
+    """List all registered scheduled jobs."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    with schedule_lock:
+        jobs = sorted(scheduled_jobs.values(), key=lambda j: j["created_at"], reverse=True)
+        return jsonify(jobs)
+
+
+@app.route("/api/schedule/<job_id>", methods=["DELETE"])
+def delete_schedule(job_id):
+    """Remove a scheduled job."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    with schedule_lock:
+        job = scheduled_jobs.pop(job_id, None)
+    if not job:
+        return jsonify({"error": "unknown job"}), 404
+    persist_schedule()
+    return jsonify({"result": "deleted", "id": job_id})
+
+
+@app.route("/api/schedule/<job_id>/toggle", methods=["POST"])
+def toggle_schedule(job_id):
+    """Enable/disable a scheduled job without deleting it. Body: {enabled: bool}."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    with schedule_lock:
+        job = scheduled_jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "unknown job"}), 404
+        job["enabled"] = bool(data.get("enabled", True))
+        job = dict(job)
+    persist_schedule()
+    return jsonify({"result": "ok", "job": job})
+
+
+# ── FLEET REFRESH ────────────────────────────────────────────────────────────
+# The twice-daily housekeeping run (repo sync, package updates, docker prune)
+# used to be a crontab on each unit, which meant nothing anywhere knew whether
+# it had actually run: unit8's copy of the script was truncated to 0 bytes by a
+# failed self-update on 2026-08-19 and failed silently twice a day for three
+# days, and unit4 lost its copy in the rebuild and simply stopped refreshing.
+# Locator now owns the schedule, so every run is a command_runs row and every
+# failure is an event tagged with the unit it happened on.
+
+REFRESH_LABEL  = "refresh"
+REFRESH_SCRIPT = os.environ.get(
+    "REFRESH_SCRIPT",
+    # REFRESH_NO_FANOUT keeps each unit refreshing only itself — locator is what
+    # fans out now. UNIT_NAME is passed explicitly because lokey's chroot does
+    # not change the UTS namespace, so `hostname` inside it returns a container
+    # id rather than the unit.
+    'REFRESH_NO_FANOUT=1 UNIT_NAME={unit} "$HOME/.local/bin/refresh"',
+)
+
+
+def _refresh_script_for(unit):
+    return REFRESH_SCRIPT.format(unit=unit)
+
+
+def _refresh_jobs():
+    """Registered schedule entries that are fleet-refresh jobs."""
+    with schedule_lock:
+        return [dict(j) for j in scheduled_jobs.values() if j.get("label") == REFRESH_LABEL]
+
+
+@app.route("/api/refresh/status", methods=["GET"])
+def refresh_status():
+    """Per-unit refresh health: last outcome, when, how long, and what's next.
+
+    Deliberately unauthenticated and output-free — it carries status, timings
+    and exit codes but never script text or captured output, so the dashboard
+    can render it without handing anyone the fleet's command history.
+    """
+    try:
+        latest = db.latest_run_per_unit(REFRESH_LABEL)
+    except Exception as e:
+        print(f"⚠️  Failed to read refresh status: {e}")
+        return jsonify({"error": "run history unavailable"}), 503
+
+    now = datetime.now(timezone.utc)
+    units = {}
+    for job in _refresh_jobs():
+        unit = job["unit"]
+        entry = units.setdefault(unit, {"unit": unit})
+        entry["scheduled"] = job.get("times") or job.get("interval")
+        entry["enabled"]   = job.get("enabled", True)
+        entry["next_run"]  = job.get("next_run")
+    for unit, run in latest.items():
+        entry = units.setdefault(unit, {"unit": unit})
+        entry["last_run"] = run
+        # Overdue = the last run we have is older than a full cycle. Late
+        # answers "is this unit quietly not refreshing any more", which a
+        # per-run failure alone does not.
+        try:
+            age_h = (now - datetime.fromisoformat(run["queued_at"])).total_seconds() / 3600
+            entry["hours_since_last_run"] = round(age_h, 1)
+        except (TypeError, ValueError, KeyError):
+            pass
+
+    healthy = [u for u, e in units.items() if (e.get("last_run") or {}).get("status") == "DONE"]
+    return jsonify({
+        "label": REFRESH_LABEL,
+        "checked_at": now.isoformat(),
+        "units": sorted(units.values(), key=lambda e: e["unit"]),
+        "summary": {"units": len(units), "last_run_ok": len(healthy),
+                    "last_run_not_ok": len(units) - len(healthy)},
+    })
+
+
+@app.route("/api/refresh/runs", methods=["GET"])
+def refresh_runs():
+    """Full run history including captured output. Admin-gated: the output of a
+    refresh names repos, paths and package state."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    unit  = request.args.get("unit")
+    limit = min(int(request.args.get("limit", 50)), 500)
+    label = request.args.get("label", REFRESH_LABEL)
+    try:
+        return jsonify(db.list_command_runs(unit=unit, label=(label or None), limit=limit))
+    except Exception as e:
+        print(f"⚠️  Failed to read run history: {e}")
+        return jsonify({"error": "run history unavailable"}), 503
+
+
+@app.route("/api/refresh/run", methods=["POST"])
+def refresh_run_now():
+    """Fire a refresh immediately. Body: {unit} for one, or {all: true} for
+    every unit that has a refresh job registered."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    unit = (data.get("unit") or "").strip()
+    if unit:
+        units = [unit]
+    elif data.get("all"):
+        units = sorted({j["unit"] for j in _refresh_jobs() if j.get("enabled", True)})
+    else:
+        return jsonify({"error": "Provide 'unit' or 'all': true"}), 400
+    if not units:
+        return jsonify({"error": "no refresh jobs registered"}), 404
+    queued = [_queue_exec_command(u, _refresh_script_for(u), source="manual",
+                                  label=REFRESH_LABEL)
+              for u in units]
+    return jsonify({"result": "queued", "commands": queued})
 
 
 @app.route("/api/idle/report", methods=["POST"])
@@ -2991,42 +5747,100 @@ def commands_pending():
             if unit and cmd["unit"] != unit:
                 continue
             if cmd["status"] == "DISPATCHED":
-                # Re-serve only if the lokey never reported back (crashed mid-command)
+                # Re-serve only if the lokey never reported back (crashed mid-command).
+                # Exec jobs get the long window — see EXEC_RETRY_SECONDS — because
+                # 3 minutes of silence from a refresh means "still working", not
+                # "crashed", and re-serving would run a second copy alongside it.
+                retry_after = (EXEC_RETRY_SECONDS if cmd.get("action") == "exec"
+                               else COMMAND_RETRY_SECONDS)
                 try:
                     age = (now - datetime.fromisoformat(cmd["dispatched_at"])).total_seconds()
                 except (TypeError, ValueError):
-                    age = COMMAND_RETRY_SECONDS + 1
-                if age <= COMMAND_RETRY_SECONDS:
+                    age = retry_after + 1
+                if age <= retry_after:
                     continue
             elif cmd["status"] != "PENDING":
                 continue
             cmd["status"] = "DISPATCHED"
             cmd["dispatched_at"] = now.isoformat()
             out.append(dict(cmd))
+    for cmd in out:
+        if cmd.get("action") == "exec":
+            _update_run(cmd)
     return jsonify(out)
+
+
+EXEC_OUTPUT_CAP = 20000   # chars kept per stdout/stderr field
 
 
 @app.route("/api/commands/complete", methods=["POST"])
 def commands_complete():
-    """Lokey reports command results; stop/start results update the registry."""
+    """Lokey reports command results; stop/start results update the registry,
+    exec results just carry stdout/stderr/exit_code for later retrieval."""
     data = request.get_json(silent=True) or {}
     cmd_id  = data.get("id")
     success = bool(data.get("success"))
     now = datetime.now(timezone.utc)
     with command_lock:
         cmd = command_queue.get(cmd_id)
-        if not cmd:
+    if not cmd:
+        # Not in memory — but if it is a recorded exec run, honour the report
+        # anyway. Refreshing the unit that hosts locator redeploys locator
+        # mid-run, so the result legitimately arrives after a restart that
+        # emptied the queue; refusing it there would lose exactly the outcome
+        # this is meant to capture. Anything genuinely unknown still 404s.
+        try:
+            known = db.get_command_run(cmd_id)
+        except Exception as e:
+            print(f"⚠️  Failed to look up command run {cmd_id}: {e}")
+            known = None
+        if not known:
             return jsonify({"error": "unknown command"}), 404
+        late = {
+            "id": cmd_id, "unit": known["unit"], "action": "exec",
+            "label": known.get("label"), "source": known.get("source"),
+            "script": known.get("script"), "job_id": known.get("job_id"),
+            "queued_at": known.get("queued_at"), "dispatched_at": known.get("dispatched_at"),
+            "completed_at": now.isoformat(),
+            "status": "DONE" if success else "FAILED", "success": success,
+            "stdout": str(data.get("stdout") or "")[:EXEC_OUTPUT_CAP],
+            "stderr": str(data.get("stderr") or "")[:EXEC_OUTPUT_CAP],
+            "exit_code": data.get("exit_code"),
+        }
+        print(f"{'✅' if success else '❌'} EXEC (late report) '{(late.get('label') or '')}' "
+              f"on {late['unit']}: exit {late.get('exit_code')}")
+        _update_run(late, error=None if success else "reported after a locator restart")
+        _emit_run_event(late)
+        return jsonify({"ok": True, "note": "recorded after locator restart"})
+
+    with command_lock:
         cmd["status"] = "DONE" if success else "FAILED"
         cmd["success"] = success
         cmd["completed_at"] = now.isoformat()
+        if cmd["action"] == "exec":
+            cmd["stdout"]    = str(data.get("stdout") or "")[:EXEC_OUTPUT_CAP]
+            cmd["stderr"]    = str(data.get("stderr") or "")[:EXEC_OUTPUT_CAP]
+            cmd["exit_code"] = data.get("exit_code")
         cmd = dict(cmd)
 
-    print(f"{'✅' if success else '❌'} COMMAND {cmd['action']} '{cmd['container']}' on {cmd['unit']}: {'ok' if success else 'failed'}")
+    if cmd["action"] == "exec":
+        print(f"{'✅' if success else '❌'} EXEC '{(cmd.get('script') or '')[:80]}' on {cmd['unit']}: "
+              f"{'ok' if success else 'failed'} (exit {cmd.get('exit_code')})")
+        duration_ms = None
+        try:
+            started = datetime.fromisoformat(cmd["dispatched_at"] or cmd["queued_at"])
+            duration_ms = int((now - started).total_seconds() * 1000)
+        except (TypeError, ValueError):
+            pass
+        _update_run(cmd, duration_ms=duration_ms)
+        _emit_run_event(cmd, duration_ms=duration_ms)
+        return jsonify({"ok": True})
+
+    print(f"{'✅' if success else '❌'} COMMAND {cmd['action']} '{cmd.get('container')}' on {cmd['unit']}: {'ok' if success else 'failed'}")
 
     if success:
         with lock:
-            _, svc = _find_service_entry(cmd["container"])
+            _, svc = _find_service_entry(cmd.get("container"))
             if svc:
                 if cmd["action"] == "stop":
                     svc["status"] = "OFFLINE"
@@ -3040,7 +5854,7 @@ def commands_complete():
         persist_registry()
         if cmd["action"] == "stop" and cmd["source"] == "idle":
             with _idle_lock:
-                st = _idle_state.get((cmd["unit"], cmd["container"]))
+                st = _idle_state.get((cmd["unit"], cmd.get("container")))
                 if st:
                     st["stopped_count"] += 1
     return jsonify({"ok": True})
@@ -3071,9 +5885,28 @@ def _find_service_entry(container):
 
     # An ONLINE instance is the one worth acting on; among equals prefer a
     # name@host key, since that names the host explicitly.
+    #
+    # Third key, freshest heartbeat first: duplicate records accumulate for one
+    # container (bare name, name@host, name_host) from different discovery
+    # paths and older hostname conventions, and they can ALL be OFFLINE - a
+    # STOPPED container has no online record anywhere, which is exactly when
+    # something wants to start it. With only the first two keys the choice
+    # among equals fell to insertion order. For one service that picked between a
+    # record attributed to unit1 (the dead laptop) and one to the pre-rename
+    # host "BlackSheepUnit4", which no lokey polls under - either way the start
+    # command was queued somewhere nothing would ever execute it, and the wake
+    # silently did nothing while reporting success.
+    def _hb_epoch(value):
+        try:
+            return datetime.fromisoformat(str(value)).timestamp()
+        except (TypeError, ValueError):
+            return 0.0
+
     def rank(item):
         key, s = item
-        return (0 if s.get("status") == "ONLINE" else 1, 0 if "@" in key else 1)
+        return (0 if s.get("status") == "ONLINE" else 1,
+                0 if "@" in key else 1,
+                -_hb_epoch(s.get("last_heartbeat")))
 
     candidates.sort(key=rank)
     return candidates[0]
@@ -3115,56 +5948,285 @@ def shutdown_container(name):
     return jsonify({"ok": True, "command": cmd})
 
 
+# ── PUBLIC WAKE ─────────────────────────────────────────────────────────────
+# A service that has been idle-stopped answers its front door with a 502, and
+# whoever gets that 502 has no token and no way to get one — the login is
+# often BEHIND the very service that is asleep. So /wake has to answer before
+# authentication, or the whole wake-on-request design is unreachable from a
+# browser. That is exactly what it had quietly become: wake_page sat at
+# CLIENT, Traefik's errors middleware forwards only the visitor's own headers,
+# and every anonymous hit came back {"error":"insufficient clearance"}.
+#
+# Opening it wholesale is not the answer either. Opting a container in here
+# grants an anonymous caller exactly one verb — queue a `start` for a container
+# ALREADY in the registry, deduped by _queue_command so a refresh cannot pile
+# up work — and nothing else. No registry data is disclosed: see wake_page for
+# why the page no longer reads /services/<name>.
+PUBLIC_WAKE = {n.strip() for n in os.environ.get(
+    "PUBLIC_WAKE", "forge,forge-relay,agent-0,rasa").split(",") if n.strip()}
+
+# Hostnames that ARE locator. Anything else arriving at /wake got here through
+# another service's Traefik errors middleware, which serves this page under the
+# SLEEPING SERVICE's hostname, not ours. That distinction decides how the page
+# checks back — see wake_page.
+LOCATOR_HOSTS = {h.strip().lower() for h in os.environ.get(
+    "LOCATOR_HOSTS",
+    "locator.prime-quality.online,locator.theofficialblacksheepco.online",
+).split(",") if h.strip()}
+
+# Where ?to= may send a browser. prime-quality.online is here because forge
+# lives on it: forge.theofficialblacksheepco.online was retired 2026-08-14 and
+# has no cert, so without this the one hostname that answers was the one
+# hostname the redirect refused.
+WAKE_REDIRECT_RE = re.compile(
+    r"^https://[a-z0-9.-]+\.(?:theofficialblacksheepco\.(?:com|info|online|store)"
+    r"|prime-quality\.online)(?:/|$)")
+
+
+def _is_locator_origin(host):
+    """True when this request was addressed to locator itself."""
+    host = (host or "").lower()
+    bare = host.split(":")[0]
+    if host in LOCATOR_HOSTS or bare in LOCATOR_HOSTS:
+        return True
+    if bare.split(".")[0] == "locator":
+        return True
+    # Traefik reaches us at http://100.82.31.92:50500 over the tailnet.
+    return bool(bare) and bare.replace(".", "").isdigit()
+
+
+def _wake_policy(container):
+    """This container's wake stanza from locator.yml, or {}."""
+    return load_policy().get(str(container).strip().lower(), {})
+
+
+def _may_wake(container):
+    """CLIENT and above may wake anything; anonymous only the opted-in.
+
+    locator.yml is checked FIRST and is the real answer — it reloads on mtime
+    change, so opting a new service in is a YAML edit rather than a rebuild of
+    an image that has the list frozen inside it. PUBLIC_WAKE stays as the
+    escape hatch for a container with no policy stanza at all.
+    """
+    principal = getattr(g, "principal", None)
+    if principal is not None and principal.level >= clearance.CLIENT:
+        return True
+    if _wake_policy(container).get("public_wake"):
+        return True
+    return container in PUBLIC_WAKE
+
+
+def _wake_companions(container):
+    """Dependencies locator.yml says must come up with this container.
+
+    Kept here rather than in each caller so a Traefik file or a link asks for
+    ONE name: /wake/reech starts reech's database too, without reech.yml or the
+    portal's HTML having to know that the database exists.
+    """
+    return [d for d in _wake_policy(container).get("wake_with", [])
+            if d and d != container]
+
+
+@app.route("/api/wake/triggers", methods=["GET"])
+def wake_triggers():
+    """Which container a trigger should wake, straight from locator.yml.
+
+    This is the half that stops the mapping rotting. Before it, every entry
+    point hardcoded a container name and a hostname of its own — the welcome
+    card, the Traefik file, the frontend constant — and they drifted apart
+    silently: a card still pointed at a hostname retired months earlier, and
+    nothing anywhere would have told you. A page can now ASK:
+
+        GET /api/wake/triggers?domain=search.theofficialblacksheepco.com
+        -> {"domain": "...", "container": "searchsearcher-app", ...}
+
+    and then GET /wake/<container>, so renaming a container or moving a
+    hostname is a locator.yml edit and every entry point follows.
+
+    Only containers carrying public_wake are listed. Everything here is
+    already public by construction — a hostname a browser just visited and the
+    container name it is allowed to wake — so there is nothing to redact, and
+    no registry record is reachable through it.
+    """
+    # Look up by ANY trigger kind — ?domain=… or ?link=… — because the kinds
+    # live in locator.yml, not in this function. A kind added to the YAML
+    # tomorrow is queryable the same day with no code change here; hardcoding
+    # `domain` was how the previous mapping calcified in the first place.
+    query = {k.strip().lower(): v.strip().lower()
+             for k, v in request.args.items() if v and v.strip()}
+
+    # A caller passing a full URL for a domain should not have to remember to
+    # strip it first.
+    if "domain" in query:
+        d = query["domain"]
+        if "://" in d:
+            d = d.split("://", 1)[1]
+        query["domain"] = d.split("/")[0].split(":")[0]
+
+    out = {}
+    for name, cfg in load_policy().items():
+        if not cfg.get("public_wake"):
+            continue
+        triggers = cfg.get("wake_triggers") or {}
+        if query:
+            matched = any(
+                value in [t.lower() for t in triggers.get(kind, [])]
+                for kind, value in query.items()
+            )
+            if not matched:
+                continue
+            return jsonify({
+                "matched": query,
+                "container": name,
+                "wake_url": f"/wake/{name}",
+                "wake_with": cfg.get("wake_with", []),
+            })
+        out[name] = {
+            "triggers": triggers,
+            "wake_with": cfg.get("wake_with", []),
+            "wake_url": f"/wake/{name}",
+        }
+    if query:
+        return jsonify({"matched": query, "container": None,
+                        "error": "no container declares this trigger"}), 404
+    return jsonify({"containers": out, "count": len(out)})
+
+
 @app.route("/wake/<container>", methods=["GET"])
 def wake_page(container):
-    """Click-to-wake: queue the start command and show a page that redirects
-    to the service once lokey reports it back ONLINE."""
+    """Click-to-wake: queue the start command and show a page that comes back
+    once the service is up.
+
+    Accepts a COMMA-SEPARATED list ("reech,reech-oauth") so one request wakes a
+    service together with the dependencies it calls directly -- ones reached
+    over the docker network or tailnet rather than through Traefik, so no HTTP
+    request ever passes through them and nothing in the request path can wake
+    them on its own. (The LLM backend is llama.cpp under systemd on unit7 and
+    is never idle-stopped, so nothing needs waking for it.)
+
+    The FIRST name is the primary: it is what gets displayed, waited on, and
+    redirected to. The rest are started silently.
+
+    HOW THE PAGE CHECKS BACK, and why it depends on who asked. Served through
+    a Traefik errors middleware, this HTML is returned as the body of the
+    sleeping service's OWN response — the browser's address bar still reads
+    https://forge.prime-quality.online/. A relative fetch("/services/forge")
+    from there does not reach locator at all; it goes back to forge's router,
+    which is the thing that is down. That is a second break, independent of the
+    clearance one: the old poll could not have worked from a foreign host even
+    with a token. So in that case the page simply RE-REQUESTS the original URL
+    — no cross-origin call, no CORS, no credentials, and the retry is the real
+    service answering for itself. Only when the visitor is on locator's own
+    origin (the dashboard) does it poll /services/<name> and follow `target`,
+    which is where that endpoint is same-origin and the caller is already
+    authenticated above CUSTOMER.
+    """
+    names = [n.strip() for n in str(container).split(",") if n.strip()]
+    if names:
+        container = names[0]
+    # Gate the primary BEFORE queueing anything, so a name nobody opted in
+    # cannot be started by an anonymous caller as a side effect.
+    if not _may_wake(container):
+        return Response(f"'{container}' is not publicly wakeable",
+                        status=403, mimetype="text/plain")
+    # Explicit extras from the URL, plus whatever locator.yml says travels with
+    # this container. The policy list is the one that should grow over time —
+    # a caller naming its own dependencies has to be updated everywhere it is
+    # written down, which is the failure this whole change is undoing.
+    extras = list(names[1:])
+    for dep in _wake_companions(container):
+        if dep not in extras:
+            extras.append(dep)
+    for extra in extras:
+        if not _may_wake(extra):
+            continue
+        extra_unit = _find_container_unit(extra)
+        # A dependency that is unknown to the registry must never block the
+        # primary from waking - best effort, and the primary still proceeds.
+        if extra_unit:
+            _queue_command(extra_unit, extra, "start", source="wake")
     unit = _find_container_unit(container)
     if not unit:
         return Response(f"Unknown container '{container}'", status=404)
     _queue_command(unit, container, "start", source="wake")
     # Optional explicit redirect target (?to=...), restricted to our own domains
     target = request.args.get("to", "")
-    if target and not re.match(
-            r"^https://[a-z0-9.-]+\.theofficialblacksheepco\.(com|info|online|store)(/|$)", target):
+    if target and not WAKE_REDIRECT_RE.match(target):
         target = ""
     if not target:
         with lock:
             _, svc = _find_service_entry(container)
             target = (svc or {}).get("url", "") or ""
+    own_origin = _is_locator_origin(request.host)
     html = f"""<!doctype html>
-<html><head><title>Waking {container}…</title>
+<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Service starting</title>
 <style>
-  body {{ background:#0a0e14; color:#e6e6e6; font-family:monospace;
+  :root {{ color-scheme:dark; --ink:#eef7f1; --muted:#a6b8ad; --accent:#7de0b0; }}
+  * {{ box-sizing:border-box; }}
+  body {{ background:linear-gradient(145deg,#10251d,#172c27 52%,#0b1512);
+         color:var(--ink); font-family:system-ui,-apple-system,Segoe UI,sans-serif;
          display:flex; align-items:center; justify-content:center;
-         height:100vh; margin:0; }}
-  .box {{ text-align:center; }}
-  .pulse {{ font-size:3rem; animation:p 1.2s infinite; }}
-  @keyframes p {{ 50% {{ opacity:.3; }} }}
+         min-height:100vh; margin:0; padding:24px; }}
+  .box {{ width:min(560px,100%); text-align:center; border:1px solid rgba(125,224,176,.35);
+          border-radius:24px; padding:42px 30px; background:rgba(8,18,14,.68);
+          box-shadow:0 24px 80px rgba(0,0,0,.3); }}
+  .mark {{ width:58px; height:58px; margin:0 auto 20px; border-radius:18px;
+           display:grid; place-items:center; color:#10251d; background:var(--accent);
+           font-size:27px; font-weight:800; animation:p 1.4s ease-in-out infinite; }}
+  h1 {{ margin:0; font-size:25px; letter-spacing:-.03em; }}
+  p {{ color:var(--muted); line-height:1.6; font-size:14px; }}
+  .status {{ margin-top:22px; padding:11px 14px; border-radius:12px;
+             background:rgba(125,224,176,.1); color:var(--accent); font-size:12px; }}
+  @keyframes p {{ 50% {{ transform:translateY(-5px); opacity:.65; }} }}
 </style></head>
 <body><div class="box">
-  <div class="pulse">💤 → 🟢</div>
-  <h2>Waking {container} on {unit}…</h2>
-  <p id="status">start command queued — usually under a minute</p>
+  <div class="mark">↗</div>
+  <h1>Service starting</h1>
+  <p>{container} is starting on {unit}. You will be returned automatically when it is ready.</p>
+  <div class="status" id="status">Start command queued — usually under a minute</div>
 </div>
 <script>
   const target = {json.dumps(target)};
+  const ownOrigin = {json.dumps(bool(own_origin))};
+  const RETRY_MS = 5000;
+  const MAX_TRIES = 48;              // 4 minutes, then stop and say so
+  const el = document.getElementById("status");
+  let tries = 0;
+
+  function gaveUp() {{
+    el.textContent = "still starting after "
+      + Math.round(MAX_TRIES * RETRY_MS / 60000) + " min — reload to keep waiting";
+  }}
+
+  // Served under the sleeping service's own hostname: the retry IS the
+  // service answering for itself, so just ask for this URL again.
+  function retryHere() {{
+    if (++tries > MAX_TRIES) return gaveUp();
+    el.textContent = "waiting for {container} — retry " + tries + " of " + MAX_TRIES;
+    setTimeout(() => location.reload(), RETRY_MS);
+  }}
+
+  // On locator's own origin the registry is same-origin and the caller is
+  // already authenticated, so watch the record flip and follow the target.
   async function poll() {{
+    if (++tries > MAX_TRIES) return gaveUp();
     try {{
       const r = await fetch("/services/{container}");
       if (r.ok) {{
         const svc = await r.json();
         if (svc.status === "ONLINE") {{
-          document.getElementById("status").textContent = "awake — redirecting…";
+          el.textContent = "awake — redirecting…";
           if (target) {{ location.href = target; return; }}
-          document.getElementById("status").textContent = "awake ✓";
+          el.textContent = "awake ✓";
           return;
         }}
       }}
     }} catch (e) {{}}
-    setTimeout(poll, 5000);
+    el.textContent = "waiting for {container} — check " + tries + " of " + MAX_TRIES;
+    setTimeout(poll, RETRY_MS);
   }}
-  poll();
+
+  if (ownOrigin) {{ poll(); }} else {{ retryHere(); }}
 </script></body></html>"""
     return Response(html, mimetype="text/html")
 
@@ -3199,6 +6261,71 @@ CERT_WARN_DAYS = int(os.environ.get("CERT_WARN_DAYS", 21))
 _cert_state: dict = {}   # unit -> {"reported_at": iso, "certs": [...]}
 _cert_lock = threading.Lock()
 
+# Cert state is the ONLY input to renewals.py's mTLS inventory, and lokey only
+# pushes it every CERT_CHECK_TICKS (~6h). Held purely in memory, every locator
+# restart blanked it and the hourly credential renewer then saw zero mesh
+# leaves for up to six hours -- which is how unit8-mesh reached 2 days from
+# expiry under a rule that is supposed to reissue at 7. Persist it like the
+# registry and the schedule.
+CERT_STATE_FILE = os.path.join(DATA_DIR, "cert_state.json")
+# A report older than this is not trustworthy enough to renew from; the unit
+# has almost certainly changed since. Dropped on load rather than aged.
+CERT_STATE_MAX_AGE_DAYS = 7
+
+
+def persist_cert_state():
+    """Write _cert_state to disk so the renewal inventory survives a restart."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with _cert_lock:
+            snapshot = json.dumps(_cert_state, indent=2)
+        tmp = CERT_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(snapshot)
+        os.replace(tmp, CERT_STATE_FILE)
+    except Exception as e:
+        print(f"WARN Failed to persist cert state: {e}")
+
+
+def load_cert_state():
+    """Reload cert state on startup, ageing days_left by the time we were down.
+
+    days_left is a snapshot taken when the unit reported, so a stale entry
+    overstates the remaining life by exactly the time since reported_at. Ageing
+    it here keeps the 7-day renewal decision honest instead of resetting the
+    clock on every restart. Entries too old to trust are dropped, and the next
+    lokey report replaces them wholesale anyway.
+    """
+    if not os.path.exists(CERT_STATE_FILE):
+        return
+    try:
+        with open(CERT_STATE_FILE) as f:
+            saved = json.load(f)
+        now = datetime.now(timezone.utc)
+        loaded = aged = 0
+        with _cert_lock:
+            for unit, info in (saved or {}).items():
+                try:
+                    reported = datetime.fromisoformat(info["reported_at"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                days_down = (now - reported).total_seconds() / 86400.0
+                if days_down > CERT_STATE_MAX_AGE_DAYS:
+                    continue
+                certs = []
+                for c in info.get("certs") or []:
+                    c = dict(c)
+                    if isinstance(c.get("days_left"), (int, float)):
+                        c["days_left"] = int(c["days_left"] - days_down)
+                        aged += 1
+                    certs.append(c)
+                _cert_state[unit] = {"reported_at": info["reported_at"], "certs": certs}
+                loaded += 1
+        if loaded:
+            print(f"cert state restored: {loaded} unit(s), {aged} cert(s) aged forward")
+    except Exception as e:
+        print(f"WARN Failed to load cert state: {e}")
+
 
 @app.route("/api/certs/report", methods=["POST"])
 def certs_report():
@@ -3212,11 +6339,82 @@ def certs_report():
             "reported_at": datetime.now(timezone.utc).isoformat(),
             "certs": certs,
         }
+    persist_cert_state()
     for c in certs:
         if c.get("error") or (c.get("days_left") is not None and c["days_left"] < CERT_WARN_DAYS):
             print(f"🔐 CERT WARNING [{unit}] {c.get('host')}: "
                   f"{c.get('error') or str(c.get('days_left')) + ' days left'}")
     return jsonify({"ok": True, "received": len(certs)})
+
+
+@app.route("/api/certs/issue", methods=["POST"])
+def certs_issue():
+    """Mint an internal mTLS leaf from the fleet PKI. Admin key required.
+
+    This is the issue-side counterpart to /api/secrets/resolve: lokey (or a
+    node bootstrapping its edge) posts a role + CN and gets back a freshly
+    signed cert+key, so the broker token that can talk to OpenBao's PKI lives
+    ONLY here — no node ever holds it, exactly as with the KV broker.
+
+    Body:
+      {"role": "haproxy-client", "common_name": "haproxy.unit4.fleet",
+       "alt_names": ["..."], "ip_sans": ["..."], "ttl": "168h",
+       "bundle": true}
+
+    `bundle` (default true) also returns `pem_chain` = cert + issuing CA and
+    `pem_haproxy` = private key + cert + CA in the single-file order HAProxy's
+    `crt` directive wants, so the caller writes one file instead of stitching
+    three. The private key is returned exactly once, here, over the tailnet-only
+    admin channel; it is never logged or stored on this side.
+    """
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    role = (data.get("role") or "").strip()
+    cn = (data.get("common_name") or "").strip()
+    if not role or not cn:
+        return jsonify({"error": "body needs 'role' and 'common_name'"}), 400
+    try:
+        issued = bao.issue_cert(
+            role, cn,
+            alt_names=data.get("alt_names"),
+            ip_sans=data.get("ip_sans"),
+            ttl=data.get("ttl"),
+        )
+    except bao.BaoError as e:
+        emit_event("certs", action="issue_failed", role=role, cn=cn, error=str(e))
+        return jsonify({"error": str(e), "role": role}), 502
+
+    cert = issued.get("certificate", "")
+    key = issued.get("private_key", "")
+    ca = issued.get("issuing_ca", "")
+    out = {
+        "certificate": cert,
+        "private_key": key,
+        "issuing_ca": ca,
+        "ca_chain": issued.get("ca_chain", []),
+        "serial_number": issued.get("serial_number"),
+        "expiration": issued.get("expiration"),
+    }
+    if data.get("bundle", True):
+        def _nl(s):  # PKI omits the trailing newline; concatenation needs it
+            return s if s.endswith("\n") else s + "\n"
+        out["pem_chain"] = _nl(cert) + _nl(ca)
+        out["pem_haproxy"] = _nl(key) + _nl(cert) + _nl(ca)
+    emit_event("certs", action="issued", role=role, cn=cn,
+               serial=out["serial_number"])
+    return jsonify(out)
+
+
+@app.route("/api/renewals", methods=["GET"])
+def renewals_status():
+    """Every credential the fleet tracks an expiry for, and what is due.
+
+    Read-only and unauthenticated on purpose: it carries expiry dates and
+    names, never a secret value — the same shape as /api/certs/status.
+    """
+    return jsonify(renewals.snapshot())
 
 
 @app.route("/api/certs/status", methods=["GET"])
@@ -3338,10 +6536,16 @@ def active_discovery_scanner():
                             node["last_seen"] = now
                             changed = True
                         elif node.get("status") == "ONLINE":
-                            node["status"] = "OFFLINE"
+                            # Traefik being unreachable says Traefik is down, not
+                            # that the machine is. Demoting straight to OFFLINE
+                            # here was the same wrong inference the lokey path
+                            # made. Park it as AGENT_DOWN and leave last_seen
+                            # stale so the reaper's reachability probe makes the
+                            # real call on the next pass.
+                            node["status"] = NODE_STATUS_AGENT_DOWN
                             node["last_seen"] = node.get("last_seen") or now
                             changed = True
-                            print(f"💀 NODE OFFLINE (traefik unreachable): {node_name}")
+                            print(f"⚠️  NODE AGENT DOWN: {node_name} (traefik unreachable)")
 
         if changed:
             persist_registry()
@@ -3351,6 +6555,30 @@ def active_discovery_scanner():
 
 
 # ── WEBSITE PINGER ───────────────────────────────────────────────────────────
+
+# Hosts fronted by Sablier, which starts their container on demand and stops it
+# again when idle. Polling one of these IS traffic: the uptime check wakes the
+# container, Sablier expires the session, the next check wakes it again, and the
+# service never actually sleeps. Monitoring has to leave them alone to work.
+ON_DEMAND_HOSTS = {
+    h.strip().lower()
+    for h in os.environ.get(
+        "ON_DEMAND_HOSTS",
+        "pgadmin.theofficialblacksheepco.com,a0.theofficialblacksheepco.online"
+    ).split(",")
+    if h.strip()
+}
+
+
+def _is_on_demand_url(url):
+    """True when this URL points at a Sablier-managed host — do not poll it."""
+    from urllib.parse import urlparse
+    try:
+        host = urlparse(str(url or "")).hostname or ""
+    except Exception:
+        return False
+    return host.lower() in ON_DEMAND_HOSTS
+
 
 def website_pinger():
     """Discovers websites from Docker Traefik labels, registers them using container status."""
@@ -3414,7 +6642,8 @@ def url_status_checker():
         with lock:
             targets = [(sid, svc.get("url")) for sid, svc in registry["services"].items()
                        if svc.get("category") in ("websites", "serverless")
-                       and str(svc.get("url", "")).startswith("http")]
+                       and str(svc.get("url", "")).startswith("http")
+                       and not _is_on_demand_url(svc.get("url"))]
 
         changed = False
         for sid, url in targets:
@@ -3447,60 +6676,90 @@ def url_status_checker():
         time.sleep(URL_CHECK_INTERVAL)
 
 
-# ── CRITICAL SERVICE WATCHDOG ────────────────────────────────────────────────
-
-# Services that must always be running — immediately queued for restart on OFFLINE
-_WATCHDOG_SERVICES = {
-    "apache",       # welcome site (unit2)
-    "lokey",        # lokey agent (all units)
-    "lokey-client", # lokey agent alt name
-    "locator",      # self (Docker restart=always is primary; this catches lokey-reported gaps)
-}
-_watchdog_cooldown: dict = {}   # key: (unit, container) → datetime of last restart attempt
-WATCHDOG_INTERVAL  = 15         # seconds between watchdog scans
-WATCHDOG_COOLDOWN  = 90         # seconds before re-queuing restart for same service
-WATCHDOG_MAX_AGE   = 3 * 86400  # ignore services OFFLINE for more than 3 days (stale entries)
-
-def critical_service_watchdog():
-    """Immediately queues a start command when a critical service goes OFFLINE."""
-    while True:
-        time.sleep(WATCHDOG_INTERVAL)
-        now = datetime.now(timezone.utc)
-        with lock:
-            services_snap = {k: dict(v) for k, v in registry["services"].items()}
-            nodes_snap    = {k: dict(v) for k, v in registry["nodes"].items()}
-
-        for name, svc in services_snap.items():
-            base = name.split("@")[0].lower()
-            if not any(w == base for w in _WATCHDOG_SERVICES):
-                continue
-            if svc.get("status") != "OFFLINE":
-                continue
-            unit = svc.get("host", "")
-            if not unit:
-                continue
-            # Skip units that are themselves OFFLINE — commands will never be consumed
-            if nodes_snap.get(unit, {}).get("status") != "ONLINE":
-                continue
-            # Skip stale entries — services OFFLINE for more than WATCHDOG_MAX_AGE
-            offline_since = svc.get("offline_since")
-            if offline_since:
-                try:
-                    age = (now - datetime.fromisoformat(offline_since)).total_seconds()
-                    if age > WATCHDOG_MAX_AGE:
-                        continue
-                except (TypeError, ValueError):
-                    pass
-            key = (unit, name)
-            last = _watchdog_cooldown.get(key)
-            if last and (now - last).total_seconds() < WATCHDOG_COOLDOWN:
-                continue
-            _watchdog_cooldown[key] = now
-            _queue_command(unit, name.split("@")[0], "start", source="watchdog")
-            print(f"🚨 WATCHDOG: queued restart for '{name}' on {unit}")
-
-
 # ── STARTUP ─────────────────────────────────────────────────────────────────
+
+_workers_lock = threading.Lock()
+_workers_started = False
+
+
+def _credential_renewer():
+    """The fleet's 7-days-before-expiry rule, over every credential we track.
+
+    Reads the live cert reports through a getter rather than a snapshot so the
+    thread always evaluates what the units reported most recently, and queues
+    node-local work through the ordinary exec queue — which means every
+    renewal shows up in the command history like any other job.
+    """
+    def _cert_state_getter():
+        with _cert_lock:
+            return {u: dict(v) for u, v in _cert_state.items()}
+
+    renewals.worker(_cert_state_getter, bao, _queue_exec_command)
+
+
+def start_background_workers():
+    """Start every background thread, exactly once.
+
+    There used to be two hand-maintained copies of this list — one in main()
+    (the `python locator.py` path) and one in the `else:` branch taken when a
+    WSGI server imports the module. Production runs
+    `gunicorn ... locator:app`, so only the second ever executed, and any
+    worker added to main() alone silently never ran. That is precisely how
+    enforce_unit_placement came to be started but dead, and the same drift had
+    already cost this file its Postgres schema creation once before (see the
+    init_schema note below). One list, called from both paths.
+
+    Safe at import time because the container runs --workers 1; with several
+    worker processes each would start its own copy of every thread.
+    """
+    global _workers_started
+    with _workers_lock:
+        if _workers_started:
+            return
+        _workers_started = True
+
+    # The command queue is in-memory, so anything a previous process left open
+    # can never complete. Close those rows now rather than leaving runs that
+    # read as "still going" forever. Done here, not in main()/the WSGI branch,
+    # because both call this function — which is the one place the two startup
+    # paths cannot drift apart.
+    try:
+        with command_lock:
+            live_ids = list(command_queue.keys())
+        for row in db.close_orphaned_runs(keep_ids=live_ids):
+            print(f"⌛ Closed orphaned run {row['id']} ({row.get('label') or 'exec'} on {row['unit']}) "
+                  "— locator restarted while it was in flight")
+    except Exception as e:
+        print(f"⚠️  Failed to close orphaned command runs: {e}")
+
+    workers = [
+        _log_forwarder,             # forward logs to beast-telemetry / live-logger
+        heartbeat_reaper,
+        local_docker_scanner,
+        duplicate_killer,
+        active_discovery_scanner,
+        website_pinger,
+        url_status_checker,         # websites + serverless, no Docker needed
+        _self_election,             # secondaries stop themselves if primary is up
+        enforce_unit_placement,     # locator.yml "units:" placement
+        secret_sweeper,             # finds plaintext credentials in the store
+        bao_token_renewer,          # a periodic OpenBao token dies silently
+        traccar_feeder,             # lokey's GPS fixes into Traccar
+        script_scheduler,           # recurring exec jobs from /api/schedule
+        exec_run_reaper,            # ages out exec jobs that never reported back
+        _credential_renewer,        # reissues every expiring credential 7 days out
+    ]
+    if BALANCE_ENABLED:
+        workers.append(load_balancer)
+    if IDLE_ENABLED:
+        workers.append(idle_reaper)
+    if GIT_AUTO_PUSH:
+        workers.append(_git_push_worker)
+
+    for fn in workers:
+        threading.Thread(target=fn, daemon=True, name=fn.__name__).start()
+    print(f"🧵 background workers started: {', '.join(f.__name__ for f in workers)}")
+
 
 def main():
     print("=" * 55)
@@ -3524,57 +6783,10 @@ def main():
     db.init_schema()
     load_seed()
     persist_registry()
+    load_schedule()
+    load_cert_state()
 
-    # Forward logs to beast-telemetry / live-logger
-    threading.Thread(target=_log_forwarder, daemon=True).start()
-
-    # Start the heartbeat reaper in the background
-    reaper = threading.Thread(target=heartbeat_reaper, daemon=True)
-    reaper.start()
-
-    # Start the local Docker scanner
-    docker_scanner = threading.Thread(target=local_docker_scanner, daemon=True)
-    docker_scanner.start()
-
-    # Start the duplicate killer
-    killer = threading.Thread(target=duplicate_killer, daemon=True)
-    killer.start()
-
-    # Start the active discovery scanner
-    scanner = threading.Thread(target=active_discovery_scanner, daemon=True)
-    scanner.start()
-
-    # Start the website pinger
-    pinger = threading.Thread(target=website_pinger, daemon=True)
-    pinger.start()
-
-    # Start the URL status checker (websites + serverless, no Docker needed)
-    threading.Thread(target=url_status_checker, daemon=True).start()
-
-    # Start the load balancer
-    if BALANCE_ENABLED:
-        balancer = threading.Thread(target=load_balancer, daemon=True)
-        balancer.start()
-
-    # Start the idle auto-shutdown reaper
-    if IDLE_ENABLED:
-        threading.Thread(target=idle_reaper, daemon=True).start()
-
-    # Start the compose git-backup worker (single thread, event-driven)
-    if GIT_AUTO_PUSH:
-        threading.Thread(target=_git_push_worker, daemon=True).start()
-
-    # Self-election: secondaries stop themselves if the canonical primary is up
-    threading.Thread(target=_self_election, daemon=True).start()
-
-    # Enforce "units: all" deployments — queue deploy commands for all ONLINE units
-    threading.Thread(target=enforce_units_all, daemon=True).start()
-
-    # Critical service watchdog — immediately restarts apache, lokey, locator if OFFLINE
-    threading.Thread(target=critical_service_watchdog, daemon=True).start()
-
-    # Feed Lokey's already-collected GPS fixes into Traccar
-    threading.Thread(target=traccar_feeder, daemon=True).start()
+    start_background_workers()
 
     beast_log("🔦 LOCATOR online — registry loaded, telemetry forwarder active")
     app.run(host="0.0.0.0", port=PORT, threaded=True)
@@ -3594,22 +6806,9 @@ else:
         db.init_schema()
         load_seed()
         persist_registry()
-        # Start background threads
-        import threading
-        threading.Thread(target=heartbeat_reaper, daemon=True).start()
-        threading.Thread(target=local_docker_scanner, daemon=True).start()
-        threading.Thread(target=duplicate_killer, daemon=True).start()
-        threading.Thread(target=active_discovery_scanner, daemon=True).start()
-        threading.Thread(target=website_pinger, daemon=True).start()
-        if BALANCE_ENABLED:
-            threading.Thread(target=load_balancer, daemon=True).start()
-        if IDLE_ENABLED:
-            threading.Thread(target=idle_reaper, daemon=True).start()
-        if GIT_AUTO_PUSH:
-            threading.Thread(target=_git_push_worker, daemon=True).start()
-        threading.Thread(target=_self_election, daemon=True).start()
-        threading.Thread(target=critical_service_watchdog, daemon=True).start()
-        threading.Thread(target=traccar_feeder, daemon=True).start()
+        load_schedule()
+        load_cert_state()
+        start_background_workers()
         beast_log("🔦 LOCATOR online (Gunicorn) — registry loaded, telemetry forwarder active")
     except Exception as e:
         print(f"ERROR initializing LOCATOR in Gunicorn mode: {e}", file=sys.stderr)
@@ -3617,3 +6816,68 @@ else:
         traceback.print_exc()
 
 
+LLAMA_CPP_ENDPOINT = os.environ.get("LLAMA_CPP_ENDPOINT", "http://100.99.131.20:8080/v1/chat/completions")
+
+def alert_llama_llm(event_kind: str, details: dict):
+    """
+    Alert the llama.cpp LLM at Tailscale IP 100.99.131.20 on unknown migration errors
+    or 3-retry attempt exhaustion.
+    """
+    try:
+        payload = {
+            "model": "llama-2.5-coder-14b",
+            "messages": [
+                {"role": "system", "content": "You are Locator's migration diagnostic and auto-remediation AI agent."},
+                {"role": "user", "content": f"RED FLAG MIGRATION ALERT [{event_kind}]: {json.dumps(details, indent=2)}"}
+            ]
+        }
+        res = requests.post(LLAMA_CPP_ENDPOINT, json=payload, timeout=5)
+        beast_log(f"🤖 LLM ALERTED ({LLAMA_CPP_ENDPOINT}): HTTP {res.status_code}")
+    except Exception as err:
+        beast_log(f"⚠️ Could not alert LLM at {LLAMA_CPP_ENDPOINT}: {err}")
+
+
+def _evaluate_candidate_node(node_id: str, node_info: dict, container_name: str, req_ram_gb: float = 0.5, req_disk_gb: float = 1.0) -> tuple:
+    """
+    Verbose step-by-step evaluation of candidate node capacity.
+    Emits granular DEBUG logs to stdout (live logger) and Web UI event stream long before migration.
+    """
+    beast_log(f"🔍 DEBUG [EVAL]: Evaluating candidate host '{node_id}' for container '{container_name}'...")
+    emit_event("eval_candidate", unit=node_id, container=container_name, message=f"Evaluating candidate node {node_id}")
+
+    if node_info.get("status") != "ONLINE":
+        beast_log(f"❌ DEBUG [EVAL]: Host '{node_id}' is NOT ONLINE (Status={node_info.get('status')}) -> REJECTED")
+        return False, f"Host {node_id} is not ONLINE"
+
+    # Exact Memory Calculation
+    mem_total = _node_ram_total_mb(node_info) or 1024.0
+    mem_avail_mb = float(node_info.get("mem_available_mb") or (mem_total * (100.0 - float(node_info.get("mem_percent") or 50.0)) / 100.0))
+    avail_ram_gb = round(mem_avail_mb / 1024.0, 2)
+    
+    # Exact Disk Storage Calculation
+    disk_total = float(node_info.get("disk_total_gb") or 10.0)
+    disk_free_gb = float(node_info.get("disk_free_gb") or (disk_total * (100.0 - float(node_info.get("disk_percent") or 50.0)) / 100.0))
+    disk_free_gb = round(disk_free_gb, 2)
+
+    # CPU Headroom Calculation
+    cpu_usage = float(node_info.get("cpu_percent") or 0.0)
+    cpu_headroom = round(100.0 - cpu_usage, 2)
+
+    beast_log(f"📊 DEBUG [CAPACITY CHECK] Node '{node_id}': Avail RAM = {avail_ram_gb} GB (Req = {req_ram_gb} GB) | "
+              f"Free Disk = {disk_free_gb} GB (Req = {req_disk_gb} GB) | CPU Headroom = {cpu_headroom}%")
+
+    if avail_ram_gb < req_ram_gb:
+        msg = f"Insufficient RAM on {node_id}: {avail_ram_gb} GB available < {req_ram_gb} GB required"
+        beast_log(f"❌ DEBUG [EVAL]: {msg} -> REJECTED")
+        emit_event("eval_fail", unit=node_id, container=container_name, reason=msg)
+        return False, msg
+
+    if disk_free_gb < req_disk_gb:
+        msg = f"Insufficient Storage on {node_id}: {disk_free_gb} GB free < {req_disk_gb} GB required"
+        beast_log(f"❌ DEBUG [EVAL]: {msg} -> REJECTED")
+        emit_event("eval_fail", unit=node_id, container=container_name, reason=msg)
+        return False, msg
+
+    beast_log(f"✅ DEBUG [EVAL]: Node '{node_id}' PASSED all capacity checks for container '{container_name}'")
+    emit_event("eval_pass", unit=node_id, container=container_name, message=f"Node {node_id} passed capacity checks")
+    return True, "PASSED"
