@@ -90,6 +90,13 @@ ADMIN_KEY = os.environ.get("LOCATOR_ADMIN_KEY", "")
 # otherwise reach.
 AI_ADMIN_KEY = os.environ.get("LOCATOR_AI_ADMIN_KEY", "")
 
+# Level 6 (STAFF) read identity for the lokey-android native grid, presented as
+# X-Locator-Grid-Key. The app holds no OIDC token, so without a device key the
+# public /api/registry view strips every field below STAFF -- which is why the
+# grid saw status only and no GPS, battery, or metrics. STAFF reads the whole
+# mesh but reaches no write route (those sit at OPERATOR/INFRA/ROOT).
+GRID_KEY = os.environ.get("LOCATOR_GRID_KEY", "")
+
 # Endpoints the AI service account may never call, whatever its level and
 # whatever ENFORCE says. Destroying state is a human decision.
 #
@@ -113,6 +120,7 @@ def is_ai_principal(principal):
 AI_DENIED_ENDPOINTS = frozenset({
     "delete_compose_file",   # DELETE /api/compose/<name>
     "secrets_quarantine",    # rewrites compose files on other units
+    "secrets_requeue_redact", # same, re-queued from vaulted state
     "delete_schedule",       # DELETE /api/schedule/<job_id>
     "deregister_service",    # DELETE /deregister/<name>
     "delete_registry_entry", # DELETE /api/registry/<kind>/<id> — hard delete
@@ -215,6 +223,7 @@ INGEST = {
 UNIT_KEY = {
     "secrets_ingest",        # file this unit's .env credentials into OpenBao
     "secrets_unit_resolve",  # read back only secrets filed under this unit
+    "save_compose_file",     # upload this unit's docker-compose.yml to the store
 }
 
 ROUTE_CLEARANCE = {
@@ -318,6 +327,7 @@ ROUTE_CLEARANCE = {
     # fail-closed rule would have made it 403 the moment ENFORCE went true.
     "certs_issue":           ROOT,
     "secrets_quarantine":    ROOT,
+    "secrets_requeue_redact": ROOT,  # same blast radius: rewrites compose on units
     # Hard-removes a registry row (the reaper's soft-delete is
     # deregister_service at OPERATOR). Destroying state stays owner-level.
     "delete_registry_entry": ROOT,
@@ -613,6 +623,10 @@ def identify():
     ai_key = request.headers.get("X-Locator-AI-Key", "")
     if ai_key and AI_ADMIN_KEY and hmac.compare_digest(ai_key, AI_ADMIN_KEY):
         return Principal(INFRA, "service:ai-admin", via="ai-admin-key")
+
+    grid_key = request.headers.get("X-Locator-Grid-Key", "")
+    if grid_key and GRID_KEY and hmac.compare_digest(grid_key, GRID_KEY):
+        return Principal(STAFF, "service:grid-key", via="grid-key")
 
     token = ""
     auth = request.headers.get("Authorization", "")

@@ -5943,6 +5943,36 @@ def secrets_quarantine():
                     "skipped": secretscan.public(skipped)})
 
 
+@app.route("/api/secrets/requeue-redact", methods=["POST"])
+def secrets_requeue_redact():
+    """Re-emit redact_env for a compose file already quarantined to OpenBao.
+
+    The command queue is in-memory, so a locator restart parks redactions that
+    units never collected — their local compose files keep the plaintext.
+    This re-queues from the vaulted state: keys from OpenBao, refs rebuilt,
+    and the unit-side handler is idempotent (already-indirect lines just get
+    their x-bao-secrets refs written). Admin only.
+    """
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    name = str((request.get_json(silent=True) or {}).get("file") or "").strip()
+    if not name:
+        return jsonify({"error": "file required"}), 400
+    if not _INGEST_NAME_RE.match(name):
+        return jsonify({"error": f"invalid file name {name!r}"}), 400
+    bao_path = _bao_path_for(name)
+    try:
+        stored = bao.read_secret(SECRETSCAN_MOUNT, bao_path, use_cache=False)
+    except Exception as e:
+        return jsonify({"error": f"nothing vaulted for {name}: {e}"}), 404
+    keys = sorted(stored)
+    refs = {k: f"bao://{SECRETSCAN_MOUNT}/{bao_path}#{k}" for k in keys}
+    queued = _queue_redactions(name, keys, refs)
+    emit_event("secrets", action="redact_requeued", file=name, units=queued)
+    return jsonify({"file": name, "keys": keys, "units_queued": queued})
+
+
 def _queue_redactions(compose_name, keys, refs):
     """Tell whichever unit runs this container to strip the same lines locally.
 
