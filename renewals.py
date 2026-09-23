@@ -264,6 +264,9 @@ def _renew_gitlab(item):
     try:
         bao.write_secret(GITLAB_KV_MOUNT, GITLAB_KV_PATH,
                          {"token": new, "expires_at": expires})
+        import vaultwarden
+        vaultwarden.mirror("gitlab/pat", {"token": new},
+                           notes=f"gitlab PAT rotated by locator, expires {expires}")
     except Exception as e:
         _log(f"🚨 CRITICAL: GitLab PAT was rotated but could NOT be stored "
              f"({e}). The old token is dead. Re-issue by hand now.")

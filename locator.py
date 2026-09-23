@@ -65,6 +65,7 @@ import kc_admin
 import bao
 import renewals
 import secretscan
+import vaultwarden
 import unitkeys
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
@@ -5741,6 +5742,8 @@ def secrets_ingest():
                    path=origin, error=str(e))
         return jsonify({"error": f"OpenBao write failed: {e}"}), 502
 
+    vaultwarden.mirror(f"units/{unit}/{source}", values,
+                       notes=f"ingested from {origin or 'unknown'} on {unit}")
     emit_event("secrets", action="ingested", unit=unit, source=source, path=origin,
                keys=sorted(values), bao_path=f"{SECRETSCAN_MOUNT}/{bao_path}")
     beast_log(f"\U0001f510 INGESTED {len(values)} credential(s) from "
@@ -5903,6 +5906,8 @@ def secrets_quarantine():
         return jsonify({"error": f"secrets stored in OpenBao but the store file "
                                  f"could not be rewritten: {e}"}), 500
 
+    vaultwarden.mirror(f"compose/{name}", values,
+                       notes=f"quarantined from compose file {name}")
     queued = _queue_redactions(name, sorted(values), refs)
     emit_event("secrets", action="quarantined", file=name,
                keys=sorted(values), bao_path=f"{SECRETSCAN_MOUNT}/{bao_path}",
