@@ -1,0 +1,18 @@
+Service:
+
+  # petal.prime-quality.online — Petal & Stone clean-beauty storefront, static
+  # build served by python:3.12-alpine http.server on unit7 (bind-mounts
+  # ~/projects/petal-stone ro). Edge file petal-stone.yml routes the host to
+  # it. Was repeatedly idle-stopped (docker stop -> 502) before this stanza.
+  petal-stone-web:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: false
+    restart_when_stopped: true
+    public_wake: true
+    project_dir: /home/swoopg111/projects/petal-stone
+    wake_triggers:
+      domain:
+        - petal.prime-quality.online
