@@ -59,10 +59,31 @@ from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify, Response, render_template, g
 
 import notifier
+import bao
+
+
+def _resolve_env_secrets():
+    """Env values may be `bao://mount/path#field` references — resolved here,
+    at boot, before db.py and friends read os.environ at import. This is what
+    lets the locator's own .env carry pointers instead of secrets: the same
+    convention every other unit's lokey enforces on its files.
+
+    A ref that cannot resolve is left in place (fail-closed: a bogus string,
+    not a blank password that might sail through a permissive check)."""
+    for _name, _val in list(os.environ.items()):
+        if not (isinstance(_val, str) and _val.startswith("bao://")):
+            continue
+        try:
+            os.environ[_name] = bao.resolve_ref(_val)
+        except Exception as _e:
+            print(f"[env-resolve] {_name}: {_e} — ref left unresolved", flush=True)
+
+
+_resolve_env_secrets()
+
 import db
 import clearance
 import kc_admin
-import bao
 import renewals
 import secretscan
 import vaultwarden

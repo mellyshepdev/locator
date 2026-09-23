@@ -105,11 +105,17 @@ services:
       # listener - and that domain is SafeBrowse-blocked besides. This route
       # goes through unit8's Traefik, which reaches unit9 over the tailnet.
       - TRACCAR_HOST=traccar.prime-quality.online
-      - TRACCAR_PASS=Thegr81234Thegr81234!
+      - TRACCAR_PASS=${TRACCAR_PASS:-}
+      # notifier.notify_all → Matrix room on unit2 synapse; reech reads it
+      # there. locator-bot account on matrix.theofficialblacksheepco.online.
+      - MATRIX_HOMESERVER_URL=${MATRIX_HOMESERVER_URL:-}
+      - MATRIX_ACCESS_TOKEN=${MATRIX_ACCESS_TOKEN:-}
+      - MATRIX_ROOM_ID=${MATRIX_ROOM_ID:-}
       - LOCATOR_ADMIN_KEY=${LOCATOR_ADMIN_KEY:-}
       # Level 9 (INFRA) service identity for the AI assistant. Separate from
       # LOCATOR_ADMIN_KEY on purpose: that one grants ROOT and must stay human.
       - LOCATOR_AI_ADMIN_KEY=${LOCATOR_AI_ADMIN_KEY:-}
+      - LOCATOR_GRID_KEY=${LOCATOR_GRID_KEY:-}
       - CLEARANCE_ENFORCE=true
       # Deliberately OFF, and spelled `false` rather than the previous `-true`
       # (which parsed as false anyway — clearance.py tests
