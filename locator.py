@@ -5929,7 +5929,7 @@ def secrets_quarantine():
 
     vaultwarden.mirror(f"compose/{name}", values,
                        notes=f"quarantined from compose file {name}")
-    queued = _queue_redactions(name, sorted(values), refs)
+    queued = _queue_redactions(name, sorted(values), refs, values=values)
     emit_event("secrets", action="quarantined", file=name,
                keys=sorted(values), bao_path=f"{SECRETSCAN_MOUNT}/{bao_path}",
                units=queued)
@@ -5968,16 +5968,23 @@ def secrets_requeue_redact():
         return jsonify({"error": f"nothing vaulted for {name}: {e}"}), 404
     keys = sorted(stored)
     refs = {k: f"bao://{SECRETSCAN_MOUNT}/{bao_path}#{k}" for k in keys}
-    queued = _queue_redactions(name, keys, refs)
+    queued = _queue_redactions(name, keys, refs, values=stored)
     emit_event("secrets", action="redact_requeued", file=name, units=queued)
     return jsonify({"file": name, "keys": keys, "units_queued": queued})
 
 
-def _queue_redactions(compose_name, keys, refs):
+def _queue_redactions(compose_name, keys, refs, values=None):
     """Tell whichever unit runs this container to strip the same lines locally.
 
     The command carries only key names and bao:// references, never a value —
     /api/commands/pending is unauthenticated.
+
+    Those references must live under the unit's own scope: unit-resolve refuses
+    anything outside compose/units/<unit>/, so an admin-scoped compose/<name>
+    ref would be written into the file but could never resolve at deploy. When
+    `values` is supplied each hosting unit gets its own copy at
+    compose/units/<unit>/<name> and refs pointing there; without values we fall
+    back to the shared refs (admin-only resolvable — fine for store-side use).
     """
     units = set()
     with lock:
@@ -5996,10 +6003,24 @@ def _queue_redactions(compose_name, keys, refs):
         unit = svc.get("host")
         if unit and unit != "external":
             units.add(unit)
+    queued = []
     for unit in sorted(units):
+        unit_refs = refs
+        if values:
+            upath = f"{SECRETSCAN_PREFIX}/units/{unit}/{compose_name}"
+            try:
+                bao.write_secret(SECRETSCAN_MOUNT, upath, values)
+                unit_refs = {k: f"bao://{SECRETSCAN_MOUNT}/{upath}#{k}"
+                             for k in keys}
+            except bao.BaoError as e:
+                print(f"🔐 redact {compose_name}: could not stage unit-scoped "
+                      f"secrets for {unit} ({e}) — unit skipped, plaintext stays "
+                      f"until a queueable copy exists")
+                continue
         _queue_command(unit, compose_name, "redact_env", source="secret_sweep",
-                       extra={"keys": list(keys), "refs": refs})
-    return sorted(units)
+                       extra={"keys": list(keys), "refs": unit_refs})
+        queued.append(unit)
+    return queued
 
 
 def bao_token_renewer():
