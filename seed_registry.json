@@ -225,7 +225,7 @@
       "host": "localhost",
       "type": "brain",
       "status": "ONLINE",
-      "traefik_api": "https://unit1.theofficialblacksheepco.info/traefik/api",
+      "tailscale_ip": "100.78.95.13",
       "peripherals": []
     },
     "secondary_vps_unit2": {
