@@ -1,0 +1,12 @@
+# Deny dotfile paths (.git, .env, .svn, .DS_Store, etc.) on the static
+# storefronts whose docroots are repo checkouts. noop@internal swallows the
+# request; high priority wins over the host routers.
+http:
+  routers:
+    dotfile-block:
+      rule: "(Host(`theofficialblacksheepco.store`) || Host(`www.theofficialblacksheepco.store`) || Host(`petal.prime-quality.online`)) && PathRegexp(`^/\\.`)"
+      entryPoints:
+        - websecure
+      service: noop@internal
+      priority: 1000
+      tls: {}
