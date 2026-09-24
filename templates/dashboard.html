@@ -1008,7 +1008,10 @@
     </div>
 
     <!-- LIVE STATUS — shows the page is actually polling, and flags it loudly if it stops -->
-    <div id="live-status" style="position:absolute; top:20px; left:30px; z-index:10500; font-family:inherit; font-size:12px; letter-spacing:1px; padding:8px 14px; background:rgba(0,0,0,0.8); border:1px solid var(--accent); border-radius:4px; color:var(--accent);">
+    <a id="home-sheep" href="https://welcome.theofficialblacksheepco.com/infrastructure" title="Back to System Monitoring" style="position:absolute; top:14px; left:24px; z-index:10501; display:block; width:44px; height:44px; border-radius:8px; overflow:hidden; border:1px solid var(--accent); box-shadow:0 0 10px rgba(0,240,255,0.3); background:rgba(0,0,0,0.8);">
+        <img src="/static/sheep-icon.png" alt="BlackSheep" style="width:100%; height:100%; object-fit:cover; display:block;">
+    </a>
+    <div id="live-status" style="position:absolute; top:20px; left:82px; z-index:10500; font-family:inherit; font-size:12px; letter-spacing:1px; padding:8px 14px; background:rgba(0,0,0,0.8); border:1px solid var(--accent); border-radius:4px; color:var(--accent);">
         <span id="live-status-dot" style="display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--neon-green); box-shadow:0 0 6px var(--neon-green); margin-right:6px;"></span>
         <span id="live-status-text">Connecting…</span>
     </div>
