@@ -9,5 +9,6 @@ Service:
     location_type: stationary
     units: "7"
     instances: 1
-    idle_stop: true
-    idle_timeout: 15m
+    # idle_stop removed 2026-09-24 — the Locator node popups link to
+    # glances-unitN.* and those links must stay live, so the container
+    # stays up. (Was 15m idle_stop per owner call 2026-09-16.)

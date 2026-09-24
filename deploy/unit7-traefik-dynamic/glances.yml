@@ -1,0 +1,65 @@
+# glances-unitN.theofficialblacksheepco.com — per-unit Glances web views.
+# Rebuilt 2026-09-24: the original lived in networking/traefik/
+# dynamic-config/glances.yml per WAKE.md and was lost. Chain per WAKE.md:
+# each unit runs glances -w bound to its tailnet IP :61208; glances-* DNS
+# resolves to the edge (unit9 HAProxy), which forwards unmatched hosts to
+# the Traefik mesh :8443; these routers proxy to the unit's tailnet address.
+# Auth: basicAuth 'glances-auth' — creds in vaultwarden 'glances-edge-auth'.
+http:
+  middlewares:
+    glances-auth:
+      basicAuth:
+        users:
+          - 'glances:$apr1$nCCkj/3f$nI2UyzRIeUZkn3XcMzqoz/'
+
+  routers:
+    glances-unit2:
+      rule: "Host(`glances-unit2.theofficialblacksheepco.com`)"
+      entryPoints: [mesh]
+      middlewares: [glances-auth]
+      service: glances-unit2
+      tls:
+        options: mesh
+    glances-unit4:
+      rule: "Host(`glances-unit4.theofficialblacksheepco.com`)"
+      entryPoints: [mesh]
+      middlewares: [glances-auth]
+      service: glances-unit4
+      tls:
+        options: mesh
+    glances-unit7:
+      rule: "Host(`glances-unit7.theofficialblacksheepco.com`)"
+      entryPoints: [mesh]
+      middlewares: [glances-auth]
+      service: glances-unit7
+      tls:
+        options: mesh
+    glances-unit9:
+      rule: "Host(`glances-unit9.theofficialblacksheepco.com`)"
+      entryPoints: [mesh]
+      middlewares: [glances-auth]
+      service: glances-unit9
+      tls:
+        options: mesh
+
+  services:
+    glances-unit2:
+      loadBalancer:
+        servers:
+          - url: "http://100.64.118.105:61208"
+        passHostHeader: true
+    glances-unit4:
+      loadBalancer:
+        servers:
+          - url: "http://100.82.31.92:61208"
+        passHostHeader: true
+    glances-unit7:
+      loadBalancer:
+        servers:
+          - url: "http://100.99.131.20:61208"
+        passHostHeader: true
+    glances-unit9:
+      loadBalancer:
+        servers:
+          - url: "http://100.94.170.118:61208"
+        passHostHeader: true
