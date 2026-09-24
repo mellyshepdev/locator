@@ -1,0 +1,21 @@
+Service:
+
+  # theofficialblacksheepco.com — the main site, apache. The older
+  # main-site-apache stanza names the retired unit8 container and never
+  # matched this name, so it ran unprotected. Essential per owner 2026-10-11:
+  # never idle-stopped or drained, auto-revived if it dies. Migratable
+  # between unit2 and unit7 per owner 2026-09-24 — a loaded unit7 must not
+  # trap it; project_dir exists on both units.
+  main-website:
+    deployment_type: essential
+    location_type: mobile
+    units: "2_7"
+    instances: 1
+    idle_stop: false
+    restart_when_stopped: true
+    public_wake: true
+    project_dir: /home/swoopg111/projects/blackshepherddeveloper-project
+    wake_triggers:
+      domain:
+        - theofficialblacksheepco.com
+        - www.theofficialblacksheepco.com
