@@ -43,7 +43,7 @@ import urllib.request
 import urllib.error
 import json
 
-BAO_ADDR = os.environ.get("BAO_ADDR", "http://100.82.31.92:8200").rstrip("/")
+BAO_ADDR = os.environ.get("BAO_ADDR", "http://100.99.131.20:8200").rstrip("/")
 BAO_TOKEN_FILE = os.environ.get("BAO_TOKEN_FILE", "/app/secrets/bao.token")
 # PKI engine that issues the fleet's internal mTLS certs (Blacksheep Fleet Root
 # CA). A mount only, never a role: the role names the constraints (allowed
