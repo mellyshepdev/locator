@@ -1,8 +1,8 @@
 Service:
 
   live-logger-container-names:
-    deployment_type: essential
+    deployment_type: optional
     location_type: stationary
     units: "4_7_8_9"
     instances: 1
-    restart_when_stopped: true
+    idle_stop: true

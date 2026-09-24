@@ -1,18 +1,23 @@
 Service:
 
-  # Tikur Bego — luxury landing page on unit7 (pro-pieces.prime-quality.online).
-  # Static Vite/React build behind nginx, tailnet-published at :8094; the edge
-  # file pro-pieces.yml routes to pro-pieces@http and follows a move.
+  # Tikur Bego — luxury landing page on unit7 (tikurbego.com,
+  # pro-pieces.prime-quality.online). Static Vite/React build behind nginx,
+  # tailnet-published at :8094; the edge file pro-pieces.yml routes to
+  # pro-pieces@http and follows a move.
+  # Essential per owner 2026-09-19: stays up at all times — never idle-stopped
+  # or power-drained, auto-revived by lokey keep_alive if it dies.
   pro-pieces:
-    deployment_type: optional
+    deployment_type: essential
     location_type: stationary
     units: "7"
     instances: 1
-    idle_stop: true
-    idle_timeout: 15m
+    idle_stop: false
+    restart_when_stopped: true
     public_wake: true
     edge_port: 8094
     git_remote: https://gitlab.com/gbonds1/pro-pieces.git
     wake_triggers:
       domain:
         - pro-pieces.prime-quality.online
+        - tikurbego.com
+        - www.tikurbego.com

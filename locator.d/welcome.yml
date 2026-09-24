@@ -1,11 +1,12 @@
 Service:
 
   welcome:
-    # The public landing page — the other half of the front door. Never
-    # idle-stopped: a visitor must never meet a wake page at the entrance.
-    deployment_type: optional
+    # The public landing page — the other half of the front door. Essential
+    # per owner 2026-10-11: never idle-stopped or drained, auto-revived.
+    deployment_type: essential
     location_type: stationary
-    units: "4"
+    units: "7"
     instances: 1
     idle_stop: false
+    restart_when_stopped: true
     public_wake: true

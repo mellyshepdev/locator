@@ -1,0 +1,21 @@
+Service:
+
+  # puff-base.com — the site-builder app on unit7; edge file puff-base.yml
+  # routes to it. Same name as the compose project that also runs
+  # puffbase-cockroach/-crew/-userdash/-runner — this stanza covers only the
+  # `puffbase` web container.
+  # Essential per owner 2026-09-19: never idle-stopped or power-drained,
+  # auto-revived by lokey keep_alive if it dies.
+  puffbase:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: false
+    restart_when_stopped: true
+    public_wake: true
+    project_dir: /home/swoopg111/projects/puffbase
+    wake_triggers:
+      domain:
+        - puff-base.com
+        - www.puff-base.com

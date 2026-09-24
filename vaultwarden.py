@@ -152,22 +152,50 @@ def _api(path, method="GET", body=None):
         raise
 
 
+def _sig(fields: dict) -> str:
+    """Content signature: the sorted key/value pairs. Two notes with the same
+    fields ARE the same credential however they were named — the fleet files
+    the same DATABASE_URL under several unit paths."""
+    return hashlib.sha256(
+        json.dumps({k: str(v) for k, v in fields.items()}, sort_keys=True)
+            .encode()).hexdigest()
+
+
 def _cipher_map() -> dict:
-    """{decrypted name: cipher id}, cached 5 min."""
+    """{decrypted name: cipher id}, plus a content-sig index, cached 5 min.
+    Decrypting every field of every note costs a few hundred ms and is the
+    only way to know two differently-named notes hold the same secret."""
     now = time.time()
     if _state["ciphers"] is not None and now - _state["ciphers_at"] < 300:
         return _state["ciphers"]
     resp = _api("/api/ciphers")
-    out = {}
+    out, sigs = {}, {}
     for c in resp.get("data", []):
         try:
             name = _dec(_state["symkey"], c["name"]).decode()
             out[name] = c["id"]
+            fields = {}
+            for f in c.get("fields") or []:
+                k = _dec(_state["symkey"], f["name"]).decode()
+                if k == "_sig":
+                    continue
+                fields[k] = _dec(_state["symkey"], f["value"]).decode()
+            if fields:
+                sigs[_sig(fields)] = c["id"]
         except Exception:
             continue
     _state["ciphers"] = out
+    _state["sigs"] = sigs
     _state["ciphers_at"] = now
     return out
+
+
+def _better_name(a: str, b: str) -> str:
+    """Whichever of two note names a human would rather find. A real service
+    name beats a project-<hash> placeholder; otherwise the shorter wins."""
+    def score(n):
+        return ("project-" in n, n.count("/"), len(n))
+    return a if score(a) <= score(b) else b
 
 
 def mirror(name: str, fields: dict, notes: str = "") -> bool:
@@ -179,7 +207,12 @@ def mirror(name: str, fields: dict, notes: str = "") -> bool:
     try:
         with _lock:
             full_name = NAME_PREFIX + name.lstrip("/")
-            existing = _cipher_map().get(full_name)  # triggers login on first use
+            cmap = _cipher_map()  # triggers login on first use
+            sig = _sig(fields)
+            # Same content under any name = same credential. Update that note
+            # rather than spawn a duplicate named for this path.
+            existing = cmap.get(full_name) or _state.get("sigs", {}).get(sig)
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             fields_js = [
                 {"type": 1,  # hidden — masked in every vault client
                  "name": _enc(_state["symkey"], k),
@@ -187,11 +220,14 @@ def mirror(name: str, fields: dict, notes: str = "") -> bool:
                  "linkedId": None}
                 for k, v in sorted(fields.items())
             ]
+            fields_js.append({"type": 1, "name": _enc(_state["symkey"], "_sig"),
+                              "value": _enc(_state["symkey"], sig), "linkedId": None})
+            note_text = notes or f"mirrored by locator {stamp}"
+            note_text += f"\nsource: {name} ({stamp})"
             cipher = {
                 "type": 2,  # secure note
                 "name": _enc(_state["symkey"], full_name),
-                "notes": _enc(_state["symkey"], notes or
-                              f"mirrored by locator {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}"),
+                "notes": _enc(_state["symkey"], note_text),
                 "favorite": False,
                 "folderId": None,
                 "organizationId": None,
@@ -201,12 +237,18 @@ def mirror(name: str, fields: dict, notes: str = "") -> bool:
             }
             if existing:
                 cipher["id"] = existing
+                # keep the existing note's name if it is the better label —
+                # a 'project-a1b2c3' note upgraded to a real service name
+                cur_name = next((n for n, i in cmap.items() if i == existing), full_name)
+                cipher["name"] = _enc(_state["symkey"],
+                                      cur_name if _better_name(cur_name, full_name) == cur_name else full_name)
                 _api(f"/api/ciphers/{existing}", method="PUT", body=cipher)
             else:
                 resp = _api("/api/ciphers", method="POST", body=cipher)
                 cid = resp.get("id") or resp.get("data", {}).get("id")
                 if cid:
                     _state["ciphers"][full_name] = cid
+                    _state["sigs"][sig] = cid
         return True
     except Exception as e:
         print(f"[vaultwarden] mirror {name} failed: {e}", flush=True)

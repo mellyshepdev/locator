@@ -39,10 +39,11 @@ Service:
   # and rasa use, which is the one mechanism that works when the container a
   # visitor actually asked for is the one that is down.
   welcome-hub:
-    deployment_type: optional
+    deployment_type: essential
     location_type: stationary
-    units: "4"
+    units: "7"
     instances: 1
+    restart_when_stopped: true
     # Front door to the internet — never idle-stopped. The wake path stays
     # armed (public_wake) purely as recovery if it ever dies for another
     # reason; a first-time visitor must never land on a wake page.

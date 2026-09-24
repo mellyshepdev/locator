@@ -6821,7 +6821,7 @@ def _is_locator_origin(host):
         return True
     if bare.split(".")[0] == "locator":
         return True
-    # Traefik reaches us at http://100.82.31.92:50500 over the tailnet.
+    # Traefik reaches us at http://100.99.131.20:50500 over the tailnet.
     return bool(bare) and bare.replace(".", "").isdigit()
 
 

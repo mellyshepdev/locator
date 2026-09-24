@@ -88,4 +88,4 @@ http:
           timeout: 3s
         servers:
           - url: "http://keycloak:8080"
-          - url: "http://100.82.31.92:8081"
+          - url: "http://100.64.118.105:8081"

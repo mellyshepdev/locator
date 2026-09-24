@@ -1,0 +1,25 @@
+Service:
+
+  # pro-director.com (+ .info/.net/.store alt TLDs) — the firm site, static
+  # build served by httpd:alpine on unit7; edge file firm-site.yml routes all
+  # TLDs to it. Essential per owner 2026-09-19: never idle-stopped or
+  # power-drained, auto-revived by lokey keep_alive if it dies.
+  professional-agent:
+    deployment_type: essential
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: false
+    restart_when_stopped: true
+    public_wake: true
+    project_dir: /home/swoopg111/server/networking/pro-director
+    wake_triggers:
+      domain:
+        - pro-director.com
+        - www.pro-director.com
+        - pro-director.info
+        - www.pro-director.info
+        - pro-director.net
+        - www.pro-director.net
+        - pro-director.store
+        - www.pro-director.store
