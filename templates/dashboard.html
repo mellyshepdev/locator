@@ -415,6 +415,49 @@
             z-index: 5;
         }
         .grid-maximize-btn:hover { background: rgba(255, 255, 255, 0.12); }
+        .grid-minimize-btn {
+            position: absolute;
+            top: 16px;
+            right: 62px;
+            width: 34px;
+            height: 34px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: transparent;
+            border: 1px solid currentColor;
+            border-radius: 4px;
+            color: inherit;
+            font-family: inherit;
+            font-size: 20px;
+            line-height: 1;
+            cursor: pointer;
+            transition: background 0.2s;
+            z-index: 5;
+        }
+        .grid-minimize-btn:hover { background: rgba(255, 255, 255, 0.12); }
+        /* Minimized: collapse the whole box to a thin title bar — hide every
+           direct child except the title and the two corner buttons. */
+        .grid-container.minimized {
+            padding-top: 4px;
+            padding-bottom: 4px;
+            margin-top: 20px;
+            margin-bottom: 10px;
+        }
+        .grid-container.minimized > *:not(.grid-title):not(.grid-minimize-btn):not(.grid-maximize-btn) {
+            display: none !important;
+        }
+        .grid-container.minimized .grid-title {
+            font-size: 15px;
+            margin: 6px 0 4px;
+            border-bottom: none;
+            padding-bottom: 0;
+        }
+        .grid-container.minimized .grid-minimize-btn,
+        .grid-container.minimized .grid-maximize-btn {
+            top: 50%;
+            transform: translateY(-50%);
+        }
         .grid-green { border: 1px solid #00ff00; box-shadow: 0 0 20px rgba(0, 255, 0, 0.2); color: #00ff00; }
         .grid-purple { border: 1px solid #a200ff; box-shadow: 0 0 20px rgba(162, 0, 255, 0.2); color: #a200ff; margin-top: 40px;}
         .grid-blue { border: 1px solid #00f0ff; box-shadow: 0 0 20px rgba(0, 240, 255, 0.2); color: #00f0ff; margin-top: 40px;}
@@ -530,6 +573,26 @@
         .stale {
             background-color: #ffe600;
             box-shadow: 0 0 8px #ffe600;
+        }
+        /* Health tiers on top of liveness: green is only for a container whose
+           docker HEALTHCHECK reports healthy ('verified'). Running without
+           that confirmation is 'unverified' (orange); a failing check is
+           'unhealthy' (red, same alarm weight as offline). */
+        .unverified {
+            background-color: #ffae00;
+            box-shadow: 0 0 8px #ffae00,
+                        0 0 16px rgba(255, 174, 0, 0.5);
+            border: 1px solid #ffe6b3;
+        }
+        .unhealthy {
+            background-color: var(--danger);
+            box-shadow: 0 0 8px var(--danger);
+            animation: pulse 1s infinite;
+        }
+        .status-pill.is-unverified {
+            background: rgba(255, 174, 0, 0.10);
+            border-color: rgba(255, 174, 0, 0.4);
+            box-shadow: 0 0 10px rgba(255, 174, 0, 0.35), inset 0 0 8px rgba(255, 174, 0, 0.15);
         }
         .offline {
             background-color: var(--danger);
@@ -1031,6 +1094,7 @@
 
         <!-- BLUE RECTANGLE: DEVICES -->
         <div class="grid-container grid-blue">
+            <button class="grid-minimize-btn" onclick="toggleSectionMin(this)" title="Minimize section">−</button>
             <button class="grid-maximize-btn" onclick="toggleGridMaximize(this)" title="Maximize section">⛶</button>
             <h1 class="grid-title" style="color: #00f0ff; border-color: #00f0ff; text-shadow: 0 0 10px #00f0ff;">Devices & Nodes</h1>
             <div class="status-header">
@@ -1072,6 +1136,7 @@
 
         <!-- GREEN RECTANGLE: DOCKER CONTAINERS -->
         <div class="grid-container grid-green">
+            <button class="grid-minimize-btn" onclick="toggleSectionMin(this)" title="Minimize section">−</button>
             <button class="grid-maximize-btn" onclick="toggleGridMaximize(this)" title="Maximize section">⛶</button>
             <h1 class="grid-title">Docker Containers</h1>
             <div class="status-header">
@@ -1114,6 +1179,7 @@
 
         <!-- PURPLE RECTANGLE: WEBSITES -->
         <div class="grid-container grid-purple">
+            <button class="grid-minimize-btn" onclick="toggleSectionMin(this)" title="Minimize section">−</button>
             <button class="grid-maximize-btn" onclick="toggleGridMaximize(this)" title="Maximize section">⛶</button>
             <h1 class="grid-title" style="color: #a200ff; border-color: #a200ff; text-shadow: 0 0 10px #a200ff;">Websites</h1>
             <div class="status-header">
@@ -1135,6 +1201,7 @@
 
         <!-- AMBER RECTANGLE: VIRTUAL MACHINES -->
         <div class="grid-container grid-amber">
+            <button class="grid-minimize-btn" onclick="toggleSectionMin(this)" title="Minimize section">−</button>
             <button class="grid-maximize-btn" onclick="toggleGridMaximize(this)" title="Maximize section">⛶</button>
             <h1 class="grid-title" style="color: #ff8800; border-color: #ff8800; text-shadow: 0 0 10px #ff8800;">Virtual Machines</h1>
             <div class="status-header">
@@ -1157,6 +1224,7 @@
 
         <!-- PINK RECTANGLE: SERVERLESS / PaaS -->
         <div class="grid-container" style="border: 1px solid #ff2d95; box-shadow: 0 0 20px rgba(255, 45, 149, 0.2); color: #ff2d95;">
+            <button class="grid-minimize-btn" onclick="toggleSectionMin(this)" title="Minimize section">−</button>
             <button class="grid-maximize-btn" onclick="toggleGridMaximize(this)" title="Maximize section">⛶</button>
             <h1 class="grid-title" style="color: #ff2d95; border-color: #ff2d95; text-shadow: 0 0 10px #ff2d95;">Serverless / PaaS</h1>
             <div class="status-header">
@@ -1178,6 +1246,7 @@
 
         <!-- CLOUD PLATFORMS SECTION -->
         <div class="grid-container" style="border: 1px solid #00ccff; box-shadow: 0 0 20px rgba(0, 204, 255, 0.2); color: #00ccff; margin-top: 40px;">
+            <button class="grid-minimize-btn" onclick="toggleSectionMin(this)" title="Minimize section">−</button>
             <button class="grid-maximize-btn" onclick="toggleGridMaximize(this)" title="Maximize section">⛶</button>
             <h1 class="grid-title" style="color: #00ccff; border-bottom: 2px solid #00ccff; text-shadow: 0 0 10px #00ccff;">Cloud &amp; Native Platforms</h1>
             <div class="status-header">
@@ -1565,6 +1634,37 @@
         }
 
         // ── PER-SECTION MAXIMIZE/RESTORE ──
+        function toggleSectionMin(btn) {
+            const c = btn.closest('.grid-container');
+            if (!c) return;
+            const min = c.classList.toggle('minimized');
+            btn.textContent = min ? '+' : '\u2212';
+            btn.title = min ? 'Expand section' : 'Minimize section';
+            try {
+                const mins = JSON.parse(localStorage.getItem('locatorMinSections') || '[]');
+                const key = (c.querySelector('.grid-title') || {}).innerText || '';
+                const i = mins.indexOf(key);
+                if (min && i === -1) mins.push(key);
+                if (!min && i !== -1) mins.splice(i, 1);
+                localStorage.setItem('locatorMinSections', JSON.stringify(mins));
+            } catch (e) {}
+        }
+
+        // Re-apply saved minimized sections once the grid exists.
+        (function restoreMinimized() {
+            try {
+                const mins = JSON.parse(localStorage.getItem('locatorMinSections') || '[]');
+                document.querySelectorAll('.grid-container').forEach(c => {
+                    const key = (c.querySelector('.grid-title') || {}).innerText || '';
+                    if (mins.includes(key)) {
+                        c.classList.add('minimized');
+                        const b = c.querySelector('.grid-minimize-btn');
+                        if (b) { b.textContent = '+'; b.title = 'Expand section'; }
+                    }
+                });
+            } catch (e) {}
+        })();
+
         function toggleGridMaximize(btn) {
             const container = btn.closest('.grid-container');
             if (!container) return;
@@ -2478,7 +2578,9 @@
                 if (!metadata) return cell;
                 Object.entries(metadata).forEach(([k, v]) => {
                     if (v && v !== 'nan' && v !== 'None' && k !== 'is_openvpn' && 
-                        !['cpu_usage_percent', 'mem_percent', 'cpu_temp_c', 'disk_percent'].includes(k)) {
+                        !['cpu_usage_percent', 'mem_percent', 'cpu_temp_c', 'disk_percent',
+                          'cpu_percent', 'net_rx_bytes', 'net_tx_bytes',
+                          'blk_read_bytes', 'blk_write_bytes', 'finished_at'].includes(k)) {
                         const badge = document.createElement('span');
                         badge.className = 'meta-badge';
                         badge.innerText = `${k}: ${v}`;
@@ -2500,9 +2602,15 @@
                     if (meta.cpu_temp_c)                     stats.push({l: 'TEMP', v: meta.cpu_temp_c        + '°C', c: '#ff8800'});
                     if (meta.disk_percent      !== undefined) stats.push({l: 'DISK', v: meta.disk_percent      + '%', c: '#a200ff'});
                 } else {
+                    if (meta.cpu_percent   != null) stats.push({l: 'CPU',  v: meta.cpu_percent    + '%',   c: '#00ff00'});
                     if (meta.mem_usage_mb  != null) stats.push({l: 'MEM',  v: meta.mem_usage_mb  + ' MB', c: '#00f0ff'});
                     if (meta.mem_percent   != null) stats.push({l: 'MEM%', v: meta.mem_percent    + '%',   c: '#00f0ff'});
                     if (meta.mem_limit_mb  != null) stats.push({l: 'LIM',  v: meta.mem_limit_mb  + ' MB', c: '#007788'});
+                    // Docker HEALTHCHECK verdict — the badge that says WHY the
+                    // dot is orange (no check) vs green (verified) vs red.
+                    if (item.health_state === 'verified')      stats.push({l: '✓ HEALTH', v: meta.health || 'verified',  c: '#00ff00'});
+                    if (item.health_state === 'unhealthy')     stats.push({l: '✗ HEALTH', v: 'unhealthy',                c: '#ff4444'});
+                    if (item.health_state === 'unverified')    stats.push({l: '? HEALTH', v: 'unverified',               c: '#ffae00'});
                 }
 
                 stats.forEach(s => {
@@ -2564,11 +2672,23 @@
                 const hostList = item.hosts || [item.host || 'unknown'];
                 const hostBadges = hostList.map(h => `<span class="node-badge" style="border-color:${hostColor(h)};color:${hostColor(h)}">${h}</span>`).join('');
                 const isOnline = item.status === 'ONLINE';
+                // Green is earned: only health_state 'verified' (docker
+                // HEALTHCHECK reporting healthy) lights green. Running with no
+                // confirmation is orange 'UNVERIFIED'; a failing check is red.
+                const hState = item.health_state;
+                const dotClass = !isOnline ? 'offline'
+                    : hState === 'verified' ? 'online'
+                    : hState === 'unhealthy' ? 'unhealthy'
+                    : 'unverified';
+                const dotTitle = !isOnline ? 'OFFLINE'
+                    : hState === 'verified' ? 'ONLINE'
+                    : hState === 'unhealthy' ? 'UNHEALTHY (healthcheck failing)'
+                    : 'UNVERIFIED (no healthcheck confirmation)';
                 const safeName = (item.name || '').replace(/'/g, "\\'");
 
                 tr.innerHTML = `
                     <td>
-                        <span class="status-dot ${isOnline ? 'online' : 'offline'}" title="${isOnline ? 'ONLINE' : 'OFFLINE'}"></span>
+                        <span class="status-dot ${dotClass}" title="${dotTitle}"></span>
                     </td>
                     <td style="font-weight:bold">${item.name}</td>
                     <td class="col-host">${hostBadges}</td>
