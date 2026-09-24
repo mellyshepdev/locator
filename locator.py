@@ -2474,6 +2474,44 @@ def metrics_containers():
         return jsonify({"error": "metrics unavailable"}), 503
 
 
+@app.route("/api/glances", methods=["GET"])
+def glances_summary():
+    """Combined Glances view — per-unit vitals fanned out over the tailnet.
+
+    Each unit runs `glances -w` bound to its own tailnet IP :61208
+    (locator.d/glances-web.yml, WAKE.md). We query the REST API directly so
+    this tab needs no edge basicAuth hop; the per-unit "full view" links in
+    the node popups still go through glances-unitN.* and its login.
+    """
+    import concurrent.futures
+
+    with lock:
+        targets = {
+            name: str(info.get("tailscale_ip") or "").split(",")[0].strip()
+            for name, info in registry["nodes"].items()
+            if re.fullmatch(r"unit\d+", str(name).lower())
+        }
+    targets = {k: v for k, v in targets.items() if v}
+
+    def _probe(name, ip):
+        out = {"unit": name, "ok": False}
+        base = f"http://{ip}:61208/api/4"
+        try:
+            for ep in ("system", "quicklook", "uptime", "load", "fs"):
+                r = requests.get(f"{base}/{ep}", timeout=3)
+                r.raise_for_status()
+                out[ep] = r.json()
+            out["ok"] = True
+        except Exception as e:
+            out["error"] = str(e)[:140]
+        return out
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(lambda kv: _probe(*kv), sorted(targets.items())))
+
+    return jsonify({"units": results})
+
+
 @app.route("/api/metrics/history", methods=["GET"])
 def metrics_history():
     """Ordered raw RAM samples for one container, for the history chart."""

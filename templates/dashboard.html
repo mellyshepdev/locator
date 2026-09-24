@@ -1004,6 +1004,7 @@
         <button class="toggle-btn" data-view="yamls" onclick="switchView('yamls')">YAMLs</button>
         <button class="toggle-btn" data-view="exec" onclick="switchView('exec')">Exec</button>
         <button class="toggle-btn" data-view="metrics" onclick="switchView('metrics')">Metrics</button>
+        <button class="toggle-btn" data-view="glances" onclick="switchView('glances')">Glances</button>
         <span id="clearance-badge" style="display:none; margin-left:14px; align-self:center; font-family:'Courier New',monospace; font-size:10px; letter-spacing:2px; color:var(--neon-green); border:1px solid var(--neon-green); border-radius:3px; padding:3px 9px; opacity:0.85;"></span>
     </div>
 
@@ -1478,6 +1479,17 @@
         </div>
     </div>
 
+    <div id="view-glances" class="view-container" style="background:var(--grid-bg); background-image:linear-gradient(var(--neon-green-dim) 1px,transparent 1px),linear-gradient(90deg,var(--neon-green-dim) 1px,transparent 1px); background-size:30px 30px; overflow-y:auto; flex-direction:column;">
+        <!-- same top padding as #view-metrics — clears #ui-toggle -->
+        <div style="padding:80px 30px 8px; border-bottom:1px solid var(--neon-green); flex-shrink:0; display:flex; align-items:center; gap:20px; justify-content:space-between; flex-wrap:wrap;">
+            <h2 style="margin:0; color:var(--neon-green); text-transform:uppercase; letter-spacing:4px; font-size:16px; text-shadow:0 0 10px var(--neon-green);">Glances — All Units</h2>
+            <span id="glances-updated" style="font-size:11px; color:var(--neon-green); opacity:0.7; letter-spacing:1px;"></span>
+        </div>
+        <div id="glances-grid" style="padding:20px 30px; display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:18px; align-content:start;">
+            <div style="color:var(--neon-green); font-size:13px;">Loading unit vitals…</div>
+        </div>
+    </div>
+
     <script>
         // ── UI TOGGLE LOGIC ──
         function switchView(viewName) {
@@ -1489,7 +1501,7 @@
             document.querySelectorAll('.toggle-btn').forEach(btn => btn.classList.remove('active'));
             document.querySelectorAll('.view-container').forEach(vc => vc.classList.remove('active'));
 
-            const viewMap = { map: 'view-map', grid: 'view-grid', '3js': 'view-3js', traccar: 'view-traccar', yamls: 'view-yamls', exec: 'view-exec', metrics: 'view-metrics' };
+            const viewMap = { map: 'view-map', grid: 'view-grid', '3js': 'view-3js', traccar: 'view-traccar', yamls: 'view-yamls', exec: 'view-exec', metrics: 'view-metrics', glances: 'view-glances' };
             const viewId = viewMap[viewName] || 'view-map';
             const btn = document.querySelector(`#ui-toggle .toggle-btn[data-view="${viewName}"]`);
             if (btn) btn.classList.add('active');
@@ -1499,9 +1511,78 @@
             if (viewName === 'traccar') initTraccarMap();
             if (viewName === 'exec') loadScheduleList();
             if (viewName === 'metrics') loadMetrics();
+            if (viewName === 'glances') loadGlances();
             // Map rendering is skipped by the poll loop while this view isn't
             // visible (see loadRegistryData) — catch it up now that it is.
             if (viewName === 'map' && lastRegistryData) renderMap(lastRegistryData);
+        }
+
+
+        // ── GLANCES COMBINED VIEW ──
+        // /api/glances fans out to each unit's glances -w REST API over the
+        // tailnet (locator.py). Cards show quicklook vitals + link to the
+        // unit's full glances-unitN.* UI (edge basicAuth).
+        let _glancesTimer = null;
+
+        function loadGlances() {
+            if (!_glancesTimer) _glancesTimer = setInterval(loadGlances, 10000);
+            fetch('/api/glances')
+                .then(r => r.json())
+                .then(data => renderGlances(data.units || []))
+                .catch(() => {
+                    document.getElementById('glances-grid').innerHTML =
+                        '<div style="color:#ff4444;font-size:13px;">/api/glances unreachable</div>';
+                });
+        }
+
+        function _gBar(label, pct, color) {
+            pct = (pct === null || pct === undefined || isNaN(pct)) ? null : Math.round(pct);
+            const w = pct === null ? 0 : Math.min(100, pct);
+            const c = pct === null ? 'rgba(255,255,255,0.15)' : (pct > 85 ? 'var(--danger)' : color);
+            const txt = pct === null ? '—' : pct + '%';
+            return `<div style="margin:6px 0;">
+                <div style="display:flex;justify-content:space-between;font-size:10px;letter-spacing:1px;color:var(--neon-green);opacity:0.8;"><span>${label}</span><span>${txt}</span></div>
+                <div style="height:6px;background:rgba(255,255,255,0.08);border:1px solid var(--neon-green-dim);margin-top:2px;"><div style="height:100%;width:${w}%;background:${c};box-shadow:0 0 6px ${c};"></div></div>
+            </div>`;
+        }
+
+        function renderGlances(units) {
+            const grid = document.getElementById('glances-grid');
+            document.getElementById('glances-updated').textContent =
+                'updated ' + new Date().toLocaleTimeString();
+            if (!units.length) {
+                grid.innerHTML = '<div style="color:var(--neon-green);font-size:13px;">No units reporting.</div>';
+                return;
+            }
+            grid.innerHTML = units.map(u => {
+                const up = u.ok;
+                const ql = u.quicklook || {};
+                const sys = u.system || {};
+                const load = u.load || {};
+                const uptime = (u.uptime && (u.uptime.uptime || u.uptime)) || '';
+                const fs = Array.isArray(u.fs) ? u.fs : [];
+                const root = fs.find(f => f.mnt_point === '/') || fs[0] || {};
+                const host = sys.hostname || u.unit;
+                const os = [sys.linux_distro || sys.os_name, sys.os_version].filter(Boolean).join(' ');
+                const loadTxt = up ? [load.min1, load.min5, load.min15].map(v => v === undefined ? '—' : Number(v).toFixed(2)).join(' / ') : '';
+                return `<div style="border:1px solid ${up ? 'var(--neon-green)' : 'var(--danger)'};background:rgba(0,0,0,0.6);padding:14px 16px;border-radius:4px;box-shadow:0 0 12px ${up ? 'rgba(0,255,65,0.15)' : 'rgba(255,0,60,0.15)'};">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                        <span style="color:${up ? 'var(--neon-green)' : '#ff4444'};font-weight:bold;letter-spacing:2px;text-transform:uppercase;">${u.unit}</span>
+                        <a href="https://glances-${u.unit}.theofficialblacksheepco.com" target="_blank" rel="noopener" style="color:var(--accent);font-size:11px;text-decoration:none;letter-spacing:1px;" title="full glances UI (basic-auth login)">FULL VIEW ↗</a>
+                    </div>
+                    ${up ? `
+                    <div style="font-size:11px;color:rgba(255,255,255,0.6);margin-bottom:6px;">${host}${os ? ' · ' + os : ''}</div>
+                    ${_gBar('CPU', ql.cpu, 'var(--neon-green)')}
+                    ${_gBar('MEM', ql.mem, 'var(--accent)')}
+                    ${_gBar('SWAP', ql.swap, '#c084fc')}
+                    ${_gBar('DISK ' + (root.mnt_point || ''), root.percent, '#f59e0b')}
+                    <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--neon-green);opacity:0.8;margin-top:8px;letter-spacing:1px;">
+                        <span>LOAD ${loadTxt}</span><span>UP ${uptime}</span>
+                    </div>` : `
+                    <div style="color:#ff4444;font-size:12px;margin:10px 0;">glances unreachable</div>
+                    <div style="color:rgba(255,255,255,0.4);font-size:10px;word-break:break-all;">${u.error || ''}</div>`}
+                </div>`;
+            }).join('');
         }
 
         // Deep link: /?view=grid opens straight into the Tactical Grid

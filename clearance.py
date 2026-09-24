@@ -261,6 +261,9 @@ ROUTE_CLEARANCE = {
     "metrics_summary":       ENGINEER,
     "metrics_containers":    ENGINEER,
     "metrics_history":       ENGINEER,
+    # Combined per-unit vitals for the Glances tab — read-only summary of the
+    # same node health the grid already shows; matches VIEW_CLEARANCE level.
+    "glances_summary":       CLIENT,
     "list_migrations":       PARTNER,
     # Fleet refresh — status/history read like the other operational telemetry;
     # triggering one redeploys across the fleet, so that sits with the deploys.
@@ -352,6 +355,7 @@ VIEW_CLEARANCE = {
     "yamls":   ENGINEER,
     "exec":    ROOT,
     "metrics": ENGINEER,
+    "glances": CLIENT,
 }
 
 # ── FIELD REDACTION ─────────────────────────────────────────────────────────
