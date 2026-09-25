@@ -1,0 +1,10 @@
+Service:
+
+  # Dead name — the gitea instance on unit7 registers as 'forge'. This entry
+  # only exists in the registry from the old naming; keeping the stanza so
+  # the substring match against `puffbase`'s policy can never deploy-loop it.
+  puffbase-gitea:
+    deployment_type: optional
+    location_type: stationary
+    instances: 1
+    idle_stop: false

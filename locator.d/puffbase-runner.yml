@@ -1,0 +1,13 @@
+Service:
+
+  # gitea act_runner for the 'forge' instance on unit7. Exited 2026-09-16 and
+  # stayed down — possibly deliberate (no CI in flight). Without this stanza
+  # it substring-matched the `puffbase` web policy and got deploy-looped
+  # against a project_dir with no compose file. Not pinned anywhere: if the
+  # runner should live again, give it units:/project_dir:
+  # /home/swoopg111/server/puffbase and it will be placed.
+  puffbase-runner:
+    deployment_type: optional
+    location_type: stationary
+    instances: 1
+    idle_stop: false

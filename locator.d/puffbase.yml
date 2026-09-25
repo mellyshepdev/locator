@@ -14,7 +14,7 @@ Service:
     idle_stop: false
     restart_when_stopped: true
     public_wake: true
-    project_dir: /home/swoopg111/projects/puffbase
+    project_dir: /home/swoopg111/server/puffbase
     wake_triggers:
       domain:
         - puff-base.com
