@@ -1435,11 +1435,34 @@
                 <div id="metrics-summary" style="font-size:13px; color:var(--neon-green);">Loading...</div>
             </div>
 
-            <!-- Overview charts: by-host split and top containers by RAM -->
+            <!-- Per-unit live load: every number the node agents push -->
+            <div>
+                <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Unit Load (Live)</h3>
+                <div style="max-width:100%; overflow-x:auto;">
+                    <table style="width:100%; border-collapse:collapse; font-size:12px;">
+                        <thead>
+                            <tr style="border-bottom:1px solid var(--neon-green); text-align:left; color:var(--neon-green);">
+                                <th style="padding:6px;">UNIT</th><th style="padding:6px;">STATUS</th>
+                                <th style="padding:6px;">CPU</th><th style="padding:6px;">RAM</th>
+                                <th style="padding:6px;">DISK</th><th style="padding:6px;">MEM USED</th>
+                                <th style="padding:6px;">DISK USED</th><th style="padding:6px;">DISK FREE</th>
+                                <th style="padding:6px;">CONTAINERS</th><th style="padding:6px;">SEEN</th>
+                            </tr>
+                        </thead>
+                        <tbody id="metrics-units-tbody"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Overview charts: by-host split, by-category split, top RAM -->
             <div style="display:flex; gap:28px; flex-wrap:wrap;">
                 <div style="flex:1; min-width:260px; max-width:360px;">
                     <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Containers by Host</h3>
                     <canvas id="metrics-pie" height="220"></canvas>
+                </div>
+                <div style="flex:1; min-width:260px; max-width:360px;">
+                    <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Containers by Category</h3>
+                    <canvas id="metrics-catpie" height="220"></canvas>
                 </div>
                 <div style="flex:2; min-width:320px;">
                     <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Top Containers by Avg RAM</h3>
@@ -1447,10 +1470,10 @@
                 </div>
             </div>
 
-            <!-- Live per-node RAM/disk (from the same registry data behind the
+            <!-- Live per-node CPU/RAM/disk (from the same registry data behind the
                  Devices table — not historical, so it's a bar not a line). -->
             <div>
-                <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Node Resources (Live) — RAM % / Disk %</h3>
+                <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Node Resources (Live) — CPU % / RAM % / Disk %</h3>
                 <canvas id="metrics-node-bar" height="160"></canvas>
             </div>
 
@@ -1464,14 +1487,22 @@
 
             <!-- Per-container table -->
             <div>
-                <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Containers</h3>
+                <div style="display:flex; align-items:center; gap:14px; margin-bottom:10px;">
+                    <h3 style="margin:0; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Containers</h3>
+                    <select id="metrics-groupby" onchange="onMetricsGroupBy()" style="background:#000; color:var(--neon-green); border:1px solid var(--neon-green); padding:4px 8px; font-family:inherit; font-size:11px;">
+                        <option value="category">GROUP: CATEGORY</option>
+                        <option value="unit">GROUP: UNIT</option>
+                        <option value="flat">GROUP: FLAT</option>
+                    </select>
+                </div>
                 <div style="max-width:100%; overflow-x:auto;">
                     <table style="width:100%; border-collapse:collapse; font-size:12px;">
                         <thead>
                             <tr style="border-bottom:1px solid var(--neon-green); text-align:left; color:var(--neon-green);">
                                 <th style="padding:6px;">CONTAINER</th><th style="padding:6px;">HOST</th>
                                 <th style="padding:6px;">UPTIME</th><th style="padding:6px;">AVG RAM</th>
-                                <th style="padding:6px;">MAX RAM</th><th style="padding:6px;">LAST SEEN</th>
+                                <th style="padding:6px;">MAX RAM</th><th style="padding:6px;">AVG MEM%</th>
+                                <th style="padding:6px;">MAX MEM%</th><th style="padding:6px;">LAST SEEN</th>
                             </tr>
                         </thead>
                         <tbody id="metrics-tbody"></tbody>
@@ -3941,7 +3972,7 @@
         // headers instead of one flat list.
         const METRIC_CAT_ORDER = ['docker containers', 'websites', 'virtual machines', 'serverless', 'devices', 'native services', 'cloud platforms'];
         const METRIC_CAT_COLOR = {
-            'docker containers': 'var(--neon-green)',
+            'docker containers': '#00ff00',
             'websites': '#a200ff',
             'virtual machines': '#ff8800',
             'serverless': '#ff2d95',
@@ -3963,6 +3994,114 @@
             return 'docker containers';
         }
 
+        // Latest containers-table payload + range, kept so the GROUP BY
+        // toggle can re-render without refetching.
+        let _metricsRows = [];
+        let _metricsRange = { since: '', until: '' };
+        let metricsCatPieChart = null;
+
+        function onMetricsGroupBy() { renderMetricsTable(); }
+
+        // Group header order/colour: categories use the Tactical Grid palette,
+        // units use the same nodeColor as everywhere else.
+        function metricGroupColor(mode, key) {
+            if (mode === 'unit') return nodeColor(key);
+            return METRIC_CAT_COLOR[key] || '#888';
+        }
+
+        function renderMetricsTable() {
+            const tbody = document.getElementById('metrics-tbody');
+            const rows = _metricsRows;
+            const { since, until } = _metricsRange;
+            const mode = (document.getElementById('metrics-groupby') || {}).value || 'category';
+            const svcMap = (lastRegistryData && lastRegistryData.services) || {};
+            const rowHtml = r => `
+                <tr style="border-bottom:1px solid rgba(0,255,0,0.15); cursor:pointer;" onclick="showContainerHistory('${r.service_id}', '${since}', '${until}')">
+                    <td style="padding:6px;">${r.service_id}</td>
+                    <td style="padding:6px;">${(r.host || '').toUpperCase()}</td>
+                    <td style="padding:6px;">${r.current_status === 'ONLINE' && r.started_at ? timeSince(r.started_at) : 'offline'}</td>
+                    <td style="padding:6px;">${r.avg_mem_mb != null ? r.avg_mem_mb.toFixed(0) + ' MB' : '—'}</td>
+                    <td style="padding:6px;">${r.max_mem_mb != null ? r.max_mem_mb.toFixed(0) + ' MB' : '—'}</td>
+                    <td style="padding:6px;">${r.avg_mem_percent != null ? r.avg_mem_percent.toFixed(1) + '%' : '—'}</td>
+                    <td style="padding:6px;">${r.max_mem_percent != null ? r.max_mem_percent.toFixed(1) + '%' : '—'}</td>
+                    <td style="padding:6px;">${timeSince(r.last_seen)}</td>
+                </tr>`;
+            if (mode === 'flat') { tbody.innerHTML = rows.map(rowHtml).join(''); return; }
+            const groups = {};
+            rows.forEach(r => {
+                const key = mode === 'unit' ? (r.host || 'unknown') : metricCategoryOf(svcMap[r.service_id]);
+                (groups[key] = groups[key] || []).push(r);
+            });
+            const keys = Object.keys(groups).sort((a, b) => {
+                if (mode === 'unit') return a.localeCompare(b);
+                const ia = METRIC_CAT_ORDER.indexOf(a), ib = METRIC_CAT_ORDER.indexOf(b);
+                return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+            });
+            tbody.innerHTML = keys.map(k => {
+                const color = metricGroupColor(mode, k);
+                return `<tr><td colspan="8" style="padding:10px 6px 4px; font-weight:bold; letter-spacing:3px; text-transform:uppercase; color:${color}; border-top:1px solid ${color};">${k} (${groups[k].length})</td></tr>`
+                     + groups[k].map(rowHtml).join('');
+            }).join('');
+        }
+
+        // Every node-level number the agents push, one row per unit.
+        function renderUnitLoadTable(rows) {
+            const el = document.getElementById('metrics-units-tbody');
+            if (!el) return;
+            const nodes = Object.entries((lastRegistryData && lastRegistryData.nodes) || {})
+                .map(([id, n]) => ({ id, ...n }))
+                .sort((a, b) => (b.cpu_percent || 0) - (a.cpu_percent || 0));
+            const pct = v => v != null ? `<span style="color:${pctColor(v)}">${Number(v).toFixed(1)}%</span>` : '—';
+            el.innerHTML = nodes.map(n => {
+                const count = rows.filter(r => (r.host || '') === n.id).length;
+                const stale = n.status === 'ONLINE' && (!n.last_seen || (Date.now() - new Date(n.last_seen)) > 300000);
+                const status = n.status !== 'ONLINE' ? 'OFFLINE' : (stale ? 'STALE' : 'ONLINE');
+                return `<tr style="border-bottom:1px solid rgba(0,255,0,0.15);">
+                    <td style="padding:6px; font-weight:bold; color:${nodeColor(n.id)};">${n.id.toUpperCase()}</td>
+                    <td style="padding:6px;">${status}</td>
+                    <td style="padding:6px;">${pct(n.cpu_percent)}</td>
+                    <td style="padding:6px;">${pct(n.mem_percent)}</td>
+                    <td style="padding:6px;">${pct(n.disk_percent)}</td>
+                    <td style="padding:6px;">${n.mem_used_gb != null && n.mem_total_gb != null ? n.mem_used_gb + '/' + n.mem_total_gb + ' GB' : '—'}</td>
+                    <td style="padding:6px;">${n.disk_used_gb != null && n.disk_total_gb != null ? n.disk_used_gb + '/' + n.disk_total_gb + ' GB' : '—'}</td>
+                    <td style="padding:6px;">${n.disk_free_gb != null ? n.disk_free_gb + ' GB' : '—'}</td>
+                    <td style="padding:6px;">${count || '—'}</td>
+                    <td style="padding:6px; color:#888;">${n.last_seen ? timeSince(n.last_seen) : 'Never'}</td>
+                </tr>`;
+            }).join('') || '<tr><td colspan="10" style="padding:10px;color:#555;">No unit data.</td></tr>';
+        }
+
+        function renderCatPie(rows) {
+            const canvas = document.getElementById('metrics-catpie');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            if (metricsCatPieChart) metricsCatPieChart.destroy();
+            const svcMap = (lastRegistryData && lastRegistryData.services) || {};
+            const counts = {};
+            rows.forEach(r => {
+                const c = metricCategoryOf(svcMap[r.service_id]);
+                counts[c] = (counts[c] || 0) + 1;
+            });
+            const cats = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+            if (!cats.length) return;
+            metricsCatPieChart = new Chart(ctx, {
+                type: 'pie',
+                data: {
+                    labels: cats.map(c => c.toUpperCase()),
+                    datasets: [{
+                        data: cats.map(c => counts[c]),
+                        backgroundColor: cats.map(c => METRIC_CAT_COLOR[c] || '#888'),
+                        borderColor: '#000',
+                        borderWidth: 2,
+                    }],
+                },
+                options: {
+                    responsive: true,
+                    plugins: { legend: { position: 'bottom', labels: { color: '#00ff00' } } },
+                },
+            });
+        }
+
         async function loadMetrics() {
             const bounds = metricsRangeBounds();
             if (!bounds) return;
@@ -3974,51 +4113,21 @@
             const summaryEl = document.getElementById('metrics-summary');
             const tbody = document.getElementById('metrics-tbody');
             summaryEl.textContent = 'Loading...';
-            tbody.innerHTML = '<tr><td colspan="6" style="padding:10px;color:#555;">Loading...</td></tr>';
-
-            try {
-                const summary = await (await fetch(`/api/metrics/summary?${qs}`)).json();
-                if (summary.error) throw new Error(summary.error);
-                const byHost = (summary.by_host || []).map(h => `${h.host || 'unknown'}: ${h.containers}`).join(' · ');
-                summaryEl.textContent = `${summary.total_containers} container(s) active in range` + (byHost ? ` — ${byHost}` : '');
-                renderHostPie(summary.by_host || []);
-            } catch (err) {
-                summaryEl.textContent = `Error: ${err.message}`;
-            }
+            tbody.innerHTML = '<tr><td colspan="8" style="padding:10px;color:#555;">Loading...</td></tr>';
 
             try {
                 const rows = await (await fetch(`/api/metrics/containers?${qs}`)).json();
                 if (rows.error) throw new Error(rows.error);
+                _metricsRows = rows;
+                _metricsRange = { since, until };
+                renderUnitLoadTable(rows);
+                renderCatPie(rows);
                 if (!rows.length) {
-                    tbody.innerHTML = '<tr><td colspan="6" style="padding:10px;color:#555;">No container activity in this range.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="8" style="padding:10px;color:#555;">No container activity in this range.</td></tr>';
                     document.getElementById('metrics-chart-wrap').style.display = 'none';
                     return;
                 }
-                // Group rows under the same category headers the Tactical
-                // Grid uses — category comes from the live registry entry
-                // for each service_id, falling back to type/url inference.
-                const svcMap = (lastRegistryData && lastRegistryData.services) || {};
-                const groups = {};
-                rows.forEach(r => {
-                    const cat = metricCategoryOf(svcMap[r.service_id]);
-                    (groups[cat] = groups[cat] || []).push(r);
-                });
-                const cats = Object.keys(groups).sort((a, b) => {
-                    const ia = METRIC_CAT_ORDER.indexOf(a), ib = METRIC_CAT_ORDER.indexOf(b);
-                    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
-                });
-                tbody.innerHTML = cats.map(cat => `
-                    <tr><td colspan="6" style="padding:10px 6px 4px; font-weight:bold; letter-spacing:3px; text-transform:uppercase; color:${METRIC_CAT_COLOR[cat] || '#888'}; border-top:1px solid ${METRIC_CAT_COLOR[cat] || '#888'};">${cat} (${groups[cat].length})</td></tr>
-                    ` + groups[cat].map(r => `
-                    <tr style="border-bottom:1px solid rgba(0,255,0,0.15); cursor:pointer;" onclick="showContainerHistory('${r.service_id}', '${since}', '${until}')">
-                        <td style="padding:6px;">${r.service_id}</td>
-                        <td style="padding:6px;">${(r.host || '').toUpperCase()}</td>
-                        <td style="padding:6px;">${r.current_status === 'ONLINE' && r.started_at ? timeSince(r.started_at) : 'offline'}</td>
-                        <td style="padding:6px;">${r.avg_mem_mb != null ? r.avg_mem_mb.toFixed(0) + ' MB' : '—'}</td>
-                        <td style="padding:6px;">${r.max_mem_mb != null ? r.max_mem_mb.toFixed(0) + ' MB' : '—'}</td>
-                        <td style="padding:6px;">${timeSince(r.last_seen)}</td>
-                    </tr>
-                    `).join('')).join('');
+                renderMetricsTable();
                 // The chart used to stay hidden until you clicked a row, so the
                 // tab could show a fully populated table with no graph anywhere
                 // on it. Default to an overview of the top containers by avg
@@ -4026,7 +4135,27 @@
                 showOverviewChart(rows, since, until);
                 renderTopBar(rows);
             } catch (err) {
-                tbody.innerHTML = `<tr><td colspan="6" style="padding:10px;color:var(--danger);">${err.message}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="8" style="padding:10px;color:var(--danger);">${err.message}</td></tr>`;
+            }
+
+            try {
+                const summary = await (await fetch(`/api/metrics/summary?${qs}`)).json();
+                if (summary.error) throw new Error(summary.error);
+                const byHost = (summary.by_host || []).map(h => `${h.host || 'unknown'}: ${h.containers}`).join(' · ');
+                const svcMap = (lastRegistryData && lastRegistryData.services) || {};
+                const catCounts = {};
+                _metricsRows.forEach(r => {
+                    const c = metricCategoryOf(svcMap[r.service_id]);
+                    catCounts[c] = (catCounts[c] || 0) + 1;
+                });
+                const byCat = Object.entries(catCounts).sort((a, b) => b[1] - a[1])
+                    .map(([c, n]) => `${c}: ${n}`).join(' · ');
+                summaryEl.textContent = `${summary.total_containers} container(s) active in range`
+                    + (byHost ? ` — by unit: ${byHost}` : '')
+                    + (byCat ? ` — by category: ${byCat}` : '');
+                renderHostPie(summary.by_host || []);
+            } catch (err) {
+                summaryEl.textContent = `Error: ${err.message}`;
             }
         }
 
