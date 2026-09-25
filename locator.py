@@ -3855,8 +3855,16 @@ def _do_drain_restore(drain_id, rec=None, cmds=None):
         if cmds is None:
             cmds = [command_queue.get(cid) for cid in rec["commands"]]
         for c in cmds:
-            if c and c["status"] in ("PENDING", "DISPATCHED"):
+            if not c:
+                continue
+            if c["status"] == "PENDING":
                 c["status"] = "CANCELLED"
+            elif c["status"] == "DISPATCHED":
+                # Already in lokey's hands — it WILL run. Chaining the
+                # start to this stop's completion keeps the pair ordered;
+                # queuing the start now let the stale stop land last and
+                # leave the container down anyway (2026-09-25 live case).
+                c["then_start"] = drain_id
         restarted = []
         for c in cmds:
             if c and c["status"] == "DONE" and c.get("success"):
@@ -6761,6 +6769,11 @@ def commands_complete():
                 st = _idle_state.get((cmd["unit"], cmd.get("container")))
                 if st:
                     st["stopped_count"] += 1
+    # Chained restore: a drain that restored while this stop was already
+    # dispatched gets its start queued NOW — after the stop ran, not before.
+    if cmd.get("then_start") and cmd["action"] == "stop":
+        _queue_command(cmd["unit"], cmd.get("container"), "start",
+                       source=f"power-restore:{cmd['then_start']}")
     return jsonify({"ok": True})
 
 
