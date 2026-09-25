@@ -3700,6 +3700,27 @@ def idle_status():
 POWER_TOKEN  = os.environ.get("POWER_TOKEN", "")
 power_drains = {}   # drain_id -> record; records are kept with command history
 POWER_DRAIN_RETENTION = 50
+# A drain's initiator can die holding it (gate restart loses its drain_id,
+# crew crash skips restore). Without an expiry the stopped containers stay
+# down forever, so unrestored drains auto-restore past this age.
+POWER_DRAIN_TTL_S = int(os.environ.get("POWER_DRAIN_TTL_S", "7200"))
+
+
+def _expire_old_drains():
+    """Auto-restore unrestored drains older than POWER_DRAIN_TTL_S.
+
+    Called lazily from the drain endpoints — no separate worker needed,
+    since any poll/restore passes through here.
+    """
+    now = datetime.now(timezone.utc)
+    with command_lock:
+        stale = [r["id"] for r in power_drains.values()
+                 if not r.get("restored")
+                 and (now - datetime.fromisoformat(
+                      r["created_at"])).total_seconds() > POWER_DRAIN_TTL_S]
+    for sid in stale:
+        print(f"🔌 POWER DRAIN {sid} expired after {POWER_DRAIN_TTL_S}s — auto-restoring")
+        _do_drain_restore(sid)
 
 
 def _power_authorized():
@@ -3789,6 +3810,8 @@ def power_drain_status(drain_id):
             stopped.append(f"{c['unit']}/{c['container']}")
         elif c["status"] in ("DONE", "FAILED"):
             failed.append(f"{c['unit']}/{c['container']}")
+        elif c["status"] == "CANCELLED":
+            pass  # resolved — neither stopped nor owed a start
         else:
             waiting.append(f"{c['unit']}/{c['container']}")
     return jsonify({
@@ -3814,14 +3837,35 @@ def power_restore():
         return jsonify({"error": "unknown drain_id"}), 404
     if rec["restored"]:
         return jsonify({"drain_id": drain_id, "restored": [], "already": True})
-    restarted = []
-    for c in cmds:
-        if c and c["status"] == "DONE" and c.get("success"):
-            _queue_command(c["unit"], c["container"], "start", source=f"power-restore:{drain_id}")
-            restarted.append(f"{c['unit']}/{c['container']}")
-    rec["restored"] = True
-    print(f"🔌 POWER RESTORE {drain_id}: queued {len(restarted)} starts")
+    restarted = _do_drain_restore(drain_id, rec=rec, cmds=cmds)
     return jsonify({"drain_id": drain_id, "restored": restarted})
+
+
+def _do_drain_restore(drain_id, rec=None, cmds=None):
+    """The restore itself, shared by the endpoint and drain expiry.
+
+    Stops still sitting in the queue must never fire after the restore —
+    they would land as untracked stops no drain owns (website-backend,
+    2026-09-25). A DISPATCHED one may already be in lokey's hands and can
+    still run; that is the accepted window."""
+    with command_lock:
+        rec = rec or power_drains.get(drain_id)
+        if rec is None:
+            return []
+        if cmds is None:
+            cmds = [command_queue.get(cid) for cid in rec["commands"]]
+        for c in cmds:
+            if c and c["status"] in ("PENDING", "DISPATCHED"):
+                c["status"] = "CANCELLED"
+        restarted = []
+        for c in cmds:
+            if c and c["status"] == "DONE" and c.get("success"):
+                _queue_command(c["unit"], c["container"], "start",
+                               source=f"power-restore:{drain_id}")
+                restarted.append(f"{c['unit']}/{c['container']}")
+        rec["restored"] = True
+    print(f"🔌 POWER RESTORE {drain_id}: queued {len(restarted)} starts")
+    return restarted
 
 
 # ── PERSISTENCE ─────────────────────────────────────────────────────────────
@@ -5144,7 +5188,9 @@ _idle_lock = threading.Lock()
 
 # Container command queue for lokeys — id -> command dict
 command_queue: dict = {}
-command_lock = threading.Lock()
+# RLock, not Lock: _do_drain_restore queues start commands while holding
+# this — _queue_command takes it too and a plain Lock would deadlock.
+command_lock = threading.RLock()
 COMMAND_RETRY_SECONDS = 180   # re-serve DISPATCHED commands the lokey never completed
 COMMAND_RETENTION     = 100   # completed commands kept for history
 

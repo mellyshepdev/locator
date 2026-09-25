@@ -43,6 +43,13 @@ POWER_TOKEN = os.environ.get("POWER_TOKEN", "")
 DRAIN_UNITS = [u.strip() for u in
                os.environ.get("DRAIN_UNITS", "unit2,unit7").split(",")
                if u.strip()]
+# Units whose quiet is REQUIRED before inference runs — the models live on
+# unit2, so its stops gate the request. Stops on other units (unit7's slow
+# lokey tick takes minutes under load) still fire and restore normally but
+# never block the request.
+REQUIRED_UNITS = {u.strip() for u in
+                  os.environ.get("REQUIRED_UNITS", "unit2").split(",")
+                  if u.strip()}
 DRAIN_EXCLUDE = [n.strip() for n in
                  os.environ.get("DRAIN_EXCLUDE", "").split(",") if n.strip()]
 ACK_TIMEOUT_S = float(os.environ.get("ACK_TIMEOUT_S", "300"))
@@ -136,13 +143,26 @@ async def _drain_task():
                     raise RuntimeError(
                         f"drain {sid} vanished (locator restart?)")
                 st = await r.json()
-            if st.get("acknowledged"):
-                if st.get("failed"):
-                    raise RuntimeError(
-                        f"drain {sid} acknowledged with failed stops: "
-                        f"{st['failed']}")
+            waiting_req = [w for w in st.get("waiting", [])
+                           if w.split("/", 1)[0] in REQUIRED_UNITS]
+            failed_req = [f for f in st.get("failed", [])
+                          if f.split("/", 1)[0] in REQUIRED_UNITS]
+            if failed_req:
+                raise RuntimeError(
+                    f"drain {sid} failed stops on required units: "
+                    f"{failed_req}")
+            if st.get("acknowledged") or not waiting_req:
+                best_w = len(st.get("waiting", []))
+                best_f = [f for f in st.get("failed", [])
+                          if f.split("/", 1)[0] not in REQUIRED_UNITS]
+                if best_f:
+                    log.warning("drain %s best-effort stop failures: %s",
+                                sid, best_f)
                 STATE["phase"] = "ready"
-                STATE["detail"] = f"drain {sid} holding {len(st.get('stopped', []))} stops"
+                STATE["detail"] = (
+                    f"drain {sid} holding {len(st.get('stopped', []))} stops"
+                    + (f" (+{best_w} pending,{len(best_f)} failed "
+                       f"best-effort)" if best_w or best_f else ""))
                 log.info("%s", STATE["detail"])
                 return
         raise RuntimeError(
