@@ -1,0 +1,40 @@
+Service:
+
+  # wazuh — the SIEM server stack on unit2 (manager + indexer + dashboard).
+  # Owner call 2026-09-25: may yield to llm-gate power drains — wazuh-indexer
+  # is the largest non-LLM allocation on the box, so stopping the stack is
+  # the one move that frees real room for inference.
+  #
+  # Consequences, both accepted:
+  #   - During a drain + lease window unit2's security monitoring is BLIND:
+  #     no alerting, no dashboards. fluent-bit still ships logs, so nothing
+  #     is lost — it's unanalyzed until restore.
+  #   - drain_stop is mutually exclusive with restart_when_stopped (a
+  #     keep-alive container in a drain set would be resurrected mid-drain),
+  #     so these give up lokey auto-resurrection. Docker's own restart
+  #     policy still covers crashes; drain restore covers the planned stop.
+  #
+  # idle_stop stays false regardless: the dashboard's route is not a reason
+  # to ever stop a SIEM for idleness. unit7's wazuh-agent/syslog-relay are
+  # deliberately NOT covered — agents must keep shipping telemetry.
+  wazuh-manager:
+    deployment_type: optional
+    location_type: stationary
+    units: "2"
+    instances: 1
+    idle_stop: false
+    drain_stop: true
+  wazuh-indexer:
+    deployment_type: optional
+    location_type: stationary
+    units: "2"
+    instances: 1
+    idle_stop: false
+    drain_stop: true
+  wazuh-dashboard:
+    deployment_type: optional
+    location_type: stationary
+    units: "2"
+    instances: 1
+    idle_stop: false
+    drain_stop: true
