@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-09-25T08:25:50.420550+00:00 —
+  # 'wazuh-agent' registered on unit7 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  wazuh-agent:
+    deployment_type: optional
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: false

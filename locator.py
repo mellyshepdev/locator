@@ -1459,6 +1459,58 @@ def _infer_category(svc_type, url=""):
     return "docker containers"
 
 
+# Auto-issue locator.d stanzas for containers that register with none. Off via
+# AUTO_POLICY_FILL=false if the generated files ever get in the way.
+AUTO_POLICY_FILL = os.environ.get("AUTO_POLICY_FILL", "true").lower() == "true"
+_POLICY_FNAME_SAFE = re.compile(r"[^a-zA-Z0-9_.-]+")
+
+
+def _autofill_policy_stub(name, host):
+    """Write a locator.d stub for a registered container with no stanza.
+
+    lokey registers every running container; one without a stanza used to live
+    on implicit defaults — invisible if unrouted, yield-able if routed. The
+    stub makes every deployed container a first-class policy entry with
+    conservative defaults: never idle-stopped, never drained, not essential —
+    until a human tunes it. One-shot: an existing stanza (exact, base-name or
+    substring match via _policy_for) or an existing file means a decision was
+    already made and nothing is written.
+    """
+    if not AUTO_POLICY_FILL:
+        return
+    try:
+        if _policy_for(name):
+            return
+        fname = _POLICY_FNAME_SAFE.sub("-", str(name)).strip("-.") or "unnamed"
+        path = os.path.join(LOCATOR_YML_DIR, f"{fname}.yml")
+        if os.path.isfile(path):
+            return
+        m = re.search(r"unit(\d+)", host or "")
+        units_line = f'    units: "{m.group(1)}"\n' if m else ""
+        body = (
+            "Service:\n\n"
+            f"  # AUTO-GENERATED {datetime.now(timezone.utc).isoformat()} —\n"
+            f"  # '{name}' registered on {host} with no locator.d stanza.\n"
+            "  # Conservative defaults: never idle-stopped, never drained,\n"
+            "  # not essential. Tune (idle_stop/drain_stop/deployment_type)\n"
+            "  # or delete this file to return to implicit defaults.\n"
+            f"  {name}:\n"
+            "    deployment_type: optional\n"
+            "    location_type: stationary\n"
+            f"{units_line}"
+            "    instances: 1\n"
+            "    idle_stop: false\n"
+        )
+        # 'x' fails rather than clobber if a human stanza landed mid-race.
+        with open(path, "x") as f:
+            f.write(body)
+        print(f"📝 AUTO-POLICY: locator.d/{fname}.yml written for '{name}'@{host}")
+    except FileExistsError:
+        pass
+    except Exception as e:
+        print(f"⚠️  auto-policy for '{name}' failed: {e}")
+
+
 @app.route("/register", methods=["POST"])
 def register_service():
     """
@@ -1581,6 +1633,8 @@ def register_service():
     persist_registry()
     if host != "unknown":
         _enforce_dedup(name, host)
+    if _svc_type == "container":
+        _autofill_policy_stub(name, host)
 
     if _category == "docker containers":
         _cm = data.get("metadata") or {}

@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-09-25T08:24:51.711890+00:00 —
+  # 'website-backend' registered on unit7 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  website-backend:
+    deployment_type: optional
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: false
