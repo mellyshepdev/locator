@@ -213,6 +213,13 @@ INGEST = {
     # Read-only ack poll; listed with its mutating pair so a caller that can
     # drain can also observe the drain it started.
     "power_drain_status",
+    # Quarantine/requeue are already admin-keyed inside their handlers —
+    # leaving them only behind the user-clearance gate made them unreachable
+    # to every credential that was ever meant to call them (the sweeper is
+    # report-only; nothing else issues quarantines). Both still fail closed
+    # without a valid X-Locator-Admin-Key.
+    "secrets_quarantine",
+    "secrets_requeue_redact",
 }
 
 # Routes a lokey reaches with its PER-UNIT key (X-Lokey-Unit + X-Lokey-Key),
