@@ -1,0 +1,16 @@
+Service:
+
+  # llm-gate — the fail-closed inference gate on unit2 (added 2026-09-25).
+  # Owns the public ollama/llama.cpp ports and refuses to forward any
+  # inference request until its power drain is acknowledged. It is the
+  # drain INITIATOR: draining or idle-stopping it would orphan every
+  # in-flight drain and take the whole LLM path down, so it is essential
+  # and restart-pinned. The docker label locator.pinned=true on the
+  # container makes lokey's NEVER_STOP side refuse too.
+  llm-gate:
+    deployment_type: essential
+    location_type: stationary
+    units: "2"
+    instances: 1
+    idle_stop: false
+    restart_when_stopped: true

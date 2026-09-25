@@ -7,8 +7,14 @@ Service:
   glances-web:
     deployment_type: optional
     location_type: stationary
-    units: "7"
+    # units covers 2_7: a same-named glances-web also runs on unit2.
+    units: "2_7"
     instances: 1
     # idle_stop removed 2026-09-24 — the Locator node popups link to
     # glances-unitN.* and those links must stay live, so the container
     # stays up. (Was 15m idle_stop per owner call 2026-09-16.)
+    # drain_stop added 2026-09-25 — llm-gate power drains MAY stop it to
+    # make room for inference, at the cost of those popup links 502ing for
+    # the duration of the drain. Deliberate tension with the stay-live
+    # call above; owner picked it as unit2's one drainable candidate.
+    drain_stop: true

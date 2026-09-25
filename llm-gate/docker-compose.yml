@@ -1,0 +1,26 @@
+services:
+  llm-gate:
+    build: .
+    image: llm-gate:latest
+    container_name: llm-gate
+    restart: unless-stopped
+    # Host networking: the upstreams are loopback services on this box
+    # (127.0.0.1:11435/8096/8083) and the binds below must reproduce the
+    # exact public addresses the clients already use.
+    network_mode: host
+    labels:
+      # lokey NEVER_STOP escape hatch: refuse automated stops even if a
+      # policy ever marks this container stoppable. The gate IS the drain
+      # initiator — stopping it orphans in-flight drains.
+      locator.pinned: "true"
+    environment:
+      LOCATOR_URL: http://100.99.131.20:50500
+      # unit2 drains make room where the models run; unit7 drains quiet the
+      # box the callers (crew-builder, agent-0, site-chat) orchestrate from.
+      DRAIN_UNITS: unit2,unit7
+      # LLM consumers must never be drained: an inference-triggered drain
+      # that stopped the caller would kill its own in-flight request.
+      DRAIN_EXCLUDE: agent-0,agent-0-oauth2-proxy,forge,forge-relay,site-chat,perplexica,searxng,ogscan-research,rasa,rasa-actions,puffbase-crew,crew-builder,llm-gate,ollama,llama-cpp,llama-server
+      ACK_TIMEOUT_S: "300"
+      IDLE_LEASE_S: "1800"
+      ROUTES: "100.64.118.105:11434->http://127.0.0.1:11435|ollama,0.0.0.0:8095->http://127.0.0.1:8096|openai,100.64.118.105:8082->http://127.0.0.1:8083|openai"

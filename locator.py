@@ -3577,13 +3577,18 @@ def _routed_containers():
     return out
 
 
-def _stoppable_containers(unit):
+def _stoppable_containers(unit, for_drain=False):
     """Containers a unit is allowed to stop, keyed by name -> {"timeout": ...}.
 
     Shared by /api/idle/policy and /api/power/drain. Opt-out, not opt-in:
     every ONLINE container on the unit is eligible unless something says it
     is not — an essential or stationary policy stanza, a name matching
     _PINNED_NAMES, a stateful-looking image, or an explicit `idle_stop: false`.
+
+    for_drain=True additionally admits containers whose policy stanza sets
+    `drain_stop: true` — drainable for a power drain WITHOUT becoming a
+    routine idle-stop target (glances-web is the case: the owner wants its
+    dashboard links live, but it may yield to an LLM job).
 
     The one positive requirement is a way back up: a container nobody can wake
     (no public_wake stanza, no public route in the registry) is only watched
@@ -3622,7 +3627,9 @@ def _stoppable_containers(unit):
     # registry pass above only sees ONLINE containers, while a declared
     # service is eligible by name whether or not it has registered yet.
     for name, cfg in load_policy().items():
-        if not cfg.get("idle_stop") or name in out:
+        if name in out:
+            continue
+        if not (cfg.get("idle_stop") or (for_drain and cfg.get("drain_stop"))):
             continue
         if cfg.get("restart_when_stopped"):
             continue
@@ -3714,12 +3721,33 @@ def _normalize_units(raw):
     return units
 
 
+def _drain_holds(unit, name):
+    """drain_id of an active (unrestored) power drain covering `name` on `unit`.
+
+    While a drain holds a container, traffic-driven wakes must not resurrect
+    it — the room it freed belongs to the LLM job until /api/power/restore.
+    """
+    name = (name or "").lower()
+    with command_lock:
+        for rec in power_drains.values():
+            if rec.get("restored"):
+                continue
+            if name in (rec.get("units") or {}).get(unit, []):
+                return rec["id"]
+    return None
+
+
 @app.route("/api/power/drain", methods=["POST"])
 def power_drain():
     if not _power_authorized():
         return jsonify({"error": "bad power token"}), 403
     data = request.get_json(silent=True) or {}
     units = _normalize_units(data.get("units")) or [_resolve_unit_name()]
+    # Names the caller refuses to drain — chiefly LLM consumers: a drain
+    # triggered BY an inference request must never stop the container that
+    # made the request, or the call kills its own caller mid-flight.
+    exclude = {str(n).strip().lower()
+               for n in (data.get("exclude") or []) if str(n).strip()}
     drain_id = str(uuid.uuid4())[:8]
     rec = {
         "id": drain_id,
@@ -3730,7 +3758,8 @@ def power_drain():
         "restored": False,
     }
     for unit in units:
-        names = sorted(_stoppable_containers(unit).keys())
+        names = sorted(n for n in _stoppable_containers(unit, for_drain=True)
+                       if n not in exclude)
         rec["units"][unit] = names
         for name in names:
             cmd = _queue_command(unit, name, "stop", source=f"power:{drain_id}")
@@ -4393,6 +4422,11 @@ def load_policy():
                 # Optional per-service override, same spelling the label took
                 # ("15m", "2h", "5400"). Empty means use IDLE_DEFAULT_TIMEOUT.
                 "idle_timeout": str(cfg.get("idle_timeout", "")),
+                # drain_stop: opt-in like idle_stop but ONLY honored by
+                # /api/power/drain — the container yields to a bulk resource
+                # drain without becoming a routine idle-stop target. Same
+                # whitelisting rule: undeclared here, silently dropped there.
+                "drain_stop": bool(cfg.get("drain_stop", False)),
                 # Migration prerequisites: service names (or "name@unit" for a
                 # specific instance) that must have an ONLINE instance somewhere
                 # before this service may be migrated. Read by
@@ -7120,6 +7154,8 @@ def wake_page(container):
         # the container itself was deleted: no start is queued for a name the
         # unit no longer has.
         if extra_unit and _container_exists_on_unit(extra_unit, extra):
+            if _drain_holds(extra_unit, extra):
+                continue  # held down by an active power drain
             _queue_command(extra_unit, extra, "start", source="wake")
     unit = _find_container_unit(container)
     if not unit:
@@ -7127,6 +7163,12 @@ def wake_page(container):
     if not _container_exists_on_unit(unit, container):
         return Response(f"'{container}' no longer exists on {unit}",
                         status=410, mimetype="text/plain")
+    held_by = _drain_holds(unit, container)
+    if held_by:
+        return Response(
+            f"'{container}' is held down by power drain {held_by} — "
+            f"it comes back when the LLM job finishes.",
+            status=409, mimetype="text/plain")
     _queue_command(unit, container, "start", source="wake")
     # Optional explicit redirect target (?to=...), restricted to our own domains
     target = request.args.get("to", "")
