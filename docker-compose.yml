@@ -21,6 +21,9 @@ services:
       - ./locator.d:/app/locator.d
       - ./docker-compose.yml:/app/docker-compose.yml
       - /home/swoopg111/.ssh:/root/.ssh:ro
+      # Lets the compose-store git push authenticate to GIT_REMOTE via the
+      # host's stored credential — no token in .env.
+      - /home/swoopg111/.git-credentials:/root/.git-credentials:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # OpenBao broker token (read-only). Populated by setup-fleet-pki.sh and
       # gitignored. Without this mount bao.py has no token and every bao://

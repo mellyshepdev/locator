@@ -308,6 +308,9 @@ _STARTED_AT = datetime.now(timezone.utc)  # used by dedup election to find the o
 # Compose-store git backup
 GIT_AUTO_PUSH = os.environ.get("GIT_AUTO_PUSH", "false").lower() == "true"
 GIT_REMOTE    = os.environ.get("GIT_REMOTE", "")
+# The compose store snapshot lands on its own branch — the remote is a shared
+# repo (compose-stacks) whose main branch is real content, not our dump.
+GIT_REMOTE_BRANCH = os.environ.get("GIT_REMOTE_BRANCH", "locator-store")
 
 # Import docker for discovery
 try:
@@ -1003,10 +1006,28 @@ def _git_auto_push():
             os.makedirs(d, exist_ok=True)
             if not os.path.isdir(os.path.join(d, ".git")):
                 subprocess.run(["git", "init"], cwd=d, capture_output=True)
-                subprocess.run(["git", "config", "user.email", "locator@blacksheep"], cwd=d, capture_output=True)
-                subprocess.run(["git", "config", "user.name", "locator"], cwd=d, capture_output=True)
-                if GIT_REMOTE:
-                    subprocess.run(["git", "remote", "add", "origin", GIT_REMOTE], cwd=d, capture_output=True)
+            # Identity, safe.directory and credential.helper run EVERY pass —
+            # they used to live inside the init branch, so a .git created any
+            # other way left every commit failing on missing identity and the
+            # store never landed a single commit. The compose store pushes to
+            # GIT_REMOTE_BRANCH (a dedicated branch — force-pushing main on a
+            # shared repo would clobber its real content).
+            for args in (
+                ["git", "config", "--global", "--add", "safe.directory", d],
+                ["git", "config", "user.email", "locator@blacksheep"],
+                ["git", "config", "user.name", "locator"],
+                ["git", "config", "credential.helper", "store"],
+            ):
+                subprocess.run(args, cwd=d, capture_output=True)
+            if GIT_REMOTE:
+                have = subprocess.run(["git", "remote", "get-url", "origin"],
+                                      cwd=d, capture_output=True, text=True)
+                if have.returncode != 0:
+                    subprocess.run(["git", "remote", "add", "origin", GIT_REMOTE],
+                                   cwd=d, capture_output=True)
+                elif have.stdout.strip() != GIT_REMOTE:
+                    subprocess.run(["git", "remote", "set-url", "origin", GIT_REMOTE],
+                                   cwd=d, capture_output=True)
             subprocess.run(["git", "add", "-A"], cwd=d, capture_output=True)
             r = subprocess.run(
                 ["git", "commit", "-m", f"auto: compose snapshot {datetime.now(timezone.utc).isoformat()}"],
@@ -1014,12 +1035,15 @@ def _git_auto_push():
             )
             if "nothing to commit" in (r.stdout or ""):
                 return
+            if r.returncode != 0:
+                print(f"⚠️  git-push: commit failed: {(r.stderr or '')[:200]}")
+                return
             if GIT_REMOTE:
                 subprocess.run(
-                    ["git", "push", "-u", "origin", "HEAD:main", "--force"],
+                    ["git", "push", "-u", "origin", f"HEAD:{GIT_REMOTE_BRANCH}", "--force"],
                     cwd=d, capture_output=True, timeout=30
                 )
-                print("💾 git-push: compose files pushed")
+                print(f"💾 git-push: compose files pushed → {GIT_REMOTE_BRANCH}")
         except Exception as e:
             print(f"⚠️  git-push error: {e}")
 
