@@ -143,35 +143,58 @@ services:
       - LOCATOR_CLIENT_ID=${LOCATOR_CLIENT_ID}
     labels:
       - "traefik.enable=true"
-      # UI router — protected by Keycloak (catch-all, lower priority)
-      - "traefik.http.routers.locator.rule=Host(`locator.prime-quality.online`)"
-      - "traefik.http.routers.locator.entrypoints=websecure"
-      - "traefik.http.routers.locator.tls=true"
-      # No certresolver: this domain terminates at unit9's edge, so TLS-ALPN
-      # here can never authorize — it was just burning LE rate-limit budget.
-      # Re-add myresolver if DNS ever points back to this unit.
-      - "traefik.http.routers.locator.priority=100"
-      - "traefik.http.routers.locator.service=locator"
       # API router — no auth so lokey heartbeats and all programmatic calls pass through
       - "traefik.http.routers.locator-api.rule=Host(`locator.prime-quality.online`) && (PathPrefix(`/api/`) || PathPrefix(`/register`) || PathPrefix(`/deregister/`) || PathPrefix(`/nodes/`) || PathPrefix(`/wake/`) || PathPrefix(`/health`) || Path(`/silent-check-sso.html`) || PathPrefix(`/static/lokey-android`))"
       - "traefik.http.routers.locator-api.entrypoints=websecure"
       - "traefik.http.routers.locator-api.tls=true"
-      # certresolver intentionally omitted — see locator router note above.
+      # No certresolver: this domain terminates at unit9's edge, so TLS-ALPN
+      # here can never authorize — it was just burning LE rate-limit budget.
+      # Re-add myresolver if DNS ever points back to this unit.
       - "traefik.http.routers.locator-api.priority=200"
       - "traefik.http.routers.locator-api.service=locator"
       - "traefik.http.services.locator.loadbalancer.server.port=5000"
     networks:
       - networking
 
+  # Static dashboard shell — the UI can stop/restart without touching the API.
+  # The locator-api router (priority 200) still lands /api/, /nodes/, /wake/
+  # and the other programmatic paths directly on the locator container; only
+  # the HTML pages die with this one. dashboard.html edits go live on the next
+  # request — nginx reads the file per hit (Flask's Jinja cache was why UI
+  # edits used to need a full locator restart).
+  ui:
+    image: nginx:alpine
+    container_name: locator-ui
+    restart: unless-stopped
+    volumes:
+      - ./templates:/usr/share/nginx/html:ro
+      - ./nginx-ui.conf:/etc/nginx/conf.d/default.conf:ro
+    labels:
+      - "traefik.enable=true"
+      # UI catch-all — every locator.prime-quality.online path not claimed by
+      # the locator-api router above. No certresolver, same reason as there.
+      - "traefik.http.routers.locator-ui.rule=Host(`locator.prime-quality.online`)"
+      - "traefik.http.routers.locator-ui.entrypoints=websecure"
+      - "traefik.http.routers.locator-ui.tls=true"
+      - "traefik.http.routers.locator-ui.priority=100"
+      - "traefik.http.routers.locator-ui.service=locator-ui"
+      - "traefik.http.services.locator-ui.loadbalancer.server.port=80"
+    networks:
+      - networking
+
   # Publishes locator on the tailnet at 100.99.131.20:15000 — the upstream
   # unit9's nginx edge and the /__wake/ traefik route proxy through. Was an
   # ad-hoc `docker run`; kept getting swept by `docker compose up` orphan
-  # handling, so it's a managed service now.
+  # handling, so it's a managed service now. And it was a raw socat TCP
+  # forward to locator:5000, which kept the public UI glued to the API
+  # process — now nginx splits API paths (straight to flask) from page
+  # traffic (to locator-ui), so the UI container can die alone.
   tailnet-pub:
-    image: alpine/socat
+    image: nginx:alpine
     container_name: locator-tailnet-pub
     restart: unless-stopped
-    command: ["TCP-LISTEN:8080,fork,reuseaddr", "TCP:locator:5000"]
+    volumes:
+      - ./nginx-pub.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       - "100.99.131.20:15000:8080"
     networks:
