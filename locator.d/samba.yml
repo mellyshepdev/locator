@@ -1,0 +1,15 @@
+Service:
+
+  # samba — file share on unit2. No dependents in the fleet; a stopped
+  # share reconnects on access after the drain restores it. Owner call
+  # 2026-09-25: may yield to llm-gate power drains (one of only two
+  # drainable containers on unit2, the other being glances-web). Kept
+  # out of idle-stop entirely: it has no public route, so once stopped
+  # nothing could bring it back without a human.
+  samba:
+    deployment_type: optional
+    location_type: stationary
+    units: "2"
+    instances: 1
+    idle_stop: false
+    drain_stop: true

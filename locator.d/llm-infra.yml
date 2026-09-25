@@ -1,0 +1,48 @@
+Service:
+
+  # LLM infrastructure on unit2 (added 2026-09-25).
+  #
+  # Backends: ollama + llama-cpp are what llm-gate fronts — a drain exists
+  # to make room FOR them, so letting one be drained would be incoherent.
+  # restart_when_stopped pins them up: the gate serves 503s if a backend
+  # is down, so lokey should resurrect one that crashes rather than leave
+  # the canonical port dead.
+  #
+  # Consumers: perplexica, searxng, ogscan-research call the backends —
+  # stopping one mid-request kills the request's own caller (the exact
+  # self-drain trap the gate's exclude list exists for). They had NO
+  # policy and were protected only by the "no route back up" heuristic;
+  # this makes the protection explicit so nothing can opt them into a
+  # drain or idle-stop by accident.
+  ollama:
+    deployment_type: essential
+    location_type: stationary
+    units: "2"
+    instances: 1
+    idle_stop: false
+    restart_when_stopped: true
+  llama-cpp:
+    deployment_type: essential
+    location_type: stationary
+    units: "2"
+    instances: 1
+    idle_stop: false
+    restart_when_stopped: true
+  perplexica:
+    deployment_type: essential
+    location_type: stationary
+    units: "2"
+    instances: 1
+    idle_stop: false
+  searxng:
+    deployment_type: essential
+    location_type: stationary
+    units: "2"
+    instances: 1
+    idle_stop: false
+  ogscan-research:
+    deployment_type: essential
+    location_type: stationary
+    units: "2"
+    instances: 1
+    idle_stop: false
