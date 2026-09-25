@@ -156,6 +156,39 @@ services:
     networks:
       - networking
 
+  # Static dashboard shell — deliberately its own container so the idle
+  # reaper can STOP it without touching the API. The shared apache on
+  # :15000 proxies page traffic here while API paths go straight to flask;
+  # when this is stopped, page hits 503 -> edge wake page -> /wake/locator-ui
+  # -> lokey starts it again (policy: locator.d/locator-ui.yml). The
+  # locator.idle.stop label is what makes lokey report this container's
+  # traffic to the reaper. httpd, not nginx, per fleet convention.
+  ui:
+    image: httpd:alpine
+    container_name: locator-ui
+    restart: unless-stopped
+    volumes:
+      - ./templates:/srv/locator:ro
+      - ./httpd-ui.conf:/usr/local/apache2/conf/httpd.conf:ro
+    labels:
+      - "traefik.enable=true"
+      - "locator.idle.stop=true"
+      # Traefik can only route via traefik_proxy, not `networking`.
+      - "traefik.docker.network=traefik_proxy"
+      # UI catch-all — every locator.prime-quality.online path not claimed
+      # by the locator-api router on the locator container.
+      - "traefik.http.routers.locator-ui.rule=Host(`locator.prime-quality.online`)"
+      - "traefik.http.routers.locator-ui.entrypoints=websecure"
+      - "traefik.http.routers.locator-ui.tls=true"
+      - "traefik.http.routers.locator-ui.priority=100"
+      - "traefik.http.routers.locator-ui.service=locator-ui"
+      - "traefik.http.services.locator-ui.loadbalancer.server.port=80"
+    networks:
+      - networking
+      - traefik_proxy
+
 networks:
   networking:
+    external: true
+  traefik_proxy:
     external: true

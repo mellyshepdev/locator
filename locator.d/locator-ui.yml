@@ -1,0 +1,24 @@
+Service:
+
+  # ── Idle auto-stop ─────────────────────────────────────────────────────
+  # The dashboard is a static shell in front of the Flask API — when nobody
+  # has it open there is nothing for it to do, and the reaper can stop it
+  # without touching /api/, /nodes/ or /wake/ (those all route straight to
+  # the locator container via the apache :15000 door and the priority-200
+  # Traefik router). A sleeping UI just 503s page requests -> edge wake page
+  # -> /wake/locator-ui -> lokey starts it. deployment_type MUST NOT be
+  # essential — locator refuses idle_stop on an essential service.
+  #
+  # The lokey traffic report that feeds the reaper comes from the container's
+  # docker label `locator.idle.stop=true` — both sides are required.
+  locator-ui:
+    deployment_type: optional
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: true
+    idle_timeout: 15m
+    public_wake: true
+    wake_triggers:
+      domain:
+        - locator.prime-quality.online
