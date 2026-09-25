@@ -4648,20 +4648,26 @@ def load_policy():
     return parsed
 
 
-def _policy_for(name):
-    """Policy entry for a container, matching on name or base name."""
+def _policy_key_for(name):
+    """The policy key a container name resolves to, or None. Same precedence
+    as _policy_for: exact, then base-name, then substring."""
     pol = load_policy()
     low = (name or "").lower()
     if low in pol:
-        return pol[low]
+        return low
     base = _base_name(low)
     if base in pol:
-        return pol[base]
-    # Allow a policy key to match a versioned container (mariadb -> mariadb-11.4)
-    for key, cfg in pol.items():
+        return base
+    for key in pol:
         if key and key in low:
-            return cfg
-    return {}
+            return key
+    return None
+
+
+def _policy_for(name):
+    """Policy entry for a container, matching on name or base name."""
+    key = _policy_key_for(name)
+    return load_policy().get(key, {}) if key else {}
 
 
 def _is_pinned(name):
@@ -5361,6 +5367,23 @@ def enforce_unit_placement():
                 wanted = _expand_unit_spec(pol.get("units"), online_units)
                 if not wanted:
                     continue
+                # A substring-matched alias that only ever registered on units
+                # outside `wanted` is a corpse — a retired unit's leftover or
+                # an old compose hash-name like 602ef910e6de_main-website@unit4.
+                # Deploying for it loops forever: the deploy comes up under the
+                # canonical name, so running[name] stays empty on every pass
+                # and the queue never drains. Exact/base-name matches keep the
+                # old behavior — a service whose only entry sits on a now-
+                # unwanted unit still gets moved by its `units:` spec.
+                canon = _policy_key_for(name)
+                if canon and canon != name and canon != _base_name(name):
+                    on_wanted = any(
+                        svc.get("host") in wanted
+                        for _id, svc in services
+                        if (svc.get("name") or "").lower() == name
+                    )
+                    if not on_wanted:
+                        continue
                 missing = (wanted & set(online_units)) - running.get(name, set())
                 for unit in sorted(missing):
                     if _recent_placement_failure(unit, name, now):
