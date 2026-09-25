@@ -3936,6 +3936,33 @@
             return { since: since.toISOString(), until: now.toISOString() };
         }
 
+        // Same category buckets the Tactical Grid groups services into — the
+        // metrics table groups its container rows under the same colored
+        // headers instead of one flat list.
+        const METRIC_CAT_ORDER = ['docker containers', 'websites', 'virtual machines', 'serverless', 'devices', 'native services', 'cloud platforms'];
+        const METRIC_CAT_COLOR = {
+            'docker containers': 'var(--neon-green)',
+            'websites': '#a200ff',
+            'virtual machines': '#ff8800',
+            'serverless': '#ff2d95',
+            'devices': '#00f0ff',
+            'native services': '#ffe600',
+            'cloud platforms': '#4169e1',
+        };
+        const METRIC_SERVERLESS_RE = /(fly\.dev|vercel\.app|netlify\.app|onrender\.com|supabase\.co|pages\.dev|workers\.dev|railway\.app|herokuapp\.com|gitlab\.io|github\.io|web\.app|firebaseapp\.com)/i;
+        function metricCategoryOf(s) {
+            if (!s) return 'other';
+            const c = (s.category || '').toLowerCase();
+            if (c) return c;
+            const t = (s.type || '').toLowerCase();
+            if (t === 'vm') return 'virtual machines';
+            if (t === 'serverless' || t === 'paas' || (s.url && METRIC_SERVERLESS_RE.test(s.url))) return 'serverless';
+            if (t === 'website') return 'websites';
+            if (t === 'native') return 'native services';
+            if (t === 'external') return 'cloud platforms';
+            return 'docker containers';
+        }
+
         async function loadMetrics() {
             const bounds = metricsRangeBounds();
             if (!bounds) return;
@@ -3967,7 +3994,22 @@
                     document.getElementById('metrics-chart-wrap').style.display = 'none';
                     return;
                 }
-                tbody.innerHTML = rows.map(r => `
+                // Group rows under the same category headers the Tactical
+                // Grid uses — category comes from the live registry entry
+                // for each service_id, falling back to type/url inference.
+                const svcMap = (lastRegistryData && lastRegistryData.services) || {};
+                const groups = {};
+                rows.forEach(r => {
+                    const cat = metricCategoryOf(svcMap[r.service_id]);
+                    (groups[cat] = groups[cat] || []).push(r);
+                });
+                const cats = Object.keys(groups).sort((a, b) => {
+                    const ia = METRIC_CAT_ORDER.indexOf(a), ib = METRIC_CAT_ORDER.indexOf(b);
+                    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+                });
+                tbody.innerHTML = cats.map(cat => `
+                    <tr><td colspan="6" style="padding:10px 6px 4px; font-weight:bold; letter-spacing:3px; text-transform:uppercase; color:${METRIC_CAT_COLOR[cat] || '#888'}; border-top:1px solid ${METRIC_CAT_COLOR[cat] || '#888'};">${cat} (${groups[cat].length})</td></tr>
+                    ` + groups[cat].map(r => `
                     <tr style="border-bottom:1px solid rgba(0,255,0,0.15); cursor:pointer;" onclick="showContainerHistory('${r.service_id}', '${since}', '${until}')">
                         <td style="padding:6px;">${r.service_id}</td>
                         <td style="padding:6px;">${(r.host || '').toUpperCase()}</td>
@@ -3976,7 +4018,7 @@
                         <td style="padding:6px;">${r.max_mem_mb != null ? r.max_mem_mb.toFixed(0) + ' MB' : '—'}</td>
                         <td style="padding:6px;">${timeSince(r.last_seen)}</td>
                     </tr>
-                `).join('');
+                    `).join('')).join('');
                 // The chart used to stay hidden until you clicked a row, so the
                 // tab could show a fully populated table with no graph anywhere
                 // on it. Default to an overview of the top containers by avg
