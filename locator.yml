@@ -828,3 +828,20 @@ Service:
     wake_triggers:
       domain:
         - pro-pieces.prime-quality.online
+
+  # The dashboard's own container (httpd, templates/ + proxy fallback to
+  # flask). Its own unit so the idle reaper can stop the UI while the API
+  # keeps answering — the apache :15000 door proxies pages here and API
+  # paths straight to flask, so a stopped UI only 503s page hits, which is
+  # what the edge wake-page flow expects.
+  locator-ui:
+    deployment_type: optional
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: true
+    idle_timeout: 15m
+    public_wake: true
+    wake_triggers:
+      domain:
+        - locator.prime-quality.online
