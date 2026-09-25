@@ -1118,6 +1118,7 @@
                     <option value="name">SORT: NAME</option>
                     <option value="mem">SORT: AVAILABLE MEM</option>
                     <option value="disk">SORT: AVAILABLE STORAGE</option>
+                    <option value="cpu">SORT: CPU LOAD</option>
                 </select>
                 <span class="filter-count" id="filter-count"></span>
             </div>
@@ -1131,6 +1132,7 @@
                     <th data-sort-table="devices" data-sort-key="name" data-label="Device" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','name')">Device</th>
                     <th data-sort-table="devices" data-sort-key="ip" data-label="IP Address" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','ip')">IP Address</th>
                     <th data-sort-table="devices" data-sort-key="type" data-label="Type / OS" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','type')">Type / OS</th>
+                    <th data-sort-table="devices" data-sort-key="cpu" data-label="Load" title="Live CPU / RAM / Disk reported by the node agent" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','cpu')">Load</th>
                     <th style="color: #00f0ff;">Metadata</th>
                     <th data-sort-table="devices" data-sort-key="lastseen" data-label="Last Seen" style="color: #00f0ff;cursor:pointer" onclick="sortByColumn('devices','lastseen')">Last Seen</th>
                 </tr></thead>
@@ -1978,10 +1980,13 @@
             os: 'OS', status: 'Status', category: 'Category', port: 'Port',
             url: 'URL', last_seen: 'Last Seen', last_heartbeat: 'Last Heartbeat',
             registered_at: 'Registered At', offline_since: 'Offline Since',
+            cpu_percent: 'CPU %', mem_percent: 'RAM %', disk_percent: 'Disk %',
         };
         const DEVICE_FIELD_ORDER = [
             'name', 'id', 'status', 'ip', 'tailscale_ip', 'internal', 'host', 'hosts',
-            'type', 'os', 'category', 'port', 'url', 'last_seen', 'last_heartbeat',
+            'type', 'os', 'category', 'port', 'url',
+            'cpu_percent', 'mem_percent', 'disk_percent',
+            'last_seen', 'last_heartbeat',
             'registered_at', 'offline_since',
         ];
 
@@ -2185,6 +2190,10 @@
                 lastseen: n => n.last_seen ? new Date(n.last_seen).getTime() : -Infinity,
                 mem:      n => availMem(n),
                 disk:     n => availDisk(n),
+                cpu:      n => {
+                    const v = n.cpu_percent != null ? n.cpu_percent : (n.metadata || {}).cpu_percent;
+                    return v != null ? Number(v) : -Infinity;
+                },
             },
             docker: {
                 name:     s => (s.name || '').toLowerCase(),
@@ -2709,6 +2718,31 @@
                 return cell;
             }
 
+            // Node-level live load — cpu/mem/disk pushed by the node agent
+            // (PATCH /nodes/<id>/metrics) sit at the top level for lokey-native
+            // and under metadata for lokey-android; same pick() fallback the
+            // Tactical Grid cards use.
+            function createNodeLoadBadges(item) {
+                const cell = document.createElement('td');
+                const meta = item.metadata || {};
+                const pick = (k) => item[k] != null ? item[k] : meta[k];
+                const stats = [
+                    { l: 'CPU',  v: pick('cpu_percent'),  c: '#00ff00' },
+                    { l: 'RAM',  v: pick('mem_percent'),  c: '#00f0ff' },
+                    { l: 'DISK', v: pick('disk_percent'), c: '#ff8800' },
+                ].filter(s => s.v != null);
+                stats.forEach(s => {
+                    const badge = document.createElement('span');
+                    badge.className = 'node-badge';
+                    badge.style.borderColor = s.c;
+                    badge.style.color = s.c;
+                    badge.style.marginRight = '4px';
+                    badge.innerText = `${s.l}: ${Number(s.v).toFixed(0)}%`;
+                    cell.appendChild(badge);
+                });
+                return cell;
+            }
+
             // --- DEVICES TABLE ---
             nodes.forEach(item => {
                 const tr = document.createElement('tr');
@@ -2742,6 +2776,7 @@
                     <td>${item.ip || item.tailscale_ip || 'unknown'}</td>
                     <td>${item.type || '-'}</td>
                 `;
+                tr.appendChild(createNodeLoadBadges(item));
                 tr.appendChild(createMetaBadges(item.metadata));
                 tr.innerHTML += `<td style="font-size:12px;color:#888">${item.last_seen ? timeSince(item.last_seen) : 'Never'}</td>`;
                 tr.addEventListener('click', () => openDeviceModal(item));
@@ -4013,13 +4048,14 @@
             if (metricsNodeChart) metricsNodeChart.destroy();
             const nodes = Object.entries((lastRegistryData && lastRegistryData.nodes) || {})
                 .map(([id, n]) => ({ id, ...n }))
-                .filter(n => n.mem_percent != null || n.disk_percent != null);
+                .filter(n => n.cpu_percent != null || n.mem_percent != null || n.disk_percent != null);
             if (!nodes.length) return;
             metricsNodeChart = new Chart(ctx, {
                 type: 'bar',
                 data: {
                     labels: nodes.map(n => (n.name || n.id).toUpperCase()),
                     datasets: [
+                        { label: 'CPU %', data: nodes.map(n => n.cpu_percent ?? null), backgroundColor: 'rgba(0,240,255,0.5)', borderColor: '#00f0ff', borderWidth: 1 },
                         { label: 'RAM %', data: nodes.map(n => n.mem_percent ?? null), backgroundColor: 'rgba(0,255,0,0.5)', borderColor: '#00ff00', borderWidth: 1 },
                         { label: 'Disk %', data: nodes.map(n => n.disk_percent ?? null), backgroundColor: 'rgba(255,136,0,0.5)', borderColor: '#ff8800', borderWidth: 1 },
                     ],
