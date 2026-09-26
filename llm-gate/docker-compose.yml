@@ -14,7 +14,7 @@ services:
       # initiator — stopping it orphans in-flight drains.
       locator.pinned: "true"
     environment:
-      LOCATOR_URL: http://100.99.131.20:50500
+      LOCATOR_URL: http://locator-vpn.prime-quality.online:50500
       # unit2 drains make room where the models run; unit7 drains quiet the
       # box the callers (crew-builder, agent-0, site-chat) orchestrate from.
       DRAIN_UNITS: unit2,unit7
