@@ -1734,6 +1734,23 @@ def toggle_container():
     unit = _find_container_unit(name)
     if not unit:
         return jsonify({"error": f"Container '{name}' not found in registry"}), 404
+    if action == "start":
+        # An unrestored drain owns this container's room — a manual Deploy
+        # must wait for the locator's release, not fight the LLM job. The
+        # start is recorded on the drain and fires inside _do_drain_restore.
+        held = _drain_holds(unit, name)
+        if held:
+            with command_lock:
+                rec = power_drains.get(held)
+                if rec is not None and not rec.get("restored"):
+                    key = f"{unit}/{name}"
+                    starts = rec.setdefault("deferred_starts", [])
+                    if key not in starts:
+                        starts.append(key)
+                    _save_drains()
+            print(f"🔌 TOGGLE: '{name}' on {unit} held by drain {held} — start deferred")
+            return jsonify({"result": "deferred", "container": name,
+                            "unit": unit, "drain_id": held})
     cmd = _queue_command(unit, name, action, source="manual")
     print(f"\U0001f4e8 TOGGLE: queued {action} for '{name}' on {unit}")
     return jsonify({"result": "queued", "container": name, "unit": unit, "command": cmd})
@@ -3783,6 +3800,45 @@ POWER_DRAIN_RETENTION = 50
 # down forever, so unrestored drains auto-restore past this age.
 POWER_DRAIN_TTL_S = int(os.environ.get("POWER_DRAIN_TTL_S", "7200"))
 
+# Drains live in this in-memory dict and in power_drains.json under DATA_DIR —
+# a locator restart used to forget them entirely, leaving every drained
+# container stopped forever (no record, no restore, no wake path). Persisting
+# coverage + deferred starts makes a restart survivable: the reload at import
+# re-arms the drain so a later /api/power/restore or TTL expiry still starts
+# what was stopped.
+POWER_DRAINS_FILE = os.path.join(DATA_DIR, "power_drains.json")
+
+
+def _save_drains():
+    """Write power_drains to disk. Callers hold command_lock; failures are
+    logged, never raised — persistence is a backstop, not the mechanism."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = POWER_DRAINS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(power_drains, f)
+        os.replace(tmp, POWER_DRAINS_FILE)
+    except Exception as e:
+        print(f"⚠️ drain persistence write failed: {e}")
+
+
+def _load_drains():
+    """Re-arm drains written by _save_drains. Runs once at import."""
+    try:
+        with open(POWER_DRAINS_FILE) as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            power_drains.update(loaded)
+            if loaded:
+                print(f"🔌 re-armed {len(loaded)} drain record(s) from disk")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"⚠️ drain persistence load failed: {e}")
+
+
+_load_drains()
+
 
 def _expire_old_drains():
     """Auto-restore unrestored drains older than POWER_DRAIN_TTL_S.
@@ -3869,6 +3925,7 @@ def power_drain():
             oldest = sorted(power_drains.values(), key=lambda r: r["created_at"])
             for old in oldest[: len(power_drains) - POWER_DRAIN_RETENTION]:
                 power_drains.pop(old["id"], None)
+        _save_drains()
     print(f"🔌 POWER DRAIN {drain_id}: queued {len(rec['commands'])} stops on {units} ({rec['reason']})")
     return jsonify({"drain_id": drain_id, "units": rec["units"], "total": len(rec["commands"])})
 
@@ -3898,6 +3955,7 @@ def power_drain_status(drain_id):
         "stopped": stopped,
         "failed": failed,
         "waiting": waiting,
+        "deferred_starts": rec.get("deferred_starts") or [],
         "restored": rec["restored"],
     })
 
@@ -3949,7 +4007,26 @@ def _do_drain_restore(drain_id, rec=None, cmds=None):
                 _queue_command(c["unit"], c["container"], "start",
                                source=f"power-restore:{drain_id}")
                 restarted.append(f"{c['unit']}/{c['container']}")
+        # Starts deferred while the drain held them (dashboard Deploy on a
+        # drain-covered container records intent instead of competing with
+        # the job the drain is making room for).
+        for key in rec.get("deferred_starts") or []:
+            unit, _, name = key.partition("/")
+            if name and key not in restarted:
+                _queue_command(unit, name, "start",
+                               source=f"power-restore:{drain_id}")
+                restarted.append(key)
+        # Command records are in-memory and don't survive a restart — a
+        # drain re-armed from disk has rec["units"] but dead command ids, so
+        # without this fallback its restore would queue nothing at all.
+        for unit, names in (rec.get("units") or {}).items():
+            for name in names:
+                if f"{unit}/{name}" not in restarted:
+                    _queue_command(unit, name, "start",
+                                   source=f"power-restore:{drain_id}")
+                    restarted.append(f"{unit}/{name}")
         rec["restored"] = True
+        _save_drains()
     print(f"🔌 POWER RESTORE {drain_id}: queued {len(restarted)} starts")
     return restarted
 

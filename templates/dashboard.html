@@ -3594,6 +3594,9 @@
             .then(data => {
                 if (data.error) {
                     notify(`Error: ${data.error}`, 'error');
+                } else if (data.result === 'deferred') {
+                    notify(`${name} is held by a power drain — it will start automatically when the drain releases`, 'info');
+                    loadRegistryData();
                 } else {
                     // The API only QUEUES a command for the owning unit's agent;
                     // it never touches Docker itself. Claiming the container "is
