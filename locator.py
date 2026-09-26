@@ -1740,14 +1740,7 @@ def toggle_container():
         # start is recorded on the drain and fires inside _do_drain_restore.
         held = _drain_holds(unit, name)
         if held:
-            with command_lock:
-                rec = power_drains.get(held)
-                if rec is not None and not rec.get("restored"):
-                    key = f"{unit}/{name}"
-                    starts = rec.setdefault("deferred_starts", [])
-                    if key not in starts:
-                        starts.append(key)
-                    _save_drains()
+            _defer_drain_start(unit, name, held)
             print(f"🔌 TOGGLE: '{name}' on {unit} held by drain {held} — start deferred")
             return jsonify({"result": "deferred", "container": name,
                             "unit": unit, "drain_id": held})
@@ -3890,6 +3883,25 @@ def _drain_holds(unit, name):
             if name in (rec.get("units") or {}).get(unit, []):
                 return rec["id"]
     return None
+
+
+def _defer_drain_start(unit, name, drain_id):
+    """Record `unit/name` on the drain so _do_drain_restore starts it when
+    the LLM job releases the room. Used by every entry point that could ask
+    for a held container — the dashboard Deploy button and the public
+    /wake/<container> path the hub cards call — so "wake me" during a drain
+    means "wake me when it ends" instead of competing or silently dropping.
+    """
+    with command_lock:
+        rec = power_drains.get(drain_id)
+        if rec is None or rec.get("restored"):
+            return False
+        key = f"{unit}/{name}"
+        starts = rec.setdefault("deferred_starts", [])
+        if key not in starts:
+            starts.append(key)
+        _save_drains()
+    return True
 
 
 @app.route("/api/power/drain", methods=["POST"])
@@ -7336,7 +7348,7 @@ def wake_by_host():
     return wake_page(container)
 
 
-@app.route("/wake/<container>", methods=["GET"])
+@app.route("/wake/<container>", methods=["GET", "POST"])
 def wake_page(container):
     """Click-to-wake: queue the start command and show a page that comes back
     once the service is up.
@@ -7391,8 +7403,12 @@ def wake_page(container):
         # the container itself was deleted: no start is queued for a name the
         # unit no longer has.
         if extra_unit and _container_exists_on_unit(extra_unit, extra):
-            if _drain_holds(extra_unit, extra):
-                continue  # held down by an active power drain
+            held_extra = _drain_holds(extra_unit, extra)
+            if held_extra:
+                # Held down by an active power drain — record it so the
+                # companion comes back with the primary on release.
+                _defer_drain_start(extra_unit, extra, held_extra)
+                continue
             _queue_command(extra_unit, extra, "start", source="wake")
     unit = _find_container_unit(container)
     if not unit:
@@ -7402,9 +7418,10 @@ def wake_page(container):
                         status=410, mimetype="text/plain")
     held_by = _drain_holds(unit, container)
     if held_by:
+        _defer_drain_start(unit, container, held_by)
         return Response(
             f"'{container}' is held down by power drain {held_by} — "
-            f"it comes back when the LLM job finishes.",
+            f"queued to start automatically when the drain releases.",
             status=409, mimetype="text/plain")
     _queue_command(unit, container, "start", source="wake")
     # Optional explicit redirect target (?to=...), restricted to our own domains
