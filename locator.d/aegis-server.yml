@@ -3,5 +3,15 @@ Service:
   # aegis-server (mfa.theofficialblacksheepco.com) — real container, keeps the
   # /healthz probe its file service always had.
   aegis-server:
-    edge_port: 8090
+    # 8095, not 8090: aegis-server now lives on unit7 where forge already
+    # publishes 8090. The port belongs to the host it runs on, so moving a
+    # service between units can collide - the registry routes by name, but
+    # the published port still has to be free where it lands.
+    edge_port: 8095
     edge_healthcheck: /healthz
+    # The public hostname lives here, beside the upstream, so the two move
+    # together. Previously the router for this host had to be hand-written
+    # into a Traefik dynamic file; the entry below replaces it, and the same
+    # field now works for any service migrating off a hardcoded file router.
+    edge_domains:
+      - mfa.theofficialblacksheepco.com
