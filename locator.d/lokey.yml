@@ -20,5 +20,5 @@ Service:
   lokey:
     deployment_type: essential
     location_type: stationary
-    units: "3_4_5_6_7_8_9"
+    units: "2_3_5_6_7_9"
     instances: 1

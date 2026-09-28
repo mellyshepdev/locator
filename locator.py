@@ -3261,8 +3261,9 @@ def claim_migration(mig_id):
     with lock:
         _, svc = _find_service_entry(mig.get("container") or "")
         image = ((svc or {}).get("metadata") or {}).get("image", "").lower()
-    pinned = _is_pinned(mig.get("container") or "")
-    stateful = any(m in image for m in _STATEFUL_IMAGE_MARKERS)
+    pinned = _pinned_blocks_migration(mig.get("container") or "")
+    stateful = (any(m in image for m in _STATEFUL_IMAGE_MARKERS)
+                and not _volumes_on_clusterfs(mig.get("container") or ""))
 
     with migration_lock:
         # Re-check under the lock — another claim could have landed in the
@@ -4782,6 +4783,75 @@ def _is_pinned(name):
     return any(p in low for p in _PINNED_NAMES)
 
 
+# Pins that exist because the service's data sits on the host disk — lifted
+# when every compose volume binds from the CephFS pool, since then the data
+# is local on every unit at once. Infrastructure pins (traefik, tailscale,
+# crowdsec, ...) exist for identity/network position, not data, and stay
+# absolute regardless of where the volumes live.
+_DATA_PIN_NAMES = {
+    "postgres", "postgresql", "redis", "mysql", "mariadb", "barcode_db",
+    "matrix_synapse", "openbao",
+}
+
+CLUSTERFS_ROOT = os.environ.get("CLUSTERFS_ROOT", "/srv/clusterfs")
+
+
+def _volumes_on_clusterfs(name):
+    """True when the service's stored compose declares at least one volume and
+    every bind-mount source resolves under the CephFS root — i.e. the data
+    really does follow the container to any unit mounting the pool.
+
+    Named docker volumes are host-local and always return False: put the data
+    dir under /srv/clusterfs/<svc>/ as a bind mount to make a service mobile.
+    """
+    path = os.path.join(COMPOSE_DIR, f"{name}.yml")
+    if not os.path.exists(path):
+        return False
+    try:
+        import yaml as _yaml
+        with open(path, errors="replace") as f:
+            doc = _yaml.safe_load(f)
+    except Exception:
+        return False
+    binds = []
+    for svc in (doc or {}).get("services", {}).values():
+        for v in svc.get("volumes", []) or []:
+            if isinstance(v, str):
+                src = v.split(":", 1)[0]
+            elif isinstance(v, dict):
+                if v.get("type") != "bind":
+                    return False    # named volume / tmpfs — host-local
+                src = v.get("source") or ""
+            else:
+                return False
+            src = os.path.expandvars(src)
+            if not src.startswith(("/", "./")):
+                return False        # bare name = named volume = host-local
+            binds.append(os.path.normpath(os.path.join("/", src)))
+    return bool(binds) and all(
+        b == CLUSTERFS_ROOT or b.startswith(CLUSTERFS_ROOT + "/") for b in binds)
+
+
+def _pinned_blocks_migration(name):
+    """Pin check for migration paths. Same as _is_pinned(), except a purely
+    data-motivated pin is lifted when every volume is on the CephFS pool —
+    the pin existed to keep the container next to its data, and clustered
+    data is equally local on every unit.
+
+    An explicit `location_type: stationary` in locator.d still wins outright:
+    that flag is operator intent, not a data-anchor heuristic.
+    """
+    low = (name or "").lower()
+    if _policy_for(low).get("location_type") == "stationary":
+        return True
+    matching = [p for p in _PINNED_NAMES if p in low]
+    if any(p not in _DATA_PIN_NAMES for p in matching):
+        return True
+    if matching:            # only data pins matched
+        return not _volumes_on_clusterfs(low)
+    return False
+
+
 _PINNED_NAMES = {
     "traefik", "apache", "apache2", "httpd", "varnish", "bind9", "bind",
     "openvpn", "openvpn-client", "headscale", "tailscale", "wireguard-client", "wireguard",
@@ -4974,8 +5044,10 @@ def load_balancer():
             if cpu is None or mem is None:
                 continue  # hasn't reported metrics yet
 
-            # Disk pressure is the primary trigger; CPU/mem are secondary
-            load = disk if disk is not None else max(cpu, mem)
+            # Highest pressure wins across all three signals. Disk-only used
+            # to mask compute collapse: unit7 sat at ~98% cpu while its 72%
+            # disk was the entire "load" the balancer saw (2026-09-28).
+            load = max(x for x in (cpu, mem, disk) if x is not None)
 
             all_nodes_load.append((node_id, load, info))
             if mem is not None and mem >= OOM_THRESHOLD:
@@ -5043,12 +5115,34 @@ def load_balancer():
                 if least not in underloaded and _node_runs_containers(least[0], services_snap):
                     underloaded.append(least)
 
-        if not overloaded or not underloaded:
+        if not overloaded:
             # Reset strikes for any node that's no longer overloaded
             for node_id in list(overload_strikes):
                 if node_id not in {n[0] for n in overloaded}:
                     overload_strikes.pop(node_id, None)
             continue
+
+        # Fallback target pool: this fleet has no genuinely idle docker box —
+        # nothing is ever below BALANCE_LOW, so this check used to end the
+        # cycle silently, forever (zero migrations ever queued, 2026-09-28).
+        # Accept any ONLINE docker-capable node below BALANCE_HIGH; the
+        # per-source check below still requires the target to be meaningfully
+        # freer than the node being drained.
+        fallback_targets = not underloaded
+        if fallback_targets:
+            skip = {o[0] for o in overloaded}
+            underloaded = sorted(
+                (n for n in all_nodes_load
+                 if n[0] not in skip
+                 and n[1] < BALANCE_HIGH
+                 and _best_ip(n[2])
+                 and _node_runs_containers(n[0], services_snap)),
+                key=lambda x: x[1])
+            if not underloaded:
+                for node_id in list(overload_strikes):
+                    if node_id not in skip:
+                        overload_strikes.pop(node_id, None)
+                continue
 
         overloaded.sort(key=lambda x: x[1], reverse=True)   # worst first
         underloaded.sort(key=lambda x: x[1])                 # most free first
@@ -5096,16 +5190,27 @@ def load_balancer():
                 (svc_id, svc)
                 for svc_id, svc in services_snap.items()
                 if svc.get("host") == src_id
-                and svc.get("status") == "ONLINE"
+                # OFFLINE is admitted only for idle-stopped containers: moving
+                # one is a compose-dir relocate (the next wake lands on the
+                # target), which is exactly what a service parked on an
+                # overloaded unit needs. Any other OFFLINE means broken —
+                # leave it, don't churn it.
+                and (svc.get("status") == "ONLINE"
+                     or (svc.get("status") == "OFFLINE"
+                         and svc.get("type") == "container"
+                         and _policy_for((svc.get("name") or "").lower()).get("idle_stop")))
                 and svc.get("type") in ("container", "native")
-                and not _is_pinned(svc.get("name"))
+                and not _pinned_blocks_migration(svc.get("name"))
                 and not svc.get("metadata", {}).get("pinned")
                 # A stateful IMAGE means the data stays behind — migration
                 # moves the compose file, not the volume. ops-pgdb (postgres:
                 # 16-alpine) slipped the name pins because it is spelled
-                # "pgdb", and ops-dashboard lost its database live.
-                and not any(m in (svc.get("metadata", {}).get("image") or "").lower()
-                            for m in _STATEFUL_IMAGE_MARKERS)
+                # "pgdb", and ops-dashboard lost its database live. Lifted
+                # only when every volume binds from the CephFS pool — then
+                # the data is equally local on any target unit.
+                and (not any(m in (svc.get("metadata", {}).get("image") or "").lower()
+                             for m in _STATEFUL_IMAGE_MARKERS)
+                     or _volumes_on_clusterfs(svc.get("name") or ""))
                 and svc.get("name") not in in_flight
                 and (migration_failed_at.get(svc.get("name"))
                      or datetime.min.replace(tzinfo=timezone.utc)) < fail_cutoff
@@ -5134,11 +5239,16 @@ def load_balancer():
                     _sip = _best_ip(_sinfo)
                     if _sip and _sinfo.get("status") == "ONLINE":
                         tgt_id, tgt_ip, tgt_info = _stid, _sip, _sinfo
-                        tgt_load = _sinfo.get("disk_percent") or max(_sinfo.get("cpu_percent") or 0, _sinfo.get("mem_percent") or 0)
+                        tgt_load = max(x for x in (_sinfo.get("cpu_percent"), _sinfo.get("mem_percent"), _sinfo.get("disk_percent")) if x is not None)
 
             if not tgt_id:
                 # Fall back to searching fresh — first underloaded node with a usable IP
                 for _tid, _tload, _tinfo in underloaded:
+                    # In fallback mode the pool is "below BALANCE_HIGH", not
+                    # "below BALANCE_LOW" — require the move to be a real win,
+                    # not a shuffle between equally-loaded boxes.
+                    if fallback_targets and _tload >= src_load - BALANCE_DIFF:
+                        continue
                     _tip = _best_ip(_tinfo)
                     if _tip:
                         tgt_id, tgt_load, tgt_info, tgt_ip = _tid, _tload, _tinfo, _tip
@@ -5167,7 +5277,7 @@ def load_balancer():
                     "unit":       src_id,   # push/stop step runs on the source
                     "status":     "PENDING",
                     "queued_at":  now.isoformat(),
-                    "reason":     f"{src_id} disk {src_load:.1f}% → {tgt_id} disk {tgt_load:.1f}%",
+                    "reason":     f"{src_id} load {src_load:.1f}% → {tgt_id} load {tgt_load:.1f}%",
                     "type":       mig_type,
                     "sync_path":  svc.get("metadata", {}).get("sync_path", ""),
                     "systemd_unit": svc.get("metadata", {}).get("systemd_unit", container_name),

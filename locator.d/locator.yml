@@ -27,5 +27,5 @@ Service:
   locator:
     deployment_type: essential
     location_type: stationary
-    units: "4"
+    units: "7"
     instances: 1
