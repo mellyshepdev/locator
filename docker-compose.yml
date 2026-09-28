@@ -101,7 +101,7 @@ services:
       # fills. lokey's janitor escalates to image-prune -a at 93.
       - DISK_CRIT_PERCENT=92
       - DATABASE_URL=${DATABASE_URL}
-      - LOCATOR_CANONICAL_URL=https://locator.prime-quality.online
+      - LOCATOR_CANONICAL_URL=https://locator.network
       # Traccar runs on unit9 as a systemd service on :8082. Nothing has served
       # 80/443 there since its Caddy went away, so the default host
       # (traccar.theofficialblacksheepco.online) resolves to a machine with no
@@ -147,7 +147,7 @@ services:
     labels:
       - "traefik.enable=true"
       # API router — no auth so lokey heartbeats and all programmatic calls pass through
-      - "traefik.http.routers.locator-api.rule=Host(`locator.prime-quality.online`) && (PathPrefix(`/api/`) || PathPrefix(`/register`) || PathPrefix(`/deregister/`) || PathPrefix(`/nodes/`) || PathPrefix(`/wake/`) || PathPrefix(`/health`) || Path(`/silent-check-sso.html`) || PathPrefix(`/static/lokey-android`))"
+      - "traefik.http.routers.locator-api.rule=(Host(`locator.prime-quality.online`) || Host(`locator.network`)) && (PathPrefix(`/api/`) || PathPrefix(`/register`) || PathPrefix(`/deregister/`) || PathPrefix(`/nodes/`) || PathPrefix(`/wake/`) || PathPrefix(`/health`) || Path(`/silent-check-sso.html`) || PathPrefix(`/static/lokey-android`))"
       - "traefik.http.routers.locator-api.entrypoints=websecure"
       - "traefik.http.routers.locator-api.tls=true"
       # No certresolver: this domain terminates at unit9's edge, so TLS-ALPN
@@ -156,8 +156,10 @@ services:
       - "traefik.http.routers.locator-api.priority=200"
       - "traefik.http.routers.locator-api.service=locator"
       - "traefik.http.services.locator.loadbalancer.server.port=5000"
+      - "traefik.docker.network=traefik_proxy"
     networks:
       - networking
+      - traefik_proxy
 
   # Static dashboard shell — deliberately its own container so the idle
   # reaper can STOP it without touching the API. The shared apache on
@@ -180,7 +182,7 @@ services:
       - "traefik.docker.network=traefik_proxy"
       # UI catch-all — every locator.prime-quality.online path not claimed
       # by the locator-api router on the locator container.
-      - "traefik.http.routers.locator-ui.rule=Host(`locator.prime-quality.online`)"
+      - "traefik.http.routers.locator-ui.rule=(Host(`locator.prime-quality.online`) || Host(`locator.network`))"
       - "traefik.http.routers.locator-ui.entrypoints=websecure"
       - "traefik.http.routers.locator-ui.tls=true"
       - "traefik.http.routers.locator-ui.priority=100"

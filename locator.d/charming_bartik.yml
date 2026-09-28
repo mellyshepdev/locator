@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-09-25T20:57:26.112261+00:00 —
+  # 'charming_bartik' registered on unit7 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  charming_bartik:
+    deployment_type: optional
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: false

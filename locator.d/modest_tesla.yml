@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-09-25T22:29:00.577365+00:00 —
+  # 'modest_tesla' registered on unit7 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  modest_tesla:
+    deployment_type: optional
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: false

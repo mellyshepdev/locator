@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>500 — The Black Sheep Company</title>
+    <style>
+      html, body { margin: 0; padding: 0; background: #050510; min-height: 100%; }
+      body {
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+      }
+      img.art {
+        max-width: min(100vw, 860px);
+        max-height: 92vh;
+        width: auto;
+        height: auto;
+        object-fit: contain;
+        display: block;
+      }
+      a.home {
+        position: fixed;
+        bottom: 22px;
+        left: 50%;
+        transform: translateX(-50%);
+        font-family: system-ui, sans-serif;
+        font-size: 14px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: #cfd6ff;
+        text-decoration: none;
+        background: rgba(10, 10, 30, 0.72);
+        border: 1px solid rgba(140, 140, 220, 0.45);
+        border-radius: 8px;
+        padding: 10px 22px;
+      }
+      a.home:hover { background: rgba(40, 40, 90, 0.85); }
+    </style>
+  </head>
+  <body>
+    <img class="art" src="/error500.jpg" alt="Error 500 — internal error. The cosmic server is having a digital nervous breakdown." />
+    <a class="home" href="/">Back to the site</a>
+  </body>
+</html>

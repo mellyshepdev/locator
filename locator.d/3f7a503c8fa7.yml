@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-09-26T23:02:34.719253+00:00 —
+  # '3f7a503c8fa7' registered on unit7 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  3f7a503c8fa7:
+    deployment_type: optional
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: false

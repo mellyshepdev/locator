@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-09-25T17:46:09.711283+00:00 —
+  # 'gifted_taussig' registered on unit7 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  gifted_taussig:
+    deployment_type: optional
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: false

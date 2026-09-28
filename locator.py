@@ -781,6 +781,23 @@ def _node_probe_addr(info):
     return addr if addr and addr != "unknown" else None
 
 
+def _node_route_addr(info):
+    """The address an EDGE should route to, or None if this node is not live.
+
+    Deliberately stricter than _node_probe_addr: a node that has stopped
+    heartbeating keeps its last-known address so a probe can discover it coming
+    back, but that same address must never be handed to Traefik. unit4 and
+    unit8 sat in the registry with routable-looking addresses long after they
+    ceased to exist.
+    """
+    info = info or {}
+    if not info:
+        return None
+    if str(info.get("status", "")).upper() == "OFFLINE":
+        return None
+    return _node_probe_addr(info)
+
+
 def _node_reachable(info, timeout=None):
     """Does anything answer at this node's address?
 
@@ -1179,11 +1196,11 @@ def _edge_upstream(name, cfg, port):
     key, svc = _find_service_entry(lookup)
     host = (svc or {}).get("host") or ((svc or {}).get("hosts") or [None])[0]
     node = registry["nodes"].get(host or "") or {}
-    ip = _node_probe_addr(node)
+    ip = _node_route_addr(node)
     if not ip:
         units = (_policy_for(lookup) if lookup != name else cfg).get("units")
         for fallback in _expand_unit_spec(units, []):
-            ip = _node_probe_addr(registry["nodes"].get(fallback) or {})
+            ip = _node_route_addr(registry["nodes"].get(fallback) or {})
             if ip:
                 break
     if not ip:
@@ -1228,6 +1245,20 @@ def _edge_upstreams(name, cfg, port):
     return urls
 
 
+def _edge_domains(cfg):
+    """Public hostnames a policy entry claims, as a list.
+
+    Accepts a bare string for the common single-host case so an entry does not
+    have to spell a one-item list.
+    """
+    d = cfg.get("edge_domains")
+    if d is None:
+        d = cfg.get("edge_domain")
+    if isinstance(d, str):
+        d = [d]
+    return [str(x).strip() for x in (d or []) if str(x).strip()]
+
+
 @app.route("/api/traefik", methods=["GET"])
 def traefik_all_services():
     """Traefik HTTP-provider view of every edge-routed service in the fleet.
@@ -1238,6 +1269,10 @@ def traefik_all_services():
     services that never declare policy.
     """
     out = {}
+    # Declared up here because the policy loop below now contributes routers
+    # too, not only the deployment loop that originally owned these.
+    routers = {}
+    middlewares = {}
     policy = load_policy()
     with lock:
         for name, cfg in policy.items():
@@ -1261,13 +1296,45 @@ def traefik_all_services():
                 lb["healthCheck"] = {"path": cfg["edge_healthcheck"],
                                      "interval": "15s", "timeout": "5s"}
             out[name] = {"loadBalancer": lb}
+
+            # A service that names its public hostnames routes itself. Without
+            # this the entry yields an upstream with no rule pointing at it,
+            # and the edge falls through to its default — which is how
+            # mfa.theofficialblacksheepco.com served the wake page while its
+            # backend was up and correctly registered the whole time.
+            doms = _edge_domains(cfg)
+            if doms:
+                rule = " || ".join("Host(`%s`)" % h for h in doms)
+                # Emitted here rather than referenced as compress@file: the
+                # websecure entrypoint gets compression from static config but
+                # mesh does not, and not every edge that consumes this registry
+                # defines the middleware in its own files (unit2 does not).
+                # Shipping it with the router keeps the bundle self-contained.
+                cmw = "%s-compress" % name
+                middlewares[cmw] = {"compress": {}}
+                mw = [cmw]
+                routers["%s-mesh" % name] = {
+                    "rule": rule,
+                    "entryPoints": ["mesh"],
+                    "service": name,
+                    "middlewares": mw,
+                    # Cross-provider reference: unqualified, "mesh" would be
+                    # looked up inside @http and silently miss.
+                    "tls": {"options": "mesh@file"},
+                }
+                if cfg.get("edge_public"):
+                    routers["%s-public" % name] = {
+                        "rule": rule,
+                        "entryPoints": ["websecure"],
+                        "service": name,
+                        "middlewares": mw,
+                        "tls": {"certResolver": "myresolver"},
+                    }
         # User deployments: any registered service carrying a subdomain+domain
         # gets a concrete Host rule (its own cert via tlsChallenge — a wildcard
         # HostRegexp could not be issued one) plus an upstream pointed wherever
         # the deployment's node currently lives. Two claims on one subdomain
         # collapse to a single router; the later registration wins.
-        routers = {}
-        middlewares = {}
         for svc in registry["services"].values():
             sub, dom = svc.get("subdomain"), svc.get("domain")
             if not sub or not dom:
@@ -4687,6 +4754,20 @@ def load_policy():
                 # 15s/5s probe.
                 "edge_pass_host": cfg.get("edge_pass_host"),
                 "edge_healthcheck": str(cfg.get("edge_healthcheck", "")),
+                # edge_domains: the public hostnames this service answers on.
+                # Their presence is what makes /api/traefik emit a ROUTER for
+                # the entry and not just an upstream — the difference between
+                # a service Traefik knows about and one it will actually send
+                # traffic to. A bare string is accepted for the single-host
+                # case; see _edge_domains.
+                #
+                # edge_public: additionally emit a websecure router with an
+                # ACME cert. Opt-in, because public traffic reaches this fleet
+                # through the edge's mTLS mesh entrypoint, and a certificate
+                # request for a hostname that does not resolve to this node
+                # just fails forever.
+                "edge_domains": cfg.get("edge_domains", cfg.get("edge_domain")),
+                "edge_public": bool(cfg.get("edge_public", False)),
                 # loadbalance: emit EVERY ONLINE replica as a backend server in
                 # /api/traefik instead of just the first live host, so Traefik
                 # round-robins across units. Replica liveness comes free from
