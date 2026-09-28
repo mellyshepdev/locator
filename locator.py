@@ -132,20 +132,27 @@ EXCEL_FILE = "registry.xlsx"
 
 # Admin key gating remote-exec / scheduling — these endpoints let the locator
 # tell a unit's lokey to run an arbitrary shell command, so unlike the rest of
-# the (deliberately open) API they require X-Locator-Admin-Key. Fails closed:
-# if the key isn't configured, the endpoints refuse everything rather than
-# silently running open.
+# the (deliberately open) API they require X-Locator-Admin-Key OR a signed-in
+# principal at the endpoint's ROUTE_CLEARANCE level. Fails closed: if the key
+# isn't configured and nobody is signed in, the endpoints refuse everything
+# rather than silently running open.
 LOCATOR_ADMIN_KEY = os.environ.get("LOCATOR_ADMIN_KEY", "")
 
 
 def _require_admin_key():
-    """Return None if the request's X-Locator-Admin-Key is valid, else a Flask response to abort with."""
+    """None if authorized, else a Flask response to abort with.
+
+    Authorized = the X-Locator-Admin-Key machine credential OR a Keycloak/grid
+    principal meeting this endpoint's ROUTE_CLEARANCE level. clearance.identify()
+    already maps a valid admin key to ROOT, so the level check covers machines
+    and humans through one comparison; endpoints missing from the table default
+    to ROOT, which is exactly the old admin-key-only behaviour."""
+    needed = clearance.ROUTE_CLEARANCE.get(request.endpoint or "", clearance.ROOT)
+    if clearance.level() >= needed:
+        return None
     if not LOCATOR_ADMIN_KEY:
         return jsonify({"error": "LOCATOR_ADMIN_KEY not configured on server"}), 503
-    supplied = request.headers.get("X-Locator-Admin-Key", "")
-    if not hmac.compare_digest(supplied, LOCATOR_ADMIN_KEY):
-        return jsonify({"error": "unauthorized"}), 401
-    return None
+    return jsonify({"error": "unauthorized"}), 401
 
 # DNS zone status/sync (unit9 runs the PowerDNS primary with a sqlite3
 # backend, at ns2.theofficialblacksheepco.online — DNS delegation for the

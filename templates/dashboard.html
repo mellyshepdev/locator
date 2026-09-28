@@ -3345,7 +3345,7 @@
         window._refreshModalUnit = null;
 
         async function runRefresh(unit) {
-            if (!getExecKey()) promptExecKey();
+            if (!hasExecAccess()) promptExecKey();
             try {
                 const body = unit ? { unit } : { all: true };
                 const res = await execFetch('/api/refresh/run', {
@@ -3397,7 +3397,7 @@
             document.getElementById('refresh-modal-title').innerText = 'REFRESH RUNS — ' + unit;
             document.getElementById('refresh-modal').style.display = 'flex';
             list.innerHTML = '<div style="color:#555; padding:10px;">Loading…</div>';
-            if (!getExecKey()) promptExecKey();
+            if (!hasExecAccess()) promptExecKey();
             try {
                 const runs = await execFetch(`/api/refresh/runs?unit=${encodeURIComponent(unit)}&limit=8`,
                                              { headers: execHeaders() });
@@ -3806,6 +3806,13 @@
             return localStorage.getItem('locatorAdminKey') || '';
         }
 
+        // The server also accepts a signed-in Keycloak session at the
+        // endpoint's clearance level — the admin key is only needed for
+        // browsers that aren't logged in.
+        function hasExecAccess() {
+            return !!getExecKey() || !!(window.kc && kc.authenticated);
+        }
+
         function promptExecKey() {
             const current = getExecKey();
             const next = window.prompt('Locator admin key (used for /api/exec and /api/schedule):', current);
@@ -3832,7 +3839,7 @@
             const script = document.getElementById('exec-script-input').value;
             const out = document.getElementById('exec-output');
             if (!unit || !script.trim()) { notify('Pick a unit and enter a script', 'error'); return; }
-            if (!getExecKey()) promptExecKey();
+            if (!hasExecAccess()) promptExecKey();
             out.textContent = `Queuing on ${unit}…`;
             try {
                 const { command } = await execFetch('/api/exec', {
@@ -3869,7 +3876,7 @@
 
         async function loadScheduleList() {
             const tbody = document.getElementById('schedule-tbody');
-            if (!getExecKey()) { tbody.innerHTML = '<tr><td colspan="7" style="padding:10px;color:#555;">Set admin key to view scheduled jobs.</td></tr>'; return; }
+            if (!hasExecAccess()) { tbody.innerHTML = '<tr><td colspan="7" style="padding:10px;color:#555;">Sign in or set an admin key to view scheduled jobs.</td></tr>'; return; }
             try {
                 const jobs = await execFetch('/api/schedule', { headers: execHeaders() });
                 if (!jobs.length) { tbody.innerHTML = '<tr><td colspan="7" style="padding:10px;color:#555;">No scheduled jobs.</td></tr>'; return; }
@@ -3894,7 +3901,7 @@
             const interval = document.getElementById('schedule-interval-input').value.trim();
             const script = document.getElementById('schedule-script-input').value;
             if (!unit || !interval || !script.trim()) { notify('Fill unit, interval, and script', 'error'); return; }
-            if (!getExecKey()) promptExecKey();
+            if (!hasExecAccess()) promptExecKey();
             try {
                 await execFetch('/api/schedule', {
                     method: 'POST', headers: execHeaders(),
