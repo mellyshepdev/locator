@@ -2,7 +2,8 @@ Service:
 
   forge:
     # Tailnet publish port edges reach this on; /api/traefik follows it.
-    edge_port: 8090
+    # 8092, not 8090: unit2 firefly owns 100.64.118.105:8090 (moved 2026-09-28)
+    edge_port: 8092
     deployment_type: non-essential
     # Mobile since 2026-09-28: unit7 is chronically overloaded and forge is a
     # static Apache bundle — it belongs wherever the load isn't. units "2_7"
