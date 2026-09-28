@@ -3333,18 +3333,20 @@ def claim_migration(mig_id):
                 and not _volumes_on_clusterfs(mig.get("container") or ""))
     allowed = _migration_allowed_units(mig.get("container") or "")
     bad_target = allowed is not None and mig.get("to_node") not in allowed
+    host_local = _has_host_local_mounts(mig.get("container") or "")
 
     with migration_lock:
         # Re-check under the lock — another claim could have landed in the
         # gap between the first check and now.
         if mig["status"] != "PENDING":
             return jsonify({"error": "already claimed", "status": mig["status"]}), 409
-        if pinned or stateful or bad_target:
+        if pinned or stateful or bad_target or host_local:
             mig["status"] = "CANCELLED"
             mig["cancelled_at"] = datetime.now(timezone.utc).isoformat()
             mig["cancel_reason"] = ("pinned" if pinned else
                                     "stateful image" if stateful else
-                                    f"target {mig.get('to_node')} outside units spec")
+                                    f"target {mig.get('to_node')} outside units spec" if bad_target else
+                                    "host-local mounts off clusterfs")
             print(f"🚫 MIGRATION {mig_id}: cancelled at claim — {mig['cancel_reason']}")
             return jsonify({"error": "cancelled", "reason": mig["cancel_reason"]}), 409
         mig["status"]     = "IN_PROGRESS"
@@ -4917,6 +4919,61 @@ def _volumes_on_clusterfs(name):
         b == CLUSTERFS_ROOT or b.startswith(CLUSTERFS_ROOT + "/") for b in binds)
 
 
+# Bind sources that exist identically on every docker host — mounting them
+# is plumbing, not data, and must not count as "state left behind".
+_INFRA_BIND_SOURCES = {
+    "/var/run/docker.sock", "/etc/localtime", "/var/log", "/proc", "/sys",
+    "/dev", "/etc/os-release", "/run", "/run/udev", "/sys/fs/cgroup",
+}
+
+
+def _has_host_local_mounts(name):
+    """True when the service's stored compose mounts something that cannot
+    follow a git-push migration: a named docker volume, an unresolvable
+    ${VAR} source, or an absolute host path outside CLUSTERFS_ROOT that is
+    not a same-on-every-host infra mount. Relative ./x binds are exempt —
+    they resolve inside the pushed project dir on the target. No compose on
+    file → False: absence of evidence isn't a hazard, and other checks (the
+    stacks-repo fallback path in lokey) catch a missing compose anyway.
+
+    This is the general version of the stateful-image guard: postgres data
+    dirs and /home/... media paths were reaching the queue via containers
+    whose images matched no stateful marker (site-chat, vaultwarden) — the
+    move would have landed them on a new unit with empty volumes.
+    """
+    path = os.path.join(COMPOSE_DIR, f"{name}.yml")
+    if not os.path.exists(path):
+        return False
+    try:
+        import yaml as _yaml
+        with open(path, errors="replace") as f:
+            doc = _yaml.safe_load(f)
+    except Exception:
+        return False
+    for svc in (doc or {}).get("services", {}).values():
+        for v in svc.get("volumes", []) or []:
+            if isinstance(v, str):
+                src = v.split(":", 1)[0]
+            elif isinstance(v, dict):
+                if v.get("type") != "bind":
+                    return True     # named volume / tmpfs — host-local
+                src = v.get("source") or ""
+            else:
+                return True
+            src = os.path.expandvars(src)
+            if src in (".", "..") or src.startswith(("./", "../")):
+                continue            # project-relative — rides the repo push
+            if "$" in src or not src.startswith("/"):
+                return True         # unresolvable var, or bare named volume
+            src = os.path.normpath(src)
+            if src in _INFRA_BIND_SOURCES:
+                continue
+            if src == CLUSTERFS_ROOT or src.startswith(CLUSTERFS_ROOT + "/"):
+                continue            # clustered — equally local everywhere
+            return True             # real host path that stays behind
+    return False
+
+
 def _pinned_blocks_migration(name):
     """Pin check for migration paths. Same as _is_pinned(), except a purely
     data-motivated pin is lifted when every volume is on the CephFS pool —
@@ -4978,6 +5035,9 @@ _PINNED_NAMES = {
     # DNS keeps pointing at unit8 — the site just goes dark. locator.yml already
     # pins them; this makes it uneditable from the grid as well.
     "main-site", "client-portal",
+    # Ceph cluster daemons (mon/mgr/osd/mds/mounter) — clustered storage is
+    # the thing migrations ride on; moving a mover makes no sense.
+    "ceph",
     # socat publish-sidecars — the '*-pub' naming convention for containers
     # that expose another service onto the tailnet. Pure plumbing: no traffic
     # pattern of their own, so the idle reaper sees a forwarder with no
@@ -5312,6 +5372,9 @@ def load_balancer():
                 and (not any(m in (svc.get("metadata", {}).get("image") or "").lower()
                              for m in _STATEFUL_IMAGE_MARKERS)
                      or _volumes_on_clusterfs(svc.get("name") or ""))
+                # Same hazard, image-agnostic: named volumes and absolute
+                # binds off the pool stay behind no matter what the image is.
+                and not _has_host_local_mounts(svc.get("name") or "")
                 and svc.get("name") not in in_flight
                 and (migration_failed_at.get(svc.get("name"))
                      or datetime.min.replace(tzinfo=timezone.utc)) < fail_cutoff
