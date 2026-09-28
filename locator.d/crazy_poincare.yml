@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-09-28T07:58:25.601362+00:00 —
+  # 'crazy_poincare' registered on unit7 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  crazy_poincare:
+    deployment_type: optional
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: false

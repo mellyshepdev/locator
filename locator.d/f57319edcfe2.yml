@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-09-26T23:02:45.521027+00:00 —
+  # 'f57319edcfe2' registered on unit7 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  f57319edcfe2:
+    deployment_type: optional
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: false
