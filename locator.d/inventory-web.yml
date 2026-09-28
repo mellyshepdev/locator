@@ -1,8 +1,12 @@
 Service:
 
-  # inventory.theofficialblacksheepco.com — dedicated frontend behind the
-  # shared unit7 apache :8082 proxy. The edge file still routes to :8082; only
-  # the backend container changed from the retired inventory-inventory-1.
+  # inventory.theofficialblacksheepco.com — dedicated frontend. Migratable:
+  # every bind mount is under /srv/clusterfs (CephFS), and the edge upstream
+  # follows the registry via inventory-app@http (edge_port 8097 in
+  # locator.d/inventory-app.yml), so nothing pins it to unit7 anymore.
+  # units stays "current_unit" — a multi-unit spec would make
+  # enforce_unit_placement fan it out to every listed unit instead of
+  # keeping it a single mobile instance.
   inventory-web:
     deployment_type: non-essential
     location_type: mobile

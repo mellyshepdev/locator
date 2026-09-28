@@ -1,7 +1,10 @@
 Service:
 
   # The edge's name for that app — borrows the container's registry placement
-  # so inventory-app.yml can point at inventory-app@http and follow a move.
+  # so inventory-ui (Traefik file provider, service inventory-app@http)
+  # follows a move. edge_host now names the live container (was the retired
+  # inventory-inventory-1); edge_port is the tailnet port inventory-web
+  # publishes on whatever unit hosts it.
   inventory-app:
-    edge_host: inventory-inventory-1
-    edge_port: 8082
+    edge_host: inventory-web
+    edge_port: 8097
