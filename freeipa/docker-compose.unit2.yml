@@ -1,3 +1,6 @@
+x-bao-secrets:
+  IPA_ADMIN_PASSWORD: bao://secret/compose/units/unit2/freeipa#IPA_ADMIN_PASSWORD
+
 # ── FREEIPA on unit2 — identity source for Locator clearance levels ─────────
 #
 # Rebuilt 2026-09-21 after unit4 died (the original /data volume — and its CA —
