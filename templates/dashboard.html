@@ -560,6 +560,14 @@
             background-color: rgba(0, 160, 255, 0.16);
             box-shadow: inset 0 0 0 2px #00a0ff;
         }
+        /* Underglow for online devices: a soft neon pool under the whole row.
+           Painted on the cells — border-collapse:collapse clips an outer
+           box-shadow set on the <tr> itself. Alert/charging rows keep their
+           own signals instead of getting the glow. */
+        tr.dev-online td {
+            box-shadow: 0 10px 16px -8px rgba(0, 255, 0, 0.5),
+                        inset 0 -12px 16px -10px rgba(0, 255, 0, 0.35);
+        }
         .online {
             background-color: var(--neon-green);
             /* Brighter, layered glow so online reads at a glance against the
@@ -2796,6 +2804,8 @@
                     tr.classList.add('dev-charging');
                 } else if (batteryCritical) {
                     tr.classList.add('dev-alert');
+                } else if (item.status === 'ONLINE') {
+                    tr.classList.add('dev-online');
                 }
                 tr.innerHTML = `
                     <td>
