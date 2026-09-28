@@ -4,11 +4,11 @@ Service:
   # shared unit7 apache :8082 proxy. The edge file still routes to :8082; only
   # the backend container changed from the retired inventory-inventory-1.
   inventory-web:
-    deployment_type: optional
-    location_type: stationary
-    units: "7"
+    deployment_type: non-essential
+    location_type: mobile
+    units: "current_unit"
     instances: 1
-    idle_stop: false
+    idle_stop: true
     idle_timeout: 15m
     public_wake: true
     project_dir: /home/swoopg111/projects/inventory

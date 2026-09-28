@@ -3,9 +3,10 @@ Service:
   # The dashboard itself is always-up (restart: unless-stopped, no idle_stop),
   # so its wake policy exists almost entirely to PRE-WARM the tools its cards
   # open. The page calls /__wake/triggers?domain=ops…, gets this entry back,
-  # then /__wake/ops-dashboard expands wake_with server-side — pgAdmin plus the
-  # three inventory backends. Container names stay out of the page: a rename or
-  # a move is a policy edit here, not a rebuild of the dashboard.
+  # then /__wake/ops-dashboard expands wake_with server-side — pgAdmin, the
+  # inventory backends, and the dedicated inventory frontend. Container names
+  # stay out of the page: a rename or a move is a policy edit here, not a
+  # rebuild of the dashboard.
   #
   # This stanza used to be declared TWICE in locator.yml — once as
   # essential/stationary after the ops-pgdb incident (2026-09-16, it talks to
@@ -19,7 +20,7 @@ Service:
     units: "8"
     instances: 1
     public_wake: true
-    wake_with: [pgadmin_ui, inventory-server, inventory-api, inventory-inventory-1]
+    wake_with: [pgadmin_ui, inventory-server, inventory-api, inventory-web]
     wake_triggers:
       domain:
         - ops.theofficialblacksheepco.com
