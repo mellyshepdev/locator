@@ -7,6 +7,12 @@ Service:
     # publishes 8090. The port belongs to the host it runs on, so moving a
     # service between units can collide - the registry routes by name, but
     # the published port still has to be free where it lands.
+    # Migratable, but only between the two units that can build it: its
+    # compose COPYs dist/index.html, and dist/ is gitignored, so a clone+build
+    # on a box without a prepared checkout fails — and on unit9's 1GB it would
+    # fail anyway. unit9 is not a legal target for an auth-path service.
+    location_type: mobile
+    units: "2_7"
     edge_port: 8095
     edge_healthcheck: /healthz
     # The public hostname lives here, beside the upstream, so the two move
