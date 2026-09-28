@@ -3331,16 +3331,20 @@ def claim_migration(mig_id):
     pinned = _pinned_blocks_migration(mig.get("container") or "")
     stateful = (any(m in image for m in _STATEFUL_IMAGE_MARKERS)
                 and not _volumes_on_clusterfs(mig.get("container") or ""))
+    allowed = _migration_allowed_units(mig.get("container") or "")
+    bad_target = allowed is not None and mig.get("to_node") not in allowed
 
     with migration_lock:
         # Re-check under the lock — another claim could have landed in the
         # gap between the first check and now.
         if mig["status"] != "PENDING":
             return jsonify({"error": "already claimed", "status": mig["status"]}), 409
-        if pinned or stateful:
+        if pinned or stateful or bad_target:
             mig["status"] = "CANCELLED"
             mig["cancelled_at"] = datetime.now(timezone.utc).isoformat()
-            mig["cancel_reason"] = "pinned" if pinned else "stateful image"
+            mig["cancel_reason"] = ("pinned" if pinned else
+                                    "stateful image" if stateful else
+                                    f"target {mig.get('to_node')} outside units spec")
             print(f"🚫 MIGRATION {mig_id}: cancelled at claim — {mig['cancel_reason']}")
             return jsonify({"error": "cancelled", "reason": mig["cancel_reason"]}), 409
         mig["status"]     = "IN_PROGRESS"
@@ -4933,6 +4937,22 @@ def _pinned_blocks_migration(name):
     return False
 
 
+def _migration_allowed_units(name):
+    """A service's `units:` spec read as a migration-target constraint.
+
+    Returns None for the unconstrained cases ('' / 'all' / 'current_unit' —
+    no declared set means the service may live anywhere), else the set of
+    unit names the policy allows it on. The balancer picks inside the set
+    and claim re-validates it, so 'units: "2_7"' can never land on unit9 —
+    that exact violation queued main-website for unit9 on 2026-09-28 and was
+    only caught because the claim hadn't fired yet.
+    """
+    spec = str(_policy_for(name).get("units") or "").strip().lower()
+    if spec in ("", "all", "current_unit"):
+        return None
+    return _expand_unit_spec(spec, [])
+
+
 _PINNED_NAMES = {
     "traefik", "apache", "apache2", "httpd", "varnish", "bind9", "bind",
     "openvpn", "openvpn-client", "headscale", "tailscale", "wireguard-client", "wireguard",
@@ -5302,76 +5322,87 @@ def load_balancer():
                 print(f"⚠️  BALANCE: {src_id} overloaded but no movable services found (container or native, deps satisfied)")
                 continue
 
-            # Pick the container: oldest running first (most stable, least disruptive)
+            # Try each movable service in oldest-running order until one both
+            # finds a target AND is queued — stopping at movable[0] used to mean
+            # a service with no legal target (units spec, no freer node) wedged
+            # every other movable service on the node behind it, forever.
             movable.sort(key=lambda x: x[1].get("registered_at", ""))
-            svc_id, svc = movable[0]
-            container_name = svc["name"]
+            for svc_id, svc in movable:
+                container_name = svc["name"]
+                allowed_units = _migration_allowed_units(container_name)
 
-            # Fast path: if this exact service was already pre-staged (Phase 3)
-            # against a reachable target recently enough, skip re-searching for
-            # one — the prestage pass already did that reachability lookup.
-            tgt_id = tgt_ip = tgt_info = tgt_load = None
-            staged = prestage_state.get(svc_id)
-            if staged and staged.get("candidate_target") and not staged.get("missing_deps"):
-                staged_age = (now - datetime.fromisoformat(staged["checked_at"])).total_seconds()
-                if staged_age <= PRESTAGE_STALE_SECONDS:
-                    _stid = staged["candidate_target"]
-                    _sinfo = nodes_snap.get(_stid, {})
-                    _sip = _best_ip(_sinfo)
-                    if _sip and _sinfo.get("status") == "ONLINE":
-                        tgt_id, tgt_ip, tgt_info = _stid, _sip, _sinfo
-                        tgt_load = max(x for x in (_sinfo.get("cpu_percent"), _sinfo.get("mem_percent"), _sinfo.get("disk_percent")) if x is not None)
+                # Fast path: if this exact service was already pre-staged
+                # (Phase 3) against a reachable target recently enough, skip
+                # re-searching for one — the prestage pass already did that
+                # reachability lookup.
+                tgt_id = tgt_ip = tgt_info = tgt_load = None
+                staged = prestage_state.get(svc_id)
+                if staged and staged.get("candidate_target") and not staged.get("missing_deps"):
+                    staged_age = (now - datetime.fromisoformat(staged["checked_at"])).total_seconds()
+                    if staged_age <= PRESTAGE_STALE_SECONDS:
+                        _stid = staged["candidate_target"]
+                        _sinfo = nodes_snap.get(_stid, {})
+                        _sip = _best_ip(_sinfo)
+                        if _sip and _sinfo.get("status") == "ONLINE" \
+                                and (allowed_units is None or _stid in allowed_units):
+                            tgt_id, tgt_ip, tgt_info = _stid, _sip, _sinfo
+                            tgt_load = max(x for x in (_sinfo.get("cpu_percent"), _sinfo.get("mem_percent"), _sinfo.get("disk_percent")) if x is not None)
 
-            if not tgt_id:
-                # Fall back to searching fresh — first underloaded node with a usable IP
-                for _tid, _tload, _tinfo in underloaded:
-                    # In fallback mode the pool is "below BALANCE_HIGH", not
-                    # "below BALANCE_LOW" — require the move to be a real win,
-                    # not a shuffle between equally-loaded boxes.
-                    if fallback_targets and _tload >= src_load - BALANCE_DIFF:
-                        continue
-                    _tip = _best_ip(_tinfo)
-                    if _tip:
-                        tgt_id, tgt_load, tgt_info, tgt_ip = _tid, _tload, _tinfo, _tip
-                        break
-            if not tgt_id:
-                print(f"⚠️  BALANCE: no reachable target node for {src_id}")
-                continue
+                if not tgt_id:
+                    # Fall back to searching fresh — first underloaded node with
+                    # a usable IP that the service's units spec also allows.
+                    for _tid, _tload, _tinfo in underloaded:
+                        if allowed_units is not None and _tid not in allowed_units:
+                            continue
+                        # In fallback mode the pool is "below BALANCE_HIGH", not
+                        # "below BALANCE_LOW" — require the move to be a real
+                        # win, not a shuffle between equally-loaded boxes.
+                        if fallback_targets and _tload >= src_load - BALANCE_DIFF:
+                            continue
+                        _tip = _best_ip(_tinfo)
+                        if _tip:
+                            tgt_id, tgt_load, tgt_info, tgt_ip = _tid, _tload, _tinfo, _tip
+                            break
+                if not tgt_id:
+                    continue    # this service has no legal target — try the next
 
-            with prestage_lock:
-                prestage_state.pop(svc_id, None)  # consumed — now a real migration, not just watched
+                with prestage_lock:
+                    prestage_state.pop(svc_id, None)  # consumed — now a real migration, not just watched
 
-            src_ip = _best_ip(src_info) or ""
-            mig_id = str(uuid.uuid4())[:8]
-            # Explicit type, matching create_migration()'s logic — without this,
-            # native services would fall through to the Docker-only legacy rsync
-            # path (_execute_rsync_migration) and fail outright.
-            mig_type = "git_push_and_stop" if svc.get("type") == "container" else "native_stop_and_sync"
-            with migration_lock:
-                migration_queue[mig_id] = {
-                    "id":         mig_id,
-                    "container":  container_name,
-                    "from_node":  src_id,
-                    "from_ip":    src_ip,
-                    "to_node":    tgt_id,
-                    "to_ip":      tgt_ip,
-                    "unit":       src_id,   # push/stop step runs on the source
-                    "status":     "PENDING",
-                    "queued_at":  now.isoformat(),
-                    "reason":     f"{src_id} load {src_load:.1f}% → {tgt_id} load {tgt_load:.1f}%",
-                    "type":       mig_type,
-                    "sync_path":  svc.get("metadata", {}).get("sync_path", ""),
-                    "systemd_unit": svc.get("metadata", {}).get("systemd_unit", container_name),
-                    "prereqs":    svc.get("prereqs", {}),
-                }
+                src_ip = _best_ip(src_info) or ""
+                mig_id = str(uuid.uuid4())[:8]
+                # Explicit type, matching create_migration()'s logic — without
+                # this, native services would fall through to the Docker-only
+                # legacy rsync path (_execute_rsync_migration) and fail outright.
+                mig_type = "git_push_and_stop" if svc.get("type") == "container" else "native_stop_and_sync"
+                with migration_lock:
+                    migration_queue[mig_id] = {
+                        "id":         mig_id,
+                        "container":  container_name,
+                        "from_node":  src_id,
+                        "from_ip":    src_ip,
+                        "to_node":    tgt_id,
+                        "to_ip":      tgt_ip,
+                        "unit":       src_id,   # push/stop step runs on the source
+                        "status":     "PENDING",
+                        "queued_at":  now.isoformat(),
+                        "reason":     f"{src_id} load {src_load:.1f}% → {tgt_id} load {tgt_load:.1f}%",
+                        "type":       mig_type,
+                        "sync_path":  svc.get("metadata", {}).get("sync_path", ""),
+                        "systemd_unit": svc.get("metadata", {}).get("systemd_unit", container_name),
+                        "prereqs":    svc.get("prereqs", {}),
+                    }
 
-            node_last_migrated[src_id] = now
-            overload_strikes[src_id]   = 0
+                node_last_migrated[src_id] = now
+                overload_strikes[src_id]   = 0
 
-            print(
-                f"📦 BALANCE: Queued {mig_id} — move '{container_name}' "
-                f"{src_id}({src_load:.1f}%) → {tgt_id}({tgt_load:.1f}%)"
-            )
+                print(
+                    f"📦 BALANCE: Queued {mig_id} — move '{container_name}' "
+                    f"{src_id}({src_load:.1f}%) → {tgt_id}({tgt_load:.1f}%)"
+                )
+                break   # one migration per source per cycle
+            else:
+                print(f"⚠️  BALANCE: no legal target for any movable service on {src_id}")
 
         # Clear strikes for nodes no longer overloaded
         for node_id in list(overload_strikes):
