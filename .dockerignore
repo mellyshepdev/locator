@@ -9,3 +9,8 @@ registry_data/
 correct look/
 currently incorrect look/
 dashboard.html.old
+
+# FreeIPA live data dir — root-owned, not part of the image
+freeipa/data/
+freeipa/data*
+secrets/
