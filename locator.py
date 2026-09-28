@@ -3018,6 +3018,11 @@ def traccar_devices():
 # above), so Traccar's own device list / map / history builds up from data
 # Lokey was already sending anyway.
 TRACCAR_FIX_MAX_AGE_S = int(os.environ.get("TRACCAR_FIX_MAX_AGE_S", 600))  # ignore stale fixes
+# The lokey app's Traccar screen signs in as a dedicated read-only account
+# (lokey-view@) rather than admin. Non-admin users see only devices linked to
+# them via /api/permissions, so every device auto-created below gets granted
+# to this user id. 0 = no viewer linking.
+TRACCAR_VIEWER_USER_ID = int(os.environ.get("TRACCAR_VIEWER_USER_ID", 0))
 _traccar_known_device_ids = set()  # uniqueIds already registered in Traccar this process
 
 # ── IP-based location fallback ──────────────────────────────────────────
@@ -3076,10 +3081,28 @@ def _traccar_ensure_device(unique_id, name):
         )
         if res.status_code in (200, 201):
             _traccar_known_device_ids.add(unique_id)
+            _traccar_link_viewer(res.json().get("id"))
         else:
             print(f"traccar_feeder: device create failed for {unique_id}: {res.status_code} {res.text}")
     except Exception as e:
         print(f"traccar_feeder: device create error for {unique_id}: {e}")
+
+
+def _traccar_link_viewer(device_id):
+    """Grant the read-only lokey-view account visibility of a device that was
+    just auto-created. Without this the app logs in fine but the map is empty."""
+    if not TRACCAR_VIEWER_USER_ID or not device_id:
+        return
+    try:
+        res = _traccar_request(
+            "POST", "/api/permissions",
+            auth=(TRACCAR_USER, TRACCAR_PASS),
+            json={"userId": TRACCAR_VIEWER_USER_ID, "deviceId": device_id},
+        )
+        if res.status_code not in (200, 204):
+            print(f"traccar_feeder: viewer link failed for device {device_id}: {res.status_code} {res.text}")
+    except Exception as e:
+        print(f"traccar_feeder: viewer link error for device {device_id}: {e}")
 
 
 def traccar_feeder():
