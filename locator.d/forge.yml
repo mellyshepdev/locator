@@ -4,8 +4,12 @@ Service:
     # Tailnet publish port edges reach this on; /api/traefik follows it.
     edge_port: 8090
     deployment_type: non-essential
-    location_type: stationary
-    units: "7"
+    # Mobile since 2026-09-28: unit7 is chronically overloaded and forge is a
+    # static Apache bundle — it belongs wherever the load isn't. units "2_7"
+    # only: the compose builds a vite image on `up`, and unit9's 1GB can't
+    # survive that build.
+    location_type: mobile
+    units: "2_7"
     instances: 1
     public_wake: true
     # Idle-stopped (owner call 2026-09-16, superseding the earlier always-on

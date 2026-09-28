@@ -5,8 +5,11 @@ Service:
   # still have left those two prefixes dead.
   forge-relay:
     deployment_type: optional
-    location_type: stationary
-    units: "2"
+    # Stateless WS fan-out — no volumes, a ~40MB python image. May move with
+    # the load; the /pad + /view routers reach it as forge-relay@http so the
+    # upstream follows the registry wherever it lands.
+    location_type: mobile
+    units: "2_7"
     instances: 1
     idle_stop: false
     idle_timeout: 15m
