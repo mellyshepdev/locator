@@ -5164,6 +5164,44 @@ def _node_runs_containers(node_id, services_snap=None):
     return False
 
 
+# A claim whose ack never reached the agent (or whose executor died mid-run)
+# leaves the task IN_PROGRESS forever: the agent skipped it, pending no longer
+# lists it, and nobody ever reports complete. bc230751 sat exactly like that —
+# unit2's POST /claim landed server-side but the response timed out under unit7
+# load, lokey's `except: continue` skipped execution, and the migration had no
+# owner. Requeue stale claims so the SAME node (claim ownership check blocks
+# anyone else) picks it up again — push/stop and pull/start are both
+# idempotent, so a re-execute after a genuinely slow run is harmless.
+MIGRATION_CLAIM_STALE = int(os.environ.get("MIGRATION_CLAIM_STALE", "1800"))
+MIGRATION_MAX_REQUEUES = int(os.environ.get("MIGRATION_MAX_REQUEUES", "3"))
+
+
+def _requeue_stale_claims():
+    now = datetime.now(timezone.utc)
+    with migration_lock:
+        for mig in migration_queue.values():
+            if mig.get("status") != "IN_PROGRESS":
+                continue
+            try:
+                age = (now - datetime.fromisoformat(mig["claimed_at"])).total_seconds()
+            except Exception:
+                age = MIGRATION_CLAIM_STALE + 1
+            if age < MIGRATION_CLAIM_STALE:
+                continue
+            if mig.get("requeues", 0) >= MIGRATION_MAX_REQUEUES:
+                mig["status"]       = "FAILED"
+                mig["error"]        = "claim went stale repeatedly — executor never reported"
+                mig["completed_at"] = now.isoformat()
+                print(f"❌ MIGRATION {mig['id']}: stale claim x{mig['requeues']} — FAILED")
+                continue
+            mig["status"]   = "PENDING"
+            mig["requeues"] = mig.get("requeues", 0) + 1
+            mig.pop("claimed_by", None)
+            mig.pop("claimed_at", None)
+            print(f"♻️ MIGRATION {mig['id']}: stale claim ({int(age)}s) — "
+                  f"requeued #{mig['requeues']}")
+
+
 def load_balancer():
     """
     Periodically checks node CPU/memory and queues container migrations
@@ -5177,6 +5215,7 @@ def load_balancer():
     """
     while True:
         time.sleep(BALANCE_INTERVAL)
+        _requeue_stale_claims()
 
         if not BALANCE_ENABLED:
             continue
@@ -5300,6 +5339,10 @@ def load_balancer():
                  and _node_runs_containers(n[0], services_snap)),
                 key=lambda x: x[1])
             if not underloaded:
+                # This is the "drowning with nowhere to send anyone" state —
+                # say so once per cycle instead of vanishing quietly; an
+                # at-threshold node (65.0 exactly) is not below BALANCE_HIGH.
+                print(f"⚠️  BALANCE: {[o[0] for o in overloaded]} overloaded but no ONLINE node is below {BALANCE_HIGH}% — nowhere to move")
                 for node_id in list(overload_strikes):
                     if node_id not in skip:
                         overload_strikes.pop(node_id, None)
