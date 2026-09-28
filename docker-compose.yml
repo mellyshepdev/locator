@@ -20,6 +20,12 @@ services:
       # by load_policy() — same reason for the mount.
       - ./locator.d:/app/locator.d
       - ./docker-compose.yml:/app/docker-compose.yml
+      # Code and static assets mounted too - otherwise every locator.py fix or
+      # lokey-android.apk republish needs a full image rebuild on a unit that
+      # is chronically too loaded to build. Same reasoning as the dashboard-
+      # editable mounts above; falls back to baked copies if ever unmounted.
+      - ./locator.py:/app/locator.py
+      - ./static:/app/static
       - /home/swoopg111/.ssh:/root/.ssh:ro
       # Lets the compose-store git push authenticate to GIT_REMOTE via the
       # host's stored credential — no token in .env.
