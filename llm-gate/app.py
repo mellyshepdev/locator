@@ -54,6 +54,9 @@ DRAIN_EXCLUDE = [n.strip() for n in
                  os.environ.get("DRAIN_EXCLUDE", "").split(",") if n.strip()]
 ACK_TIMEOUT_S = float(os.environ.get("ACK_TIMEOUT_S", "300"))
 POLL_S = float(os.environ.get("POLL_S", "5"))
+# unit7's locator can sit on command_lock for tens of seconds under load —
+# 15s polls failed closed every time. Give each locator call real room.
+LOCATOR_TIMEOUT_S = float(os.environ.get("LOCATOR_TIMEOUT_S", "60"))
 IDLE_LEASE_S = float(os.environ.get("IDLE_LEASE_S", "1800"))
 RETRY_BACKOFF_S = float(os.environ.get("RETRY_BACKOFF_S", "60"))
 
@@ -108,7 +111,7 @@ async def _restore(sid) -> bool:
         async with SESSION.post(
                 f"{LOCATOR_URL}/api/power/restore",
                 json={"drain_id": sid}, headers=_locator_headers(),
-                timeout=ClientTimeout(total=15)) as r:
+                timeout=ClientTimeout(total=LOCATOR_TIMEOUT_S)) as r:
             log.info("restore %s -> %s", sid, r.status)
             return r.status == 200
     except Exception as exc:
@@ -126,7 +129,7 @@ async def _drain_task():
                 json={"units": DRAIN_UNITS, "exclude": DRAIN_EXCLUDE,
                       "reason": "llm-gate"},
                 headers=_locator_headers(),
-                timeout=ClientTimeout(total=15)) as r:
+                timeout=ClientTimeout(total=LOCATOR_TIMEOUT_S)) as r:
             data = await r.json()
             sid = data["drain_id"]
         STATE["drain_id"] = sid
@@ -135,14 +138,24 @@ async def _drain_task():
         deadline = time.monotonic() + ACK_TIMEOUT_S
         while time.monotonic() < deadline:
             await asyncio.sleep(POLL_S)
-            async with SESSION.get(
-                    f"{LOCATOR_URL}/api/power/drain/{sid}",
-                    headers=_locator_headers(),
-                    timeout=ClientTimeout(total=15)) as r:
-                if r.status == 404:
-                    raise RuntimeError(
-                        f"drain {sid} vanished (locator restart?)")
-                st = await r.json()
+            try:
+                async with SESSION.get(
+                        f"{LOCATOR_URL}/api/power/drain/{sid}",
+                        headers=_locator_headers(),
+                        timeout=ClientTimeout(total=LOCATOR_TIMEOUT_S)) as r:
+                    if r.status == 404:
+                        raise RuntimeError(
+                            f"drain {sid} vanished (locator restart?)")
+                    st = await r.json()
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                # A single slow poll must not kill the drain — unit7's
+                # locator regularly takes >15s under load. Keep waiting
+                # until the ack deadline; only a 404 is fatal.
+                log.warning("drain %s status poll failed (%r); retrying",
+                            sid, exc)
+                continue
             waiting_req = [w for w in st.get("waiting", [])
                            if w.split("/", 1)[0] in REQUIRED_UNITS]
             failed_req = [f for f in st.get("failed", [])
@@ -185,7 +198,15 @@ async def ensure_drained():
         if ph == "ready":
             return True
         if ph == "failed":
-            return False
+            # A failed drain used to wedge the gate FOREVER — the backoff was
+            # only consulted in the idle branch, so one transient locator
+            # timeout refused every inference request until a manual restart.
+            # Backoff elapsed -> fall back to idle and let a fresh drain try.
+            if time.monotonic() - STATE["fail_at"] >= RETRY_BACKOFF_S:
+                log.warning("drain retry after backoff: %s", STATE["detail"])
+                STATE["phase"] = "idle"
+            else:
+                return False
         if ph == "idle":
             if time.monotonic() - STATE["fail_at"] < RETRY_BACKOFF_S:
                 return False
