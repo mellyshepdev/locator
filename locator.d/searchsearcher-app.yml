@@ -6,7 +6,7 @@ Service:
   searchsearcher-app:
     deployment_type: optional
     location_type: stationary
-    units: "8"
+    units: "4"
     instances: 1
     # Wake-on-visit (owner call 2026-09-17): the app may idle-stop; a visitor
     # landing on the main site, the welcome page, or search.…com itself wakes

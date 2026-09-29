@@ -4,7 +4,8 @@ Service:
   searchsearcher-oauth:
     deployment_type: optional
     location_type: stationary
-    units: "8"
+    units: "4"
+    edge_port: 4180
     instances: 1
     idle_stop: false
     public_wake: true
