@@ -3,6 +3,6 @@ Service:
   puffbase-cockroach:
     deployment_type: essential
     location_type: stationary
-    units: "7"
+    units: "4"
     instances: 1
     restart_when_stopped: true

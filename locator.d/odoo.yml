@@ -10,5 +10,9 @@ Service:
   odoo:
     deployment_type: essential
     location_type: stationary
-    units: "7"
+    units: "4"
     instances: 1
+    # Tailnet port the compose already publishes (100.99.131.20:8069) —
+    # /api/traefik emits upstream http://<unit>:8069 so both Traefiks route
+    # odoo.* + shop.prime-quality.online via the registry (odoo@http).
+    edge_port: 8069

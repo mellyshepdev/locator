@@ -9,7 +9,7 @@ Service:
   puffbase:
     deployment_type: essential
     location_type: stationary
-    units: "7"
+    units: "4"
     instances: 1
     idle_stop: false
     restart_when_stopped: true
