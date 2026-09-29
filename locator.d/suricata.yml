@@ -7,5 +7,5 @@ Service:
   suricata:
     deployment_type: essential
     location_type: stationary
-    units: "7"
+    units: "4"
     instances: 1
