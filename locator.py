@@ -1749,7 +1749,12 @@ def register_service():
         _check_battery_threshold(service_id, _new_battery, _prev_battery)
 
     print(f"📡 REGISTERED: {service_id} → {data.get('internal', data.get('url', 'unknown'))}")
-    return jsonify({"result": "registered", "service": service_id}), 200
+    # Explicit heartbeat acknowledgment. lokey counts a heartbeat as delivered
+    # only when its own seq comes back here — a 200 from a proxy error page,
+    # a wake page or a half-dead worker carries no echo and counts as a miss,
+    # and enough misses in a row make lokey start a locator itself.
+    ack = {"seq": data.get("seq"), "unit": UNIT_NAME, "ts": int(time.time())}
+    return jsonify({"result": "registered", "service": service_id, "ack": ack}), 200
 
 
 @app.route("/deregister/<name>", methods=["DELETE"])
