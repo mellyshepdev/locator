@@ -8,5 +8,5 @@ Service:
   ops-pgdb:
     deployment_type: essential
     location_type: stationary
-    units: "8"
+    units: "4"
     instances: 1

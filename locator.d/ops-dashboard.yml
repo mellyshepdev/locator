@@ -17,7 +17,8 @@ Service:
   ops-dashboard:
     deployment_type: essential
     location_type: stationary
-    units: "8"
+    units: "4"
+    edge_port: 8095
     instances: 1
     public_wake: true
     wake_with: [pgadmin_ui, inventory-server, inventory-api, inventory-web]
