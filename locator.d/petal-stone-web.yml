@@ -7,10 +7,11 @@ Service:
   petal-stone-web:
     deployment_type: essential
     location_type: stationary
-    units: "7"
+    units: "4"
     instances: 1
     idle_stop: false
     restart_when_stopped: true
+    edge_port: 8123
     public_wake: true
     project_dir: /home/swoopg111/projects/petal-stone
     wake_triggers:
