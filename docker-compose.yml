@@ -39,7 +39,7 @@ services:
     # this needs no --build (locator.py/bao.py are baked into the image, but the
     # command is not). Drop back to `info` once the Varnish cutover is settled —
     # gunicorn debug is chatty and the json-file log will grow.
-    command: ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "8",
+    command: ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--threads", "24",
               "--worker-class", "gthread", "--timeout", "300", "--keep-alive", "5",
               "--access-logfile", "-", "--error-logfile", "-", "--log-level", "debug",
               "locator:app"]
