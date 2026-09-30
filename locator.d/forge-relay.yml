@@ -18,9 +18,10 @@ Service:
     # forge-relay@http so its upstream follows the registry on a migration
     # instead of staying glued to whichever edge it happened to share.
     edge_port: 8791
-    wake_triggers:
-      domain:
-        # Its own 502 path stays: forge.yml gives /pad and /view a middleware
-        # of their own, so a request straight to a stopped relay still wakes it.
-        # The hub pre-warm reaches it via forge's wake_with, not from here.
-        - forge.prime-quality.online
+    # No domain wake_trigger here, deliberately: /api/wake/triggers returns
+    # the FIRST container claiming a domain, and this entry stole
+    # forge.prime-quality.online from forge itself — every visitor request
+    # woke only the (already running) relay and the real app stayed down.
+    # The /pad + /view prefixes are covered anyway: forge's wake_with names
+    # this relay, so one /wake/forge starts the pair. 2026-09-30.
+    wake_triggers: {}
