@@ -58,7 +58,7 @@ SEES_ALL_ROWS = STAFF
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 
 OIDC_ISSUER = os.environ.get(
-    "OIDC_ISSUER", "https://bsco-keycloak.fly.dev/realms/blacksheep"
+    "OIDC_ISSUER", "https://auth.theofficialblacksheepco.com/realms/blacksheep"
 ).rstrip("/")
 # Accepted client(s). Comma-separated: the dashboard signs in as `locator`,
 # but the client portal signs in as `client-portal`, and its admin box calls

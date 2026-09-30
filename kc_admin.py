@@ -20,7 +20,7 @@ import json
 import requests
 from flask import request, jsonify
 
-KC_BASE       = os.environ.get("KC_BASE", "https://bsco-keycloak.fly.dev").rstrip("/")
+KC_BASE       = os.environ.get("KC_BASE", "https://auth.theofficialblacksheepco.com").rstrip("/")
 KC_REALM      = os.environ.get("KC_REALM", "blacksheep")
 CLIENT_ID     = os.environ.get("KC_ADMIN_CLIENT_ID", "clearance-admin")
 CLIENT_SECRET = os.environ.get("KC_ADMIN_CLIENT_SECRET", "")

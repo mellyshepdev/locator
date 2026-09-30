@@ -159,7 +159,7 @@ This is the step that matters. Get a real token and look at it:
 
 ```bash
 curl -s -d client_id=locator -d username=jdoe -d password=… -d grant_type=password \
-  https://bsco-keycloak.fly.dev/realms/blacksheep/protocol/openid-connect/token \
+  https://auth.theofficialblacksheepco.com/realms/blacksheep/protocol/openid-connect/token \
   | python3 -c 'import sys,json,base64; t=json.load(sys.stdin)["access_token"].split(".")[1]; print(json.dumps(json.loads(base64.urlsafe_b64decode(t+"==")),indent=2))'
 ```
 
