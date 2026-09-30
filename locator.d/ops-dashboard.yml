@@ -25,5 +25,6 @@ Service:
     wake_triggers:
       domain:
         - ops.theofficialblacksheepco.com
+        - dash.theofficialblacksheepco.com
       link:
         - welcome:scanner
