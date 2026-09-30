@@ -16,4 +16,5 @@ Service:
     project_dir: /home/swoopg111/projects/petal-stone
     wake_triggers:
       domain:
+        - petalnstones.com
         - petal.prime-quality.online
