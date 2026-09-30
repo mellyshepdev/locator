@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-09-29T09:04:25.753116+00:00 —
+  # 'ceph-osd-2' registered on unit4 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  ceph-osd-2:
+    deployment_type: optional
+    location_type: stationary
+    units: "4"
+    instances: 1
+    idle_stop: false

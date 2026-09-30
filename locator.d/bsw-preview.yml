@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-09-29T11:28:16.633111+00:00 —
+  # 'bsw-preview' registered on unit2 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  bsw-preview:
+    deployment_type: optional
+    location_type: stationary
+    units: "2"
+    instances: 1
+    idle_stop: false

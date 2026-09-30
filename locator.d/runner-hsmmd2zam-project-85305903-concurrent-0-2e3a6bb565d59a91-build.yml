@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-09-29T12:48:56.084645+00:00 —
+  # 'runner-hsmmd2zam-project-85305903-concurrent-0-2e3a6bb565d59a91-build' registered on unit7 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  runner-hsmmd2zam-project-85305903-concurrent-0-2e3a6bb565d59a91-build:
+    deployment_type: optional
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: false

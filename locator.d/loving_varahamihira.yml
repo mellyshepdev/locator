@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-09-29T09:48:19.199999+00:00 —
+  # 'loving_varahamihira' registered on unit7 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  loving_varahamihira:
+    deployment_type: optional
+    location_type: stationary
+    units: "7"
+    instances: 1
+    idle_stop: false

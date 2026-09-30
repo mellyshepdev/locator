@@ -31,8 +31,10 @@ Service:
   #                 placeholder, which 502s into the wake middleware instead of
   #                 dropping the router and the wake path with it.
 
-  # The Ecosystem Hub SPA on unit4, published on the tailnet at :8091 and
-  # fronted by unit8's Traefik. Stopped cleanly on 2026-09-02 and stayed down
+  # The Ecosystem Hub SPA — now a self-contained `welcome` container on
+  # unit2 (hub-frontend image, dist baked in; de-consolidated from the
+  # shared apache vhost 2026-09-29), published on the tailnet at :8091 and
+  # fronted by unit2's Traefik. Stopped cleanly on 2026-09-02 and stayed down
   # for 31 hours, during which welcome.theofficialblacksheepco.com served a bare
   # 502 - nothing was watching, and nothing could bring it back, because it had
   # no wake policy at all. It does now: the same errors-middleware path forge
@@ -41,7 +43,7 @@ Service:
   welcome-hub:
     deployment_type: essential
     location_type: stationary
-    units: "7"
+    units: "2"
     instances: 1
     restart_when_stopped: true
     # Front door to the internet — never idle-stopped. The wake path stays

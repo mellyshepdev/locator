@@ -7322,6 +7322,12 @@ def commands_complete():
                 st = _idle_state.get((cmd["unit"], cmd.get("container")))
                 if st:
                     st["stopped_count"] += 1
+        if cmd["action"] == "start":
+            _start_escalation.pop(cmd.get("container"), None)
+    elif cmd["action"] == "start":
+        # Local retries exhausted (lokey relaunches from compose-stacks on a
+        # start failure itself) — the unit is the problem. Move it.
+        _escalate_failed_start(cmd)
     # Chained restore: a drain that restored while this stop was already
     # dispatched gets its start queued NOW — after the stop ran, not before.
     if cmd.get("then_start") and cmd["action"] == "stop":
@@ -7589,6 +7595,77 @@ def _container_for_domain(host):
             if container:
                 return container
     return None
+
+
+# ── FAILED-START ESCALATION ───────────────────────────────────────────────────
+# A queued `start` that reports FAILED used to be the end of the line — the
+# wake page spun on "Waking up" forever while the visitor waited on a service
+# that could never come up (inventory-web's bind source became a directory on
+# every unit, 2026-09-30). Lokey now retries a stacks relaunch on start
+# failure itself, but that cannot help when the UNIT is the problem — a dead
+# lokey, a broken spec, a unit that simply can't satisfy the mounts. So a
+# reported failure escalates here: one relocation at a time to another
+# candidate unit, bounded, because a service that fails everywhere is broken
+# rather than misplaced and a wake loop must not migrate-flap it around the
+# fleet forever.
+_start_escalation = {}  # container -> {"count": int, "first_at": iso, "tried": set}
+
+START_RELOCATION_LIMIT = 2      # extra units to try per incident
+START_RELOCATION_WINDOW = 3600  # s of quiet that resets the counter
+
+
+def _escalate_failed_start(cmd):
+    """Route a failed `start` to another candidate unit, if one exists.
+
+    Candidates: the policy's `units:` list when it names specific units;
+    otherwise every fresh node whose reported container list still carries
+    the name (a stopped twin left by a past migration); otherwise any fresh
+    node — a stacks relaunch can build the service from compose-stacks
+    wherever it lands.
+    """
+    name = cmd.get("container")
+    unit = cmd.get("unit")
+    if not name or not unit:
+        return
+    if _is_pinned(name):
+        print(f"🚫 start '{name}' failed on {unit} — service is pinned, no relocation")
+        return
+    now = datetime.now(timezone.utc)
+    st = _start_escalation.get(name) or {"count": 0,
+                                       "first_at": now.isoformat(),
+                                       "tried": set()}
+    try:
+        if (now - datetime.fromisoformat(st["first_at"])).total_seconds() \
+                > START_RELOCATION_WINDOW:
+            st = {"count": 0, "first_at": now.isoformat(), "tried": set()}
+    except (TypeError, ValueError):
+        st = {"count": 0, "first_at": now.isoformat(), "tried": set()}
+    if st["count"] >= START_RELOCATION_LIMIT:
+        print(f"❌ start '{name}': relocation budget spent "
+              f"({START_RELOCATION_LIMIT} units tried) — giving up")
+        return
+
+    with lock:
+        online = {u for u, n in registry["nodes"].items() if _node_is_fresh(n)}
+    spec = (_policy_for(name).get("units") or "")
+    candidates = _expand_unit_spec(spec, online)
+    if not candidates:
+        candidates = {u for u in online
+                      if _container_exists_on_unit(u, name)}
+        if not candidates:
+            candidates = set(online)
+    candidates -= {unit} | st["tried"]
+    if not candidates:
+        print(f"❌ start '{name}': failed on {unit} and no untried unit remains")
+        _start_escalation[name] = st
+        return
+    target = sorted(candidates)[0]
+    st["tried"] |= {unit, target}
+    st["count"] += 1
+    _start_escalation[name] = st
+    print(f"🔁 start '{name}' failed on {unit} — relocating to {target} "
+          f"(attempt {st['count']}/{START_RELOCATION_LIMIT})")
+    _queue_command(target, name, "start", source=f"relocate:{unit}")
 
 
 def _wake_companions(container):
