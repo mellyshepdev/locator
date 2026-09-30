@@ -931,6 +931,52 @@ def _locator_hosts():
     return hosts
 
 
+def _locator_serving(unit):
+    """True only if the rival locator on `unit` answers HTTP right now.
+
+    _stop_self() must never yield the registry to a ghost: a stale ONLINE
+    record outranks a live locator until it decays, and a standby that won on
+    metrics but is still booting (or is a degraded emergency instance that
+    cannot serve) would leave the mesh leaderless. Probing costs seconds; a
+    wrong suicide costs the whole registry. A wrong *hold* only leaves two
+    instances serving briefly, which this same loop resolves next cycle.
+
+    Candidate URLs come from the rival's service record, then the node's
+    probe address on the well-known locator ports. Must not be called while
+    holding `lock` — it blocks on the network.
+    """
+    svc_url, svc_port = None, None
+    with lock:
+        base = _base_name(SELF_CONTAINER_NAME)
+        for svc in registry["services"].values():
+            if svc.get("status") != "ONLINE":
+                continue
+            if _base_name(svc.get("name", "")) != base:
+                continue
+            host = svc.get("host") or (svc.get("hosts") or [None])[0]
+            if host != unit:
+                continue
+            svc_url  = svc.get("url") or None
+            svc_port = svc.get("port")
+            break
+        node = dict(registry["nodes"].get(unit) or {})
+    urls = []
+    if svc_url:
+        urls.append(svc_url.rstrip("/") + "/healthz")
+    addr = _node_probe_addr(node)
+    if addr:
+        for p in (svc_port, 50500, 5000):
+            if p:
+                urls.append(f"http://{addr}:{int(p)}/healthz")
+    for u in urls:
+        try:
+            if requests.get(u, timeout=3).status_code < 500:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _self_election():
     """Keep exactly one locator alive, on the healthiest unit.
 
@@ -974,7 +1020,13 @@ def _self_election():
                 mine = _node_health(UNIT_NAME)
                 theirs = _node_health(winner)
                 tag = "[DRY RUN] " if ELECTION_DRY_RUN else ""
-                if winner == UNIT_NAME:
+                if mine[1] < 0:
+                    # Our own metrics have not landed yet — a fresh process
+                    # always reads as the least healthy host and loses to any
+                    # measured rival, which is what turned every restart into
+                    # another suicide. Hold until we can be ranked fairly.
+                    print(f"🗳️  {tag}ELECTION: no self metrics yet — holding on {UNIT_NAME}")
+                elif winner == UNIT_NAME:
                     for loser in ranked[1:]:
                         msg = (f"{tag}Keeping {UNIT_NAME} (tier {mine[0]}, {mine[1]}MB free), "
                                f"evicting {loser} (tier {_node_health(loser)[0]}, "
@@ -999,6 +1051,17 @@ def _self_election():
                                  f"{tag}{winner} leads but only {theirs[1]}MB free "
                                  f"(under {ELECTION_MIN_RAM_MB}MB) — holding on {UNIT_NAME}",
                                  winner=UNIT_NAME, dry_run=ELECTION_DRY_RUN)
+                elif not _locator_serving(winner):
+                    # The leading rival is not actually answering — a stale
+                    # ONLINE record not yet decayed, or a standby still
+                    # booting. Suiciding now leaves the mesh leaderless; hold
+                    # and let its record either serve or expire.
+                    print(f"🗳️  {tag}ELECTION: {winner} leads but its locator is not "
+                          f"answering — holding on {UNIT_NAME}")
+                    record_event("election",
+                                 f"{tag}{winner} leads but its locator is not answering — "
+                                 f"holding on {UNIT_NAME}",
+                                 winner=winner, dry_run=ELECTION_DRY_RUN)
                 else:
                     print(f"🗳️  {tag}ELECTION: {winner} {theirs} healthier than {UNIT_NAME} {mine} — stopping self")
                     record_event("election",
