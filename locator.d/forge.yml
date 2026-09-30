@@ -27,7 +27,10 @@ Service:
     # keeps the welcome-hub trigger below unambiguous: /api/wake/triggers
     # returns the FIRST container declaring a match, so two containers sharing
     # a domain would make the second unreachable through the trigger map.
-    wake_with: [forge-relay]
+    # forge-ai rides along too — the mastra vectorization sidecar behind
+    # /api/ai on forge's host. It is never idle-stopped, but wake_with also
+    # covers container recreation after a host failure.
+    wake_with: [forge-relay, forge-ai]
     # The same relationship, for migration rather than wake. App.tsx opens
     # `wss://${window.location.host}/view/default` — the pad relay, reached on
     # forge's OWN hostname through the /pad and /view routers in the edge's

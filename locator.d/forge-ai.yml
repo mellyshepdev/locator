@@ -1,0 +1,27 @@
+Service:
+
+  # Mastra AI sidecar for forge — JPG->SVG vectorization. The SPA posts to
+  # /api/ai/vectorize on forge's own host; the edge's forge.yml strips the
+  # prefix and forwards to forge-ai@http so the upstream follows this
+  # registry entry.
+  forge-ai:
+    deployment_type: optional
+    # Stationary on unit2 — the inference box. It serves qwen2.5-vl through
+    # the host's tailnet Ollama port and unit7 is chronically overloaded, so
+    # it stays put even when forge itself migrates (the @http upstream
+    # resolves over the tailnet anyway).
+    location_type: stationary
+    units: "2"
+    instances: 1
+    # Not idle-stopped: it has no wake trigger of its own, so letting it
+    # sleep would strand the AI button whenever forge outlives it. Tiny
+    # stateless node process — always-on is cheap.
+    idle_stop: false
+    idle_timeout: 15m
+    public_wake: true
+    # Tailnet publish port the /api/ai router reaches it on.
+    edge_port: 8792
+    # No domain wake_trigger, deliberately — same first-match hijack that
+    # forge-relay hit 2026-09-30: it shares forge's domain, and forge's
+    # wake_with names this container, so /wake/forge starts the pair.
+    wake_triggers: {}
