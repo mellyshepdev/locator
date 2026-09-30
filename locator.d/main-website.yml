@@ -11,6 +11,12 @@ Service:
     location_type: mobile
     units: "2_7"
     instances: 1
+    # Apache publishes <unit tailnet IP>:8217:80 on whichever unit hosts it
+    # (compose pins the same port on unit2 + unit7). Without edge_port the
+    # /api/traefik feed emits no main-website service and Traefik's file
+    # routers that reference main-website@http (incl. the /api/products.json
+    # exception) silently drop — the store grid then fetches a 404.
+    edge_port: 8217
     idle_stop: false
     restart_when_stopped: true
     public_wake: true

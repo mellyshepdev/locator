@@ -11,3 +11,6 @@ Service:
     units: "7"
     instances: 1
     idle_stop: false
+    # Flask backend publishes 100.99.131.20:8216:5004 — needed in the feed
+    # for website-backend@http (the apex /api catch-all router).
+    edge_port: 8216

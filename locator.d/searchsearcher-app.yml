@@ -8,6 +8,9 @@ Service:
     location_type: stationary
     units: "4"
     instances: 1
+    # Publishes 100.123.158.58:8219:3000 — the apex /api/search router
+    # references searchsearcher-app@http; no edge_port = not in the feed.
+    edge_port: 8219
     # Wake-on-visit (owner call 2026-09-17): the app may idle-stop; a visitor
     # landing on the main site, the welcome page, or search.…com itself wakes
     # it via wake_triggers below + js/wake.js on the page. The postgres stays
