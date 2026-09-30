@@ -43,11 +43,11 @@ Service:
       domain:
         - forge.prime-quality.online
         # The welcome hub pre-warms forge on page load, so the card is live by
-        # the time it is clicked. This is a SECOND, independent path from the
-        # hub's own wake below: the errors middleware can only ever wake the
-        # container the visitor asked for, and forge is a different one on a
-        # different unit. So the hub's page calls /__wake/forge itself once it
-        # has rendered; see welcome-hub.yml on the edge.
-        - welcome.theofficialblacksheepco.com
+        # the time it is clicked — the hub's page calls /__wake/forge itself
+        # once rendered (welcome-wake.yml on the edge). Do NOT re-add
+        # welcome.theofficialblacksheepco.com here: /api/wake/triggers returns
+        # the FIRST matching container, so claiming the hub's domain hijacks
+        # its recovery wake — the edge wake page would start forge while the
+        # visitor is actually waiting for welcome-hub.
       link:
         - welcome:forge
