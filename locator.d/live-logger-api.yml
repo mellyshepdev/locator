@@ -10,6 +10,6 @@ Service:
   live-logger-api:
     deployment_type: optional
     location_type: stationary
-    units: "7"
+    units: "4"
     instances: 1
     idle_stop: false
