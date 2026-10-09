@@ -3097,7 +3097,7 @@ TRACCAR_FIX_MAX_AGE_S = int(os.environ.get("TRACCAR_FIX_MAX_AGE_S", 600))  # ign
 # (lokey-view@) rather than admin. Non-admin users see only devices linked to
 # them via /api/permissions, so every device auto-created below gets granted
 # to this user id. 0 = no viewer linking.
-TRACCAR_VIEWER_USER_ID = int(os.environ.get("TRACCAR_VIEWER_USER_ID", 0))
+TRACCAR_VIEWER_USER_ID = int(os.environ.get("TRACCAR_VIEWER_USER_ID") or 0)  # compose "${VAR:-}" default is an empty string, not unset
 _traccar_known_device_ids = set()  # uniqueIds already registered in Traccar this process
 
 # ── IP-based location fallback ──────────────────────────────────────────
