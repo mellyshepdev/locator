@@ -3,5 +3,5 @@ Service:
   traefik:
     deployment_type: essential
     location_type: stationary
-    units: "7_8"
+    units: "8"
     instances: 1

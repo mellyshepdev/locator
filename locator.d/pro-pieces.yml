@@ -9,12 +9,13 @@ Service:
   pro-pieces:
     deployment_type: essential
     location_type: stationary
-    units: "7"
+    units: "none"
     instances: 1
+    edge_host: apache
     idle_stop: false
     restart_when_stopped: true
     public_wake: true
-    edge_port: 8094
+    edge_port: 8096
     git_remote: https://gitlab.com/gbonds1/pro-pieces.git
     wake_triggers:
       domain:

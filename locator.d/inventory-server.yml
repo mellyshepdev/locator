@@ -5,7 +5,7 @@ Service:
   inventory-server:
     deployment_type: optional
     location_type: mobile
-    units: "7_9_2"
+    units: "9_2"
     instances: 1
     idle_stop: false
     idle_timeout: 15m

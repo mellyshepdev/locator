@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-10-09T21:51:33.912278+00:00 —
+  # 'aegis-push' registered on unit4 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  aegis-push:
+    deployment_type: optional
+    location_type: stationary
+    units: "4"
+    instances: 1
+    idle_stop: false

@@ -8,7 +8,8 @@ Service:
   store:
     deployment_type: optional
     location_type: stationary
-    units: "4"
+    units: "none"
+    edge_host: apache
     edge_port: 8094
     instances: 1
     idle_stop: false

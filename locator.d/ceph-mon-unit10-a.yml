@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-10-09T06:00:00.726394+00:00 —
+  # 'ceph-mon-unit10-a' registered on unit10 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  ceph-mon-unit10-a:
+    deployment_type: optional
+    location_type: stationary
+    units: "10"
+    instances: 1
+    idle_stop: false

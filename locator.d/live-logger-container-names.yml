@@ -3,6 +3,6 @@ Service:
   live-logger-container-names:
     deployment_type: optional
     location_type: stationary
-    units: "4_7_8_9"
+    units: "4_8_9"
     instances: 1
     idle_stop: true

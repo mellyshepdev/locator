@@ -23,6 +23,6 @@ Service:
   nasa:
     deployment_type: non-essential
     location_type: mobile
-    units: "7_9"
+    units: "9"
     instances: 1
     idle_stop: false

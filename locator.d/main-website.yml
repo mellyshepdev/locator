@@ -9,8 +9,9 @@ Service:
   main-website:
     deployment_type: essential
     location_type: mobile
-    units: "2_7"
+    units: "none"
     instances: 1
+    edge_host: apache
     # Apache publishes <unit tailnet IP>:8217:80 on whichever unit hosts it
     # (compose pins the same port on unit2 + unit7). Without edge_port the
     # /api/traefik feed emits no main-website service and Traefik's file

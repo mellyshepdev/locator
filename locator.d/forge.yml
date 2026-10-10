@@ -10,7 +10,7 @@ Service:
     # only: the compose builds a vite image on `up`, and unit9's 1GB can't
     # survive that build.
     location_type: mobile
-    units: "2_7"
+    units: "2"
     instances: 1
     public_wake: true
     # Idle-stopped (owner call 2026-09-16, superseding the earlier always-on

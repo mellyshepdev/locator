@@ -15,5 +15,5 @@ Service:
   kc-pg-node:
     deployment_type: essential
     location_type: stationary
-    units: "2_7"
+    units: "2"
     instances: 1

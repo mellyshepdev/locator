@@ -15,9 +15,38 @@ Service:
   apache:
     deployment_type: essential
     location_type: stationary
-    units: "2"
+    units: "8"
     instances: 1
     # The unit4-published web stack (aegis / -apache / tech-estate / error-pages
     # routers on the edge). Edges reach it as apache@http so a migration moves
     # the upstream with the registry instead of stranding a hardcoded tailnet IP.
     edge_port: 8080
+    restart_when_stopped: true
+    public_wake: true
+    wake_triggers:
+      domain:
+        - sheldon.theofficialblacksheepco.com
+        - sheldonthesheep.theofficialblacksheepco.online
+        - element.theofficialblacksheepco.online
+        - element.prime-quality.online
+        - portal.theofficialblacksheepco.com
+        - client-portal.prime-quality.online
+        - scs.prime-quality.online
+        - pro-director.com
+        - www.pro-director.com
+        - pro-director.info
+        - www.pro-director.info
+        - pro-director.net
+        - www.pro-director.net
+        - pro-director.store
+        - www.pro-director.store
+        - theofficialblacksheepco.com
+        - www.theofficialblacksheepco.com
+        - welcome.theofficialblacksheepco.com
+        - tikurbego.com
+        - www.tikurbego.com
+        - pro-pieces.prime-quality.online
+        - inventory.theofficialblacksheepco.com
+        - scanner.theofficialblacksheepco.online
+        - theofficialblacksheepco.store
+        - www.theofficialblacksheepco.store

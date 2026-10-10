@@ -12,7 +12,7 @@ Service:
     # on a box without a prepared checkout fails — and on unit9's 1GB it would
     # fail anyway. unit9 is not a legal target for an auth-path service.
     location_type: mobile
-    units: "2_7"
+    units: "2"
     edge_port: 8095
     edge_healthcheck: /healthz
     # The public hostname lives here, beside the upstream, so the two move

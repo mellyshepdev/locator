@@ -6,5 +6,5 @@ Service:
   # inventory-inventory-1); edge_port is the tailnet port inventory-web
   # publishes on whatever unit hosts it.
   inventory-app:
-    edge_host: inventory-web
+    edge_host: apache
     edge_port: 8097

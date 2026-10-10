@@ -43,8 +43,9 @@ Service:
   welcome-hub:
     deployment_type: essential
     location_type: stationary
-    units: "2"
+    units: "none"
     instances: 1
+    edge_host: apache
     restart_when_stopped: true
     # Front door to the internet — never idle-stopped. The wake path stays
     # armed (public_wake) purely as recovery if it ever dies for another

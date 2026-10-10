@@ -8,6 +8,8 @@ Service:
   sheldon-web:
     deployment_type: optional
     location_type: stationary
-    units: "9"
+    units: "none"
     instances: 1
     idle_stop: false
+    edge_host: apache
+    edge_port: 8080

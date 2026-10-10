@@ -3,6 +3,6 @@ Service:
   mariadb-11.4:
     deployment_type: essential
     location_type: stationary
-    units: "7_8"
+    units: "8"
     instances: 1
     restart_when_stopped: true

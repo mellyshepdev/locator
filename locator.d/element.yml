@@ -3,5 +3,7 @@ Service:
   element:
     deployment_type: essential
     location_type: stationary
-    units: "8"
+    units: "none"
     instances: 1
+    edge_host: apache
+    edge_port: 8080

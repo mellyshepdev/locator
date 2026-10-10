@@ -7,8 +7,10 @@ Service:
   scs-site:
     deployment_type: essential
     location_type: stationary
-    units: "7"
+    units: "none"
     instances: 1
+    edge_host: apache
+    edge_port: 8080
     idle_stop: false
     restart_when_stopped: true
     public_wake: true
