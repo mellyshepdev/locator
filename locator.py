@@ -7224,6 +7224,295 @@ def refresh_run_now():
     return jsonify({"result": "queued", "commands": queued})
 
 
+# ── FLEET SWEEP ──────────────────────────────────────────────────────────────
+# The refresh, owned end to end by locator. Units do not keep a copy of the
+# script: each phase in ./refresh/ is sent to every unit's lokey as an exec,
+# and lokey only runs what it is handed. A phase finishes on EVERY unit before
+# the next phase starts anywhere — all zombie reaping, then all commits, then
+# all pushes, then all pulls, and so on — so no unit pulls before the rest of
+# the fleet has pushed.
+#
+# Health checks and handshakes:
+#   * pre-sweep  — a unit takes part only if its node is ONLINE with a fresh
+#                  heartbeat, AND it answers a handshake exec echoing a nonce
+#                  back (proves lokey is polling and really executing).
+#   * per phase  — heartbeat re-checked before dispatch; every phase script
+#                  echoes the nonce first, and a result without it is a
+#                  handshake failure no matter what the exit code says.
+#   * post-sweep — heartbeat re-checked, so a sweep that knocked a unit over
+#                  shows up as such instead of as a clean run.
+# A unit that fails a handshake, times out, or goes stale is dropped from the
+# rest of that sweep; a phase that merely reports warnings (one repo failed to
+# push) is recorded as failed but the unit carries on to the next phase.
+
+SWEEP_DIR          = os.environ.get("REFRESH_SWEEP_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "refresh"))
+SWEEP_INTERVAL     = _parse_duration(os.environ.get("REFRESH_SWEEP_INTERVAL", "3h"), 3 * 3600)
+SWEEP_ENABLED      = os.environ.get("REFRESH_SWEEP_ENABLED", "1") not in ("0", "false", "no")
+SWEEP_UNIT_PATTERN = re.compile(os.environ.get("REFRESH_SWEEP_UNITS", r"^unit\d+$"))
+SWEEP_PHASE_TIMEOUT     = int(os.environ.get("REFRESH_PHASE_TIMEOUT", 600))
+SWEEP_HANDSHAKE_TIMEOUT = int(os.environ.get("REFRESH_HANDSHAKE_TIMEOUT", 120))
+SWEEP_STATE_FILE   = os.path.join(DATA_DIR, "sweep_state.json")
+SWEEP_HISTORY_KEEP = 30
+SWEEP_LABEL        = "sweep"
+
+sweep_lock  = threading.Lock()     # one sweep at a time
+_sweep_state = {"last_started": None, "current": None, "history": []}
+
+
+def _sweep_load_state():
+    try:
+        with open(SWEEP_STATE_FILE) as f:
+            _sweep_state.update(json.load(f))
+        _sweep_state["current"] = None   # a sweep cannot survive a restart
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"⚠️  Failed to load sweep state: {e}")
+
+
+def _sweep_save_state():
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = SWEEP_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(_sweep_state, f, indent=2, default=str)
+        os.replace(tmp, SWEEP_STATE_FILE)
+    except Exception as e:
+        print(f"⚠️  Failed to save sweep state: {e}")
+
+
+def _sweep_phases():
+    """[(name, body)] from refresh/NN-name.sh, in filename order."""
+    phases = []
+    for fn in sorted(os.listdir(SWEEP_DIR)):
+        m = re.match(r"^\d+-([a-z0-9-]+)\.sh$", fn)
+        if m:
+            with open(os.path.join(SWEEP_DIR, fn)) as f:
+                phases.append((m.group(1), f.read()))
+    return phases
+
+
+def _sweep_script(unit, nonce, body):
+    """lib.sh + phase body, wrapped so it runs under bash whatever the exec
+    user's login shell is (zsh on the Mac), with the result line appended."""
+    with open(os.path.join(SWEEP_DIR, "lib.sh")) as f:
+        lib = f.read()
+    script = (lib + "\n" + body +
+              '\necho "RESULT warnings=$WARNINGS"\n[[ "$WARNINGS" -eq 0 ]]\n')
+    script = script.replace("__NONCE__", nonce).replace("__UNIT__", unit)
+    return f"bash -s <<'__SWEEP_EOF_{nonce}__'\n{script}\n__SWEEP_EOF_{nonce}__\n"
+
+
+def _sweep_unit_healthy(unit):
+    """Health check: node ONLINE with a heartbeat inside HEARTBEAT_TIMEOUT."""
+    with lock:
+        node = dict(registry["nodes"].get(unit) or {})
+    if node.get("status") != "ONLINE":
+        return False, f"status {node.get('status') or 'unknown'}"
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(node["last_seen"])).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return False, "no heartbeat on record"
+    if age > HEARTBEAT_TIMEOUT:
+        return False, f"heartbeat {int(age)}s old"
+    return True, f"heartbeat {int(age)}s old"
+
+
+def _sweep_dispatch_and_wait(units, make_script, label, timeout):
+    """Queue one exec per unit, then wait until every one has reported back
+    or the timeout passes. Returns {unit: (cmd_snapshot, nonce)}."""
+    sent = {}
+    for unit in units:
+        nonce = uuid.uuid4().hex[:12]
+        cmd = _queue_exec_command(unit, make_script(unit, nonce), source="sweep", label=label)
+        sent[unit] = (cmd["id"], nonce)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with command_lock:
+            pending = [u for u, (cid, _) in sent.items()
+                       if (command_queue.get(cid) or {}).get("status") not in ("DONE", "FAILED")]
+        if not pending:
+            break
+        time.sleep(3)
+    out = {}
+    with command_lock:
+        # Anything still outstanding is cancelled, not left queued: a push
+        # phase that lokey picks up an hour late, after the pull phase has
+        # moved on, is exactly the ordering this sweep exists to prevent.
+        # CANCELLED also stops /api/commands/pending re-serving a DISPATCHED
+        # one after EXEC_RETRY_SECONDS.
+        for unit, (cid, _) in sent.items():
+            c = command_queue.get(cid)
+            if c and c.get("status") in ("PENDING", "DISPATCHED"):
+                c["status"] = "CANCELLED"
+        for unit, (cid, nonce) in sent.items():
+            out[unit] = (dict(command_queue.get(cid) or {"id": cid, "status": "LOST"}), nonce)
+    return out
+
+
+def _sweep_outcome(cmd, nonce):
+    """Classify one exec result: ok / warnings / handshake / timeout."""
+    status = cmd.get("status")
+    if status not in ("DONE", "FAILED"):
+        return "timeout", f"no report within the phase window (status {status})"
+    if f"ACK {nonce}" not in (cmd.get("stdout") or ""):
+        tail = _output_tail(cmd.get("stderr")) or _output_tail(cmd.get("stdout")) or "no output"
+        return "handshake", f"nonce not echoed back — lokey did not run the script ({tail})"
+    if cmd.get("success"):
+        return "ok", _output_tail(cmd.get("stdout"))
+    return "warnings", _output_tail(cmd.get("stderr")) or _output_tail(cmd.get("stdout"))
+
+
+def run_fleet_sweep(trigger="scheduled", only_units=None):
+    """One full sweep. Returns the sweep record (also kept in history)."""
+    if not sweep_lock.acquire(blocking=False):
+        return {"error": "a sweep is already running", "current": _sweep_state.get("current")}
+    try:
+        started = datetime.now(timezone.utc)
+        sweep = {"id": uuid.uuid4().hex[:8], "trigger": trigger, "started_at": started.isoformat(),
+                 "finished_at": None, "units": {}, "phases": []}
+        _sweep_state["current"] = sweep
+        _sweep_state["last_started"] = started.isoformat()
+        _sweep_save_state()
+        emit_event("sweep_started", label=SWEEP_LABEL, sweep_id=sweep["id"],
+                   message=f"fleet refresh sweep {sweep['id']} started ({trigger})")
+        print(f"🧹 SWEEP {sweep['id']} started ({trigger})")
+
+        # ── pre-sweep health check ──
+        with lock:
+            candidates = sorted(u for u in registry["nodes"] if SWEEP_UNIT_PATTERN.match(u))
+        if only_units:
+            candidates = [u for u in candidates if u in only_units]
+        active = []
+        for unit in candidates:
+            ok, why = _sweep_unit_healthy(unit)
+            sweep["units"][unit] = {"health_pre": why, "state": "active" if ok else "skipped",
+                                    "reason": None if ok else f"health check: {why}"}
+            if ok:
+                active.append(unit)
+
+        # ── handshake ──
+        if active:
+            hs = _sweep_dispatch_and_wait(
+                active,
+                lambda u, n: f'echo "ACK {n} unit={u} user=$(id -un) home=$HOME os=$(uname -s)"',
+                f"{SWEEP_LABEL}:handshake", SWEEP_HANDSHAKE_TIMEOUT)
+            for unit, (cmd, nonce) in hs.items():
+                kind, detail = _sweep_outcome(cmd, nonce)
+                info = sweep["units"][unit]
+                if kind == "ok":
+                    info["handshake"] = (cmd.get("stdout") or "").strip().splitlines()[-1][:200]
+                else:
+                    info.update(state="dropped", reason=f"handshake: {detail}")
+                    active.remove(unit)
+
+        # ── phases, one fleet-wide sweep each ──
+        for name, body in _sweep_phases():
+            for unit in list(active):
+                ok, why = _sweep_unit_healthy(unit)
+                if not ok:
+                    sweep["units"][unit].update(state="dropped", reason=f"before {name}: {why}")
+                    active.remove(unit)
+            phase = {"name": name, "started_at": datetime.now(timezone.utc).isoformat(), "results": {}}
+            sweep["phases"].append(phase)
+            _sweep_save_state()
+            if not active:
+                phase["note"] = "no units left"
+                break
+            print(f"🧹 SWEEP {sweep['id']} phase {name} → {', '.join(active)}")
+            res = _sweep_dispatch_and_wait(
+                active, lambda u, n, b=body: _sweep_script(u, n, b),
+                f"{SWEEP_LABEL}:{name}", SWEEP_PHASE_TIMEOUT)
+            for unit, (cmd, nonce) in res.items():
+                kind, detail = _sweep_outcome(cmd, nonce)
+                phase["results"][unit] = {"outcome": kind, "detail": detail,
+                                          "command_id": cmd.get("id"), "exit_code": cmd.get("exit_code")}
+                if kind in ("timeout", "handshake"):
+                    sweep["units"][unit].update(state="dropped", reason=f"{name}: {detail}")
+                    active.remove(unit)
+            phase["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+        # ── post-sweep health check ──
+        for unit in active:
+            ok, why = _sweep_unit_healthy(unit)
+            sweep["units"][unit]["health_post"] = why
+            sweep["units"][unit]["state"] = "completed" if ok else "unhealthy_after"
+
+        sweep["finished_at"] = datetime.now(timezone.utc).isoformat()
+        done    = [u for u, i in sweep["units"].items() if i["state"] == "completed"]
+        other   = {u: i["reason"] or i["state"] for u, i in sweep["units"].items() if i["state"] != "completed"}
+        warned  = sorted({u for p in sweep["phases"] for u, r in p["results"].items() if r["outcome"] == "warnings"})
+        sweep["summary"] = {"completed": done, "not_completed": other, "with_warnings": warned}
+        msg = (f"fleet refresh sweep {sweep['id']}: {len(done)} unit(s) completed"
+               + (f", warnings on {', '.join(warned)}" if warned else "")
+               + (f", not completed: {', '.join(f'{u} ({r})' for u, r in other.items())}" if other else ""))
+        emit_event("sweep_finished" if not other else "sweep_incomplete",
+                   label=SWEEP_LABEL, sweep_id=sweep["id"], message=msg[:1000])
+        print(f"🧹 {msg}")
+        _sweep_state["history"] = ([sweep] + _sweep_state.get("history", []))[:SWEEP_HISTORY_KEEP]
+        return sweep
+    except Exception as e:
+        print(f"⚠️ Sweep failed: {e}")
+        emit_event("sweep_failed", label=SWEEP_LABEL, message=f"fleet refresh sweep crashed: {e}")
+        return {"error": str(e)}
+    finally:
+        _sweep_state["current"] = None
+        _sweep_save_state()
+        sweep_lock.release()
+
+
+def fleet_sweeper():
+    """Background worker: a sweep every REFRESH_SWEEP_INTERVAL. Timed from the
+    last sweep's start as persisted on disk, so a locator restart neither
+    skips a sweep nor fires an extra one."""
+    _sweep_load_state()
+    time.sleep(120)   # let lokeys re-register heartbeats after a restart
+    while True:
+        try:
+            last = _sweep_state.get("last_started")
+            due = True
+            if last:
+                due = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() >= SWEEP_INTERVAL
+            if due:
+                threading.Thread(target=run_fleet_sweep, daemon=True, name="fleet_sweep").start()
+        except Exception as e:
+            print(f"⚠️ Error in fleet sweeper: {e}")
+        time.sleep(60)
+
+
+@app.route("/api/sweep/status", methods=["GET"])
+def sweep_status():
+    """Current + recent sweeps: per unit state and per phase outcome. No
+    script text or captured output — that stays in /api/refresh/runs."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    nxt = None
+    if _sweep_state.get("last_started"):
+        nxt = (datetime.fromisoformat(_sweep_state["last_started"])
+               + timedelta(seconds=SWEEP_INTERVAL)).isoformat()
+    return jsonify({"enabled": SWEEP_ENABLED, "interval_seconds": SWEEP_INTERVAL,
+                    "phases": [n for n, _ in _sweep_phases()],
+                    "last_started": _sweep_state.get("last_started"), "next_due": nxt,
+                    "current": _sweep_state.get("current"),
+                    "history": _sweep_state.get("history", [])[:int(request.args.get("limit", 5))]})
+
+
+@app.route("/api/sweep/run", methods=["POST"])
+def sweep_run_now():
+    """Start a sweep now. Body: {units: ["unit4", ...]} to limit it, else all."""
+    denied = _require_admin_key()
+    if denied:
+        return denied
+    if sweep_lock.locked():
+        return jsonify({"error": "a sweep is already running", "current": _sweep_state.get("current")}), 409
+    data = request.get_json(silent=True) or {}
+    units = data.get("units") or None
+    threading.Thread(target=run_fleet_sweep, kwargs={"trigger": "manual", "only_units": units},
+                     daemon=True, name="fleet_sweep").start()
+    return jsonify({"result": "started", "units": units or "all online"}), 202
+
+
 @app.route("/api/idle/report", methods=["POST"])
 def idle_report():
     """Lokey posts net-byte counters for its idle-watched containers each tick."""
@@ -8593,6 +8882,8 @@ def start_background_workers():
         _credential_renewer,        # reissues every expiring credential 7 days out
         health_alert_digest,        # unverified/unhealthy container digests → reech
     ]
+    if SWEEP_ENABLED:
+        workers.append(fleet_sweeper)   # the 3-hourly fleet refresh, phase by phase
     if BALANCE_ENABLED:
         workers.append(load_balancer)
     if IDLE_ENABLED:

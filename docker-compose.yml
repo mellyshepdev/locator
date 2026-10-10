@@ -26,6 +26,9 @@ services:
       # editable mounts above; falls back to baked copies if ever unmounted.
       - ./locator.py:/app/locator.py
       - ./static:/app/static
+      # Fleet refresh phases. Locator sends these to each lokey; no unit keeps
+      # a copy of refresh on disk any more.
+      - ./refresh:/app/refresh:ro
       - /home/swoopg111/.ssh:/root/.ssh:ro
       # Lets the compose-store git push authenticate to GIT_REMOTE via the
       # host's stored credential — no token in .env.
