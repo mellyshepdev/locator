@@ -805,6 +805,38 @@ def _node_route_addr(info):
     return _node_probe_addr(info)
 
 
+BAO_PORT = int(os.environ.get("BAO_PORT", 8200))
+
+
+def _bao_addr_from_registry():
+    """Where OpenBao runs, from what lokey last reported: the unit hosting the
+    freshest live `openbao` record, at that unit's routable address. None when
+    the registry does not know, and bao.py falls back to the last answer.
+
+    Uses a bounded acquire, not `with lock`: bao calls can come from code that
+    already holds the (non-reentrant) lock, and blocking there would deadlock.
+    """
+    if not lock.acquire(timeout=1):
+        return None
+    try:
+        key, svc = _find_service_entry("openbao")
+        if not svc:
+            return None
+        unit = svc.get("host") or (svc.get("hosts") or [None])[0]
+        if not unit and key and "@" in key:
+            unit = key.split("@", 1)[1]
+        node = registry["nodes"].get(unit) if unit else None
+        if not node or not _node_is_fresh(node):
+            return None
+        ip = _node_route_addr(node)
+    finally:
+        lock.release()
+    return f"http://{ip}:{BAO_PORT}" if ip else None
+
+
+bao.set_addr_resolver(_bao_addr_from_registry)
+
+
 def _node_reachable(info, timeout=None):
     """Does anything answer at this node's address?
 

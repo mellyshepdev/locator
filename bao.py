@@ -43,7 +43,63 @@ import urllib.request
 import urllib.error
 import json
 
-BAO_ADDR = os.environ.get("BAO_ADDR", "http://100.99.131.20:8200").rstrip("/")
+# WHERE OPENBAO IS
+# ----------------
+# Discovered, not configured. Lokey reports `openbao` in every heartbeat, so the
+# registry always knows which unit runs it; locator registers a resolver via
+# set_addr_resolver() that reads that. A hardcoded address went stale three
+# times (unit4 -> unit7 -> unit4) and each time every bao:// lookup silently
+# timed out against a dead box.
+#   1. BAO_ADDR env   - explicit override, for emergencies only
+#   2. the resolver   - live answer from the registry
+#   3. BAO_ADDR_FILE  - last address the resolver gave. Boot uses this, since
+#                       _resolve_env_secrets() runs before the registry loads.
+BAO_ADDR_OVERRIDE = os.environ.get("BAO_ADDR", "").strip().rstrip("/")
+BAO_ADDR_FILE = os.environ.get("BAO_ADDR_FILE", "/app/data/bao_addr")
+_addr_resolver = None
+_last_addr = {"value": ""}
+
+
+def set_addr_resolver(fn):
+    """fn() -> "http://host:port" or None. Called on every request; keep it cheap."""
+    global _addr_resolver
+    _addr_resolver = fn
+
+
+def _remember_addr(value):
+    if value == _last_addr["value"]:
+        return
+    _last_addr["value"] = value
+    try:
+        with open(BAO_ADDR_FILE + ".tmp", "w") as f:
+            f.write(value + "\n")
+        os.replace(BAO_ADDR_FILE + ".tmp", BAO_ADDR_FILE)
+    except OSError:
+        pass  # the in-memory copy still works; only the next boot loses it
+
+
+def addr():
+    """Where OpenBao is right now. Raises BaoError if nothing knows."""
+    if BAO_ADDR_OVERRIDE:
+        return BAO_ADDR_OVERRIDE
+    if _addr_resolver is not None:
+        try:
+            found = (_addr_resolver() or "").rstrip("/")
+        except Exception:
+            found = ""
+        if found:
+            _remember_addr(found)
+            return found
+    if not _last_addr["value"]:
+        try:
+            with open(BAO_ADDR_FILE) as f:
+                _last_addr["value"] = f.read().strip().rstrip("/")
+        except OSError:
+            pass
+    if _last_addr["value"]:
+        return _last_addr["value"]
+    raise BaoError("OpenBao location unknown: no live openbao in the registry, "
+                   f"nothing in {BAO_ADDR_FILE}, and BAO_ADDR is unset")
 BAO_TOKEN_FILE = os.environ.get("BAO_TOKEN_FILE", "/app/secrets/bao.token")
 # PKI engine that issues the fleet's internal mTLS certs (Blacksheep Fleet Root
 # CA). A mount only, never a role: the role names the constraints (allowed
@@ -93,7 +149,8 @@ def _token():
 
 
 def _request(path, method="GET", body=None):
-    url = f"{BAO_ADDR}/v1/{path.lstrip('/')}"
+    base = addr()
+    url = f"{base}/v1/{path.lstrip('/')}"
     payload = None
     if body is not None:
         payload = json.dumps(body).encode()
@@ -112,7 +169,7 @@ def _request(path, method="GET", body=None):
         # token — say so, because the two look identical in a stack trace.
         raise BaoError(f"OpenBao {e.code} for {path}: {body}")
     except urllib.error.URLError as e:
-        raise BaoError(f"cannot reach OpenBao at {BAO_ADDR}: {e.reason}")
+        raise BaoError(f"cannot reach OpenBao at {base}: {e.reason}")
     except Exception as e:
         raise BaoError(f"OpenBao request to {path} failed: {e}")
 
@@ -249,7 +306,7 @@ def invalidate(prefix=None):
 def status():
     """Broker health for the dashboard. Deliberately carries NO secret values."""
     out = {
-        "addr": BAO_ADDR,
+        "addr": None,
         "token_file": BAO_TOKEN_FILE,
         "cache_ttl_seconds": BAO_CACHE_TTL,
         "reachable": False,
@@ -261,7 +318,8 @@ def status():
         out["cached_secrets"] = len(_cache)
     # Health needs no token, so an unconfigured broker still reports the server.
     try:
-        req = urllib.request.Request(f"{BAO_ADDR}/v1/sys/health")
+        out["addr"] = addr()
+        req = urllib.request.Request(f"{out['addr']}/v1/sys/health")
         try:
             with urllib.request.urlopen(req, timeout=BAO_TIMEOUT) as resp:
                 health = json.loads(resp.read().decode())
