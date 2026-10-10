@@ -9,6 +9,14 @@
 # Not `set -e`: one repo failing must not abort the phase for every repo after
 # it. Failures are reported with warn() and the phase keeps going.
 set -uo pipefail
+# Native lokeys started by systemd (unit10) run without HOME in the
+# environment; every path below hangs off it, and `set -u` would abort on the
+# first reference. Recover it from the passwd entry of whoever we run as.
+if [[ -z "${HOME:-}" ]]; then
+    HOME=$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6)
+    [[ -z "$HOME" ]] && HOME=$(eval echo "~$(id -un)")
+    export HOME
+fi
 
 log()  { echo "==> $*"; }
 skip() { echo "    (skipped: $*)"; }
