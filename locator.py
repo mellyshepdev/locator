@@ -3350,7 +3350,11 @@ def update_node_metrics(node_id):
         # Absolute capacity figures. Older lokeys omit these, so each is stored
         # only when present rather than overwriting a known value with None.
         for field in ("mem_total_mb", "mem_available_mb", "mem_total_gb",
-                      "mem_used_gb", "disk_free_gb", "mounts"):
+                      "mem_used_gb", "disk_free_gb", "mounts",
+                      # Battery too: only battery-having hardware (laptops,
+                      # tablets, phones) sends it — same store-when-present
+                      # rule so a desktop never reads as a dead battery.
+                      "battery_percent", "charging", "battery_secsleft"):
             if data.get(field) is not None:
                 node[field] = data[field]
         # Addresses are stored only when present so a heartbeat that could not

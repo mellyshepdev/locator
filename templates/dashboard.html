@@ -1454,6 +1454,7 @@
                                 <th style="padding:6px;">CPU</th><th style="padding:6px;">RAM</th>
                                 <th style="padding:6px;">DISK</th><th style="padding:6px;">MEM USED</th>
                                 <th style="padding:6px;">DISK USED</th><th style="padding:6px;">DISK FREE</th>
+                                <th style="padding:6px;">BAT</th>
                                 <th style="padding:6px;">CONTAINERS</th><th style="padding:6px;">SEEN</th>
                             </tr>
                         </thead>
@@ -2020,11 +2021,14 @@
             url: 'URL', last_seen: 'Last Seen', last_heartbeat: 'Last Heartbeat',
             registered_at: 'Registered At', offline_since: 'Offline Since',
             cpu_percent: 'CPU %', mem_percent: 'RAM %', disk_percent: 'Disk %',
+            battery_percent: 'Battery %', charging: 'Charging',
+            battery_secsleft: 'Battery Time Left (s)',
         };
         const DEVICE_FIELD_ORDER = [
             'name', 'id', 'status', 'ip', 'tailscale_ip', 'internal', 'host', 'hosts',
             'type', 'os', 'category', 'port', 'url',
             'cpu_percent', 'mem_percent', 'disk_percent',
+            'battery_percent', 'charging', 'battery_secsleft',
             'last_seen', 'last_heartbeat',
             'registered_at', 'offline_since',
         ];
@@ -2187,6 +2191,16 @@
             return '#00ff00';
         }
 
+        // Battery runs the other way: high is good, low is the emergency.
+        // Thresholds mirror the row-alert logic below (<=30% is the flash
+        // point, matching BATTERY_ALERT_THRESHOLD on the locator).
+        function batColor(v) {
+            if (v == null) return '#6699aa';
+            if (v <= 30) return '#ff003c';
+            if (v <= 60) return '#ffe600';
+            return '#00ff00';
+        }
+
         // ── COLUMN / DROPDOWN SORT (shared by node cards + every grid table) ──
         // State persists across the 10s poll refresh (loadRegistryData rebuilds
         // every table from scratch each cycle) because sorting happens on the
@@ -2328,6 +2342,9 @@
                 const diskPct = pick('disk_percent');
                 const diskUsed = pick('disk_used_gb');
                 const diskTotal = pick('disk_total_gb');
+                const bat = pick('battery_percent');
+                const _chg = pick('charging');
+                const charging = _chg === true || String(_chg).toLowerCase() === 'true';
                 const stale = !n.last_seen || (Date.now() - new Date(n.last_seen)) > 300000;
                 const oom = (mem || 0) >= 90;
                 const badge = n.status !== 'ONLINE' ? 'offline' : (stale ? 'stale' : 'online');
@@ -2336,6 +2353,10 @@
                     ? ` · ${diskUsed}/${diskTotal} GB` : '';
                 const bar = (v) => `<div class="mc-bar"><div class="mc-fill" style="width:${Math.min(v || 0, 100)}%;background:${pctColor(v)}"></div></div>`;
                 const row = (label, v) => `<div class="mc-row"><span class="mc-label">${label}</span><span style="color:${pctColor(v)}">${v != null ? v.toFixed(1) + '%' : '—'}</span></div>`;
+                // Battery gets its own row+bar because the color scale is
+                // inverted — a full red bar means trouble here, not load.
+                const batBar = (v) => `<div class="mc-bar"><div class="mc-fill" style="width:${Math.min(v || 0, 100)}%;background:${batColor(v)}"></div></div>`;
+                const batRow = (v, chg) => `<div class="mc-row"><span class="mc-label">BAT</span><span style="color:${batColor(v)}">${v.toFixed(0)}%${chg ? ' ⚡' : ''}</span></div>${batBar(v)}`;
                 const nc = badge === 'offline' ? OFFLINE_COLOR : nodeColor(id);
                 return `<div class="metric-card${oom ? ' oom' : ''}" style="${oom ? '' : `border-color:${nc};box-shadow:0 0 12px ${nc}40`}">
                     <button type="button" class="mc-maximize" title="Maximize" onclick="maximizeNodeCard('${id}')">⛶</button>
@@ -2345,6 +2366,7 @@
                     ${row('CPU', cpu)}${bar(cpu)}
                     ${row('MEM', mem)}${bar(mem)}
                     ${row('DISK', diskPct)}${bar(diskPct)}
+                    ${bat != null ? batRow(bat, charging) : ''}
                 </div>`;
             }).join('');
         }
@@ -2712,7 +2734,8 @@
                     if (v && v !== 'nan' && v !== 'None' && k !== 'is_openvpn' && 
                         !['cpu_usage_percent', 'mem_percent', 'cpu_temp_c', 'disk_percent',
                           'cpu_percent', 'net_rx_bytes', 'net_tx_bytes',
-                          'blk_read_bytes', 'blk_write_bytes', 'finished_at'].includes(k)) {
+                          'blk_read_bytes', 'blk_write_bytes', 'finished_at',
+                          'battery_percent', 'charging', 'battery_secsleft'].includes(k)) {
                         const badge = document.createElement('span');
                         badge.className = 'meta-badge';
                         badge.innerText = `${k}: ${v}`;
@@ -2728,11 +2751,17 @@
                 const meta = item.metadata;
                 const stats = [];
 
-                if (item.name === 'lokey-client') {
+                // The agent registers as 'lokey' today ('lokey-client' is the
+                // legacy name) — match both so the vitals branch stays live.
+                if (item.name === 'lokey' || item.name === 'lokey-client') {
                     if (meta.cpu_usage_percent !== undefined) stats.push({l: 'CPU',  v: meta.cpu_usage_percent + '%', c: '#00ff00'});
                     if (meta.mem_percent       !== undefined) stats.push({l: 'RAM',  v: meta.mem_percent       + '%', c: '#00f0ff'});
                     if (meta.cpu_temp_c)                     stats.push({l: 'TEMP', v: meta.cpu_temp_c        + '°C', c: '#ff8800'});
                     if (meta.disk_percent      !== undefined) stats.push({l: 'DISK', v: meta.disk_percent      + '%', c: '#a200ff'});
+                    if (meta.battery_percent   !== undefined) {
+                        const _chg = meta.charging === true || String(meta.charging).toLowerCase() === 'true';
+                        stats.push({l: _chg ? 'BAT ⚡' : 'BAT', v: meta.battery_percent + '%', c: batColor(meta.battery_percent)});
+                    }
                 } else {
                     if (meta.cpu_percent   != null) stats.push({l: 'CPU',  v: meta.cpu_percent    + '%',   c: '#00ff00'});
                     if (meta.mem_usage_mb  != null) stats.push({l: 'MEM',  v: meta.mem_usage_mb  + ' MB', c: '#00f0ff'});
@@ -2770,6 +2799,17 @@
                     { l: 'RAM',  v: pick('mem_percent'),  c: '#00f0ff' },
                     { l: 'DISK', v: pick('disk_percent'), c: '#ff8800' },
                 ].filter(s => s.v != null);
+                // Battery only gets a badge when the device actually reports
+                // one — desktops and battery-less VMs show nothing rather than
+                // a phantom 0%. ⚡ marks AC power, same as the row tint does.
+                const bat = pick('battery_percent');
+                if (bat != null) {
+                    const chg = pick('charging');
+                    stats.push({
+                        l: (chg === true || String(chg).toLowerCase() === 'true') ? 'BAT ⚡' : 'BAT',
+                        v: bat, c: batColor(bat),
+                    });
+                }
                 stats.forEach(s => {
                     const badge = document.createElement('span');
                     badge.className = 'node-badge';
@@ -2789,7 +2829,9 @@
                 tr.title = 'Click for full device data sheet';
                 const isStale = item.status === 'ONLINE' && (!item.last_seen || (Date.now() - new Date(item.last_seen)) > 300000);
                 const displayStatus = isStale ? 'STALE' : item.status;
-                const battery = item.metadata?.battery_percent;
+                // Battery can sit top-level (lokey node metrics) or under
+                // metadata (Android heartbeats) — same pick() the badges use.
+                const battery = item.battery_percent != null ? item.battery_percent : item.metadata?.battery_percent;
                 const batteryCritical = item.status === 'ONLINE' && battery != null && battery <= 30;
                 const dotClass = item.status !== 'ONLINE' ? 'offline'
                                 : batteryCritical ? 'battery-critical'
@@ -2798,8 +2840,9 @@
                 // below 30% flashes yellow/red, plugged in sits steady blue.
                 // Charging wins when both apply — a device on the charger is
                 // recovering, so it reads as handled rather than as an alarm.
-                const charging = item.metadata?.charging === true
-                              || String(item.metadata?.charging).toLowerCase() === 'true';
+                const _chgRaw = item.charging != null ? item.charging : item.metadata?.charging;
+                const charging = _chgRaw === true
+                              || String(_chgRaw).toLowerCase() === 'true';
                 if (charging) {
                     tr.classList.add('dev-charging');
                 } else if (batteryCritical) {
@@ -4072,6 +4115,14 @@
                 .map(([id, n]) => ({ id, ...n }))
                 .sort((a, b) => (b.cpu_percent || 0) - (a.cpu_percent || 0));
             const pct = v => v != null ? `<span style="color:${pctColor(v)}">${Number(v).toFixed(1)}%</span>` : '—';
+            const bat = n => {
+                // Top-level for lokey nodes, metadata for Android devices.
+                const v = n.battery_percent != null ? n.battery_percent : (n.metadata || {}).battery_percent;
+                if (v == null) return '—';
+                const chg = n.charging != null ? n.charging : (n.metadata || {}).charging;
+                const bolt = (chg === true || String(chg).toLowerCase() === 'true') ? ' ⚡' : '';
+                return `<span style="color:${batColor(v)}">${Number(v).toFixed(0)}%${bolt}</span>`;
+            };
             el.innerHTML = nodes.map(n => {
                 const count = rows.filter(r => (r.host || '') === n.id).length;
                 const stale = n.status === 'ONLINE' && (!n.last_seen || (Date.now() - new Date(n.last_seen)) > 300000);
@@ -4085,10 +4136,11 @@
                     <td style="padding:6px;">${n.mem_used_gb != null && n.mem_total_gb != null ? n.mem_used_gb + '/' + n.mem_total_gb + ' GB' : '—'}</td>
                     <td style="padding:6px;">${n.disk_used_gb != null && n.disk_total_gb != null ? n.disk_used_gb + '/' + n.disk_total_gb + ' GB' : '—'}</td>
                     <td style="padding:6px;">${n.disk_free_gb != null ? n.disk_free_gb + ' GB' : '—'}</td>
+                    <td style="padding:6px;">${bat(n)}</td>
                     <td style="padding:6px;">${count || '—'}</td>
                     <td style="padding:6px; color:#888;">${n.last_seen ? timeSince(n.last_seen) : 'Never'}</td>
                 </tr>`;
-            }).join('') || '<tr><td colspan="10" style="padding:10px;color:#555;">No unit data.</td></tr>';
+            }).join('') || '<tr><td colspan="11" style="padding:10px;color:#555;">No unit data.</td></tr>';
         }
 
         function renderCatPie(rows) {
