@@ -46,6 +46,9 @@ services:
               "--worker-class", "gthread", "--timeout", "300", "--keep-alive", "5",
               "--access-logfile", "-", "--error-logfile", "-", "--log-level", "debug",
               "locator:app"]
+    env_file:
+      - path: traccar.env
+        required: false
     environment:
       # Identity is discovered at runtime (/etc/hostname natively, the
       # Docker daemon name containerized) — see _resolve_unit_name() in
@@ -117,7 +120,9 @@ services:
       # listener - and that domain is SafeBrowse-blocked besides. This route
       # goes through unit8's Traefik, which reaches unit9 over the tailnet.
       - TRACCAR_HOST=traccar.prime-quality.online
-      - TRACCAR_PASS=${TRACCAR_PASS:-}
+      # TRACCAR_USER / TRACCAR_PASS come from traccar.env (gitignored, mode 600).
+      # Source of truth: Vaultwarden + OpenBao secret/traccar/admin. No default
+      # here: the old committed fallback was a wrong password and every call 401d.
       # Read-only account the lokey app signs the Traccar map in as. Devices
       # auto-created by traccar_feeder get /api/permissions-linked to it.
       - TRACCAR_VIEWER_USER_ID=${TRACCAR_VIEWER_USER_ID:-}
