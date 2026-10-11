@@ -16,7 +16,7 @@ Service:
     # it via wake_triggers below + js/wake.js on the page. The postgres stays
     # up — it matches the "postgres" entry in _PINNED_NAMES, and the app
     # answers 500, not "starting", if its database is down (wake_with).
-    idle_stop: true
+    idle_stop: false   # disabled 2026-10-10 — homepage search is public; always-on until resource check
     idle_timeout: 15m
     public_wake: true
     project_dir: /home/swoopg111/projects/searchsearcher
