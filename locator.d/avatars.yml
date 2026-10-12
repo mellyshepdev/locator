@@ -8,6 +8,6 @@ Service:
   avatars:
     deployment_type: optional
     location_type: stationary
-    units: "2"
+    units: "4"  # moved 2026-10-12 (KAN-21): old unit2 VM rebuilt, now runs on unit4
     instances: 1
     idle_stop: false

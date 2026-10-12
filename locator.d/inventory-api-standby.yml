@@ -1,11 +1,18 @@
 Service:
 
-  # inventory-api-standby — hot standby for the inventory API on unit7.
-  # Owner call 2026-09-16: stays up 24/7 — essential so idle-stop can never
-  # touch it, restart_when_stopped so lokey resurrects it after any stop.
+  # The live scanner / inventory API since unit7 went down: scanner.theofficialblacksheepco.online
+  # and inventory.theofficialblacksheepco.com send /api/ here (unit9 haproxy be_inventory_api).
+  # Opening the scanner app wakes it — and its database — if either was stopped.
   inventory-api-standby:
-    deployment_type: essential
-    location_type: stationary
-    units: "7"
+    deployment_type: optional
+    location_type: mobile
+    units: "4"
     instances: 1
-    restart_when_stopped: true
+    idle_stop: false
+    idle_timeout: 15m
+    public_wake: true
+    wake_with: [pgdb-18.3]
+    wake_triggers:
+      - domain: https://scanner.theofficialblacksheepco.online/
+      - domain: https://inventory.theofficialblacksheepco.com/
+      - link: scanner-app:open
