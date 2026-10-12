@@ -1,26 +1,32 @@
 Service:
 
-  # ── Idle auto-stop ─────────────────────────────────────────────────────
-  # deployment_type MUST NOT be essential — locator refuses idle_stop on an
-  # essential service even when the flag is set. agent-0 does not appear in
-  # lokey NEVER_STOP (substring match), so this policy is the only gate.
+  # ── Agent Zero ─────────────────────────────────────────────────────────────
+  # Home unit is 4 (2026-10-12). unit7 — the previous and only home — was
+  # decommissioned 2026-10-06, which took the container with it. Rebuilt on
+  # unit4 from unit3's volume sweep (agent-0__a0_usr__20260930-071412);
+  # stack lives in ~/projects/agent-0 on unit4.
   #
-  # LLM backend (2026-09-15): every AI consumer
-  # (agent-0, forge) uses llama.cpp — llama-server on unit7 (:8085 coder,
-  # :8086 vision) with ggml rpc-server workers on unit4 and unit8. Those run
-  # under systemd, not Docker, and are never idle-stopped, so nothing needs
-  # to be woken alongside a consumer.
+  # Public host a0.theofficialblacksheepco.online is fronted by
+  # agent-0-oauth2-proxy on unit4's tailnet :4182 (Keycloak realm
+  # `blacksheep`, client `agent-0`). agent-zero itself publishes
+  # 127.0.0.1:8111 only, which is also what the `a0` CLI tunnel targets.
+  #
+  # LLM backend (2026-10-12): the llama.cpp servers that used to back every
+  # AI consumer were on unit7 and died with it. The active model preset is
+  # now "unit8 Ollama (qwen2.5-coder:7b)", served by unit8's ollama over the
+  # tailnet. The older unit7/unit2 presets are kept in presets.yaml so they
+  # can be reselected if those backends come back.
   agent-0:
     deployment_type: optional
     location_type: stationary
-    # Home unit is 7 (2026-09-16): the container only exists there, and the
-    # oauth2-proxy on unit8 fronts it via --upstream=http://100.99.131.20:50080.
-    # The stale unit4/unit8 registry entries are for containers long deleted —
-    # the `a0` CLI (~/.local/bin/a0) picks the best ONLINE unit and starts it.
-    units: "7"
+    units: "4"
     instances: 1
-    idle_stop: true
-    idle_timeout: 15m
+    # idle_stop is OFF deliberately (was: true/15m on unit7). The edge now
+    # routes a0 straight to unit4's Traefik, so there is no locator wake hop
+    # in front of it — an idle-stopped container would simply 502 and never
+    # be woken. Re-enabling idle_stop needs a wake backend on unit9's
+    # haproxy first, like be_inventory_wake.
+    idle_stop: false
     public_wake: true
     wake_triggers:
       domain:
