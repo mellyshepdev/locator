@@ -242,6 +242,11 @@ ROUTE_CLEARANCE = {
     "get_services":          CUSTOMER,
     "get_service":           CUSTOMER,
     "get_nodes":             CUSTOMER,
+    # Devices in alert (offline / stale / low battery) with battery and
+    # last-seen detail — STAFF, the level that may see telemetry. ser.ops
+    # polls it with the grid key to send Slack/Matrix/email notifications.
+    "device_alerts":         STAFF,
+    "device_ring_status":    STAFF,
     "download_registry":     CUSTOMER,
     # Edge proxies poll this for live upstreams; same bar as the registry
     # reads it derives from.
@@ -303,6 +308,8 @@ ROUTE_CLEARANCE = {
 
     # ── Write: runtime control ──────────────────────────────────────────
     "toggle_container":      OPERATOR,
+    # Make a phone ring so it can be found (dashboard 🔔 button).
+    "device_ring":           OPERATOR,
     "idle_wake":             OPERATOR,
     "shutdown_container":    OPERATOR,
     "trigger_browse":        OPERATOR,

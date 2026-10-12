@@ -555,6 +555,56 @@
         tr.dev-alert {
             animation: devAlertFlash 1s steps(1, end) infinite;
         }
+        /* Red alert (offline / gone silent / low battery off the charger):
+           the row flashes red and its cells throw a pulsing red glow. Painted
+           on the cells — border-collapse clips a box-shadow on the <tr>. */
+        @keyframes devRedFlash {
+            0%, 49%   { background-color: rgba(255, 0, 60, 0.30); }
+            50%, 100% { background-color: rgba(255, 0, 60, 0.06); }
+        }
+        @keyframes devRedGlow {
+            0%, 100% { box-shadow: inset 0 2px 0 #ff003c, inset 0 -2px 0 #ff003c, 0 0 6px rgba(255,0,60,.35); }
+            50%      { box-shadow: inset 0 2px 0 #ff5c7a, inset 0 -2px 0 #ff5c7a, 0 0 22px rgba(255,0,60,.95); }
+        }
+        tr.dev-red { animation: devRedFlash 1s steps(1, end) infinite; }
+        tr.dev-red td { animation: devRedGlow 1.2s ease-in-out infinite; }
+        tr.dev-red td:nth-child(2) { color: #ff6b85; text-shadow: 0 0 8px #ff003c; }
+        .alert-reason {
+            display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 3px;
+            font-size: 10px; letter-spacing: 1px; color: #fff; background: #ff003c;
+            box-shadow: 0 0 10px #ff003c;
+        }
+        .metric-card.mc-red { animation: mcRedGlow 1.2s ease-in-out infinite; border-color: #ff003c !important; }
+        @keyframes mcRedGlow {
+            0%, 100% { box-shadow: 0 0 8px rgba(255,0,60,.5); background-color: rgba(255,0,60,.05); }
+            50%      { box-shadow: 0 0 28px rgba(255,0,60,1); background-color: rgba(255,0,60,.22); }
+        }
+        #device-alert-banner {
+            display: none; margin: 10px 0 14px; padding: 10px 14px; border: 2px solid #ff003c;
+            border-radius: 6px; color: #fff; font-size: 13px; letter-spacing: 1px;
+            animation: mcRedGlow 1.2s ease-in-out infinite;
+        }
+        #device-alert-banner b { color: #ff6b85; }
+        #device-alert-banner button, .ring-btn {
+            font-family: inherit; cursor: pointer; border-radius: 4px; letter-spacing: 1px;
+        }
+        #device-alert-banner button {
+            margin-left: 10px; padding: 3px 10px; background: rgba(0,0,0,.5); color: #ffe600;
+            border: 1px solid #ffe600; font-size: 11px;
+        }
+        .ring-btn {
+            margin-left: 8px; padding: 2px 9px; font-size: 13px; background: rgba(255,230,0,.12);
+            border: 1px solid #ffe600; color: #ffe600;
+        }
+        .ring-btn:hover { background: rgba(255,230,0,.3); box-shadow: 0 0 12px #ffe600; }
+        .ring-btn.ringing { animation: ringShake .25s linear infinite; }
+        @keyframes ringShake { 0%,100% { transform: rotate(0); } 25% { transform: rotate(-14deg); } 75% { transform: rotate(14deg); } }
+        #ring-toast {
+            position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 20000;
+            display: none; padding: 12px 20px; border-radius: 6px; background: rgba(0,0,0,.92);
+            border: 1px solid #ffe600; color: #ffe600; font-size: 14px; letter-spacing: 1px;
+            box-shadow: 0 0 18px rgba(255,230,0,.4);
+        }
         /* Charging is a healthy state, so it sits steady rather than flashing. */
         tr.dev-charging {
             background-color: rgba(0, 160, 255, 0.16);
@@ -1130,6 +1180,9 @@
                 </select>
                 <span class="filter-count" id="filter-count"></span>
             </div>
+
+            <!-- RED ALERTS — every device the alert rules flag (see deviceAlert) -->
+            <div id="device-alert-banner" role="alert"></div>
 
             <!-- LIVE NODE METRICS -->
             <div class="node-cards-row" id="node-cards"></div>
@@ -1968,6 +2021,8 @@
     </div>
 
     <!-- DEVICE DATA-SHEET MODAL -->
+    <div id="ring-toast" role="status" aria-live="polite"></div>
+
     <div id="device-modal">
         <div class="modal-box">
             <h3 id="device-modal-title">DEVICE</h3>
@@ -1977,6 +2032,8 @@
                         style="display:none; padding:10px 28px; border:1px solid #ff003c; border-radius:4px;
                                font-family:inherit; font-size:14px; font-weight:bold; cursor:pointer;
                                letter-spacing:1px; background:rgba(255,0,60,0.15); color:#ff003c;">Delete</button>
+                <button id="device-modal-ring" class="ring-btn" onclick="ringDevice(window._deviceModalItem && (window._deviceModalItem.id || window._deviceModalItem.name), this)"
+                        style="display:none; margin:0; padding:10px 22px; font-size:14px;">🔔 Ring</button>
                 <button id="device-modal-close" onclick="closeDeviceModal()" style="margin:0;">Close</button>
             </div>
         </div>
@@ -2191,6 +2248,93 @@
             return '#00ff00';
         }
 
+        // ── RED ALERTS ──
+        // Same rules as locator.py node_alerts() (which ser.ops polls to send
+        // Slack/Matrix/email): offline within 30 days of last contact, online
+        // but silent 5+ minutes, or <=30% battery off the charger.
+        const ALERT_OFFLINE_MAX_MS = 30 * 86400000, ALERT_STALE_MS = 300000, ALERT_BATTERY = 30;
+        function deviceAlert(n) {
+            const meta = n.metadata || {};
+            const seen = n.last_seen ? Date.now() - new Date(n.last_seen) : null;
+            const batRaw = n.battery_percent != null ? n.battery_percent : meta.battery_percent;
+            const bat = batRaw != null ? Number(batRaw) : null;
+            const chgRaw = n.charging != null ? n.charging : meta.charging;
+            const charging = chgRaw === true || String(chgRaw).toLowerCase() === 'true';
+            if (n.status !== 'ONLINE') return (seen != null && seen <= ALERT_OFFLINE_MAX_MS) ? 'OFFLINE' : null;
+            if (seen == null || seen > ALERT_STALE_MS) return 'SILENT';
+            if (bat != null && bat <= ALERT_BATTERY && !charging) return `BATTERY ${bat.toFixed(0)}%`;
+            return null;
+        }
+        // Phones running lokey-android — the only devices that can ring.
+        function ringableHosts(registryData) {
+            return new Set(Object.values((registryData && registryData.services) || {})
+                .filter(s => s.name === 'lokey-mobile' && s.host).map(s => s.host));
+        }
+        let _alertedBefore = null;   // ids in alert on the previous poll
+        function updateAlertBanner(registryData) {
+            const banner = document.getElementById('device-alert-banner');
+            if (!banner) return;
+            const ringable = ringableHosts(registryData);
+            const alerts = Object.entries((registryData && registryData.nodes) || {})
+                .map(([id, n]) => ({ id, reason: deviceAlert(n) })).filter(a => a.reason);
+            if (!alerts.length) { banner.style.display = 'none'; }
+            else {
+                banner.style.display = 'block';
+                banner.innerHTML = `🚨 <b>${alerts.length} DEVICE${alerts.length > 1 ? 'S' : ''} NEED ATTENTION:</b> ` +
+                    alerts.map(a => `${escapeAttr(a.id)} <span class="alert-reason">${a.reason}</span>` +
+                        (ringable.has(a.id) ? ` <button type="button" class="ring-btn" onclick="ringDevice('${escapeAttr(a.id)}', this)">🔔</button>` : '')
+                    ).join(' &nbsp; ') +
+                    (('Notification' in window) && Notification.permission === 'default'
+                        ? ` <button type="button" onclick="enableAlertNotifications()">ENABLE DESKTOP ALERTS</button>` : '');
+            }
+            // Desktop notification for each device that just turned red.
+            const now = new Set(alerts.map(a => a.id));
+            if (_alertedBefore) {
+                alerts.filter(a => !_alertedBefore.has(a.id)).forEach(a => {
+                    if (('Notification' in window) && Notification.permission === 'granted') {
+                        try { new Notification(`🚨 ${a.id}: ${a.reason}`, { body: 'Locator device alert', tag: 'locator-' + a.id, requireInteraction: true }); } catch (e) {}
+                    }
+                });
+            }
+            _alertedBefore = now;
+        }
+        function enableAlertNotifications() {
+            if (!('Notification' in window)) return;
+            Notification.requestPermission().then(() => { if (lastRegistryData) updateAlertBanner(lastRegistryData); });
+        }
+        function escapeAttr(v) {
+            return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+        function ringToast(text, ms) {
+            const t = document.getElementById('ring-toast');
+            if (!t) return;
+            t.textContent = text; t.style.display = 'block';
+            clearTimeout(t._h); if (ms) t._h = setTimeout(() => { t.style.display = 'none'; }, ms);
+        }
+        // 🔔 — queue a ring; the phone picks it up on its next heartbeat (~8s)
+        // and plays an alarm at full volume, even on silent.
+        async function ringDevice(id, btn) {
+            if (!id) return;
+            const url = `/api/devices/${encodeURIComponent(id)}/ring`;
+            if (btn) btn.classList.add('ringing');
+            try {
+                await execFetch(url, { method: 'POST', headers: execHeaders(), body: '{}' });
+                ringToast(`🔔 Ringing ${id}… waiting for the phone to pick it up`);
+                const t0 = Date.now();
+                while (Date.now() - t0 < 60000) {
+                    await new Promise(r => setTimeout(r, 2500));
+                    const st = await fetch(url).then(r => r.json()).catch(() => ({}));
+                    if (st.state === 'rang') { ringToast(`🔔 ${id} is ringing now`, 8000); return; }
+                    if (st.state === 'expired') break;
+                }
+                ringToast(`⚠️ ${id} did not pick up the ring — it may be offline or running an old Lokey app`, 10000);
+            } catch (e) {
+                ringToast('Ring failed: ' + (e && e.message), 8000);
+            } finally {
+                if (btn) btn.classList.remove('ringing');
+            }
+        }
+
         // Battery runs the other way: high is good, low is the emergency.
         // Thresholds mirror the row-alert logic below (<=30% is the flash
         // point, matching BATTERY_ALERT_THRESHOLD on the locator).
@@ -2358,11 +2502,12 @@
                 const batBar = (v) => `<div class="mc-bar"><div class="mc-fill" style="width:${Math.min(v || 0, 100)}%;background:${batColor(v)}"></div></div>`;
                 const batRow = (v, chg) => `<div class="mc-row"><span class="mc-label">BAT</span><span style="color:${batColor(v)}">${v.toFixed(0)}%${chg ? ' ⚡' : ''}</span></div>${batBar(v)}`;
                 const nc = badge === 'offline' ? OFFLINE_COLOR : nodeColor(id);
-                return `<div class="metric-card${oom ? ' oom' : ''}" style="${oom ? '' : `border-color:${nc};box-shadow:0 0 12px ${nc}40`}">
+                const red = deviceAlert(n);
+                return `<div class="metric-card${oom ? ' oom' : ''}${red ? ' mc-red' : ''}" style="${oom || red ? '' : `border-color:${nc};box-shadow:0 0 12px ${nc}40`}">
                     <button type="button" class="mc-maximize" title="Maximize" onclick="maximizeNodeCard('${id}')">⛶</button>
                     <div class="mc-name" style="color:${nc}">${id}</div>
                     <div class="mc-ip">${ip}${disk}</div>
-                    <span class="mc-badge ${badge}">${oom ? 'OOM' : badge.toUpperCase()}</span>
+                    <span class="mc-badge ${badge}">${oom ? 'OOM' : badge.toUpperCase()}</span>${red ? `<span class="alert-reason">${red}</span>` : ''}
                     ${row('CPU', cpu)}${bar(cpu)}
                     ${row('MEM', mem)}${bar(mem)}
                     ${row('DISK', diskPct)}${bar(diskPct)}
@@ -2823,6 +2968,8 @@
             }
 
             // --- DEVICES TABLE ---
+            const _ringable = ringableHosts(registryData);
+            updateAlertBanner(registryData);
             nodes.forEach(item => {
                 const tr = document.createElement('tr');
                 tr.className = 'clickable-row';
@@ -2843,7 +2990,10 @@
                 const _chgRaw = item.charging != null ? item.charging : item.metadata?.charging;
                 const charging = _chgRaw === true
                               || String(_chgRaw).toLowerCase() === 'true';
-                if (charging) {
+                const redReason = deviceAlert(item);
+                if (redReason) {
+                    tr.classList.add('dev-red');
+                } else if (charging) {
                     tr.classList.add('dev-charging');
                 } else if (batteryCritical) {
                     tr.classList.add('dev-alert');
@@ -2856,7 +3006,7 @@
                             <span class="status-dot ${dotClass}"></span>
                         </span>
                     </td>
-                    <td style="font-weight:bold">${item.name || item.id}</td>
+                    <td style="font-weight:bold">${item.name || item.id}${redReason ? `<span class="alert-reason">${redReason}</span>` : ''}${_ringable.has(item.id) ? `<button type="button" class="ring-btn" title="Ring this phone" onclick="event.stopPropagation(); ringDevice('${escapeAttr(item.id)}', this)">🔔</button>` : ''}</td>
                     <td>${item.ip || item.tailscale_ip || 'unknown'}</td>
                     <td>${item.type || '-'}</td>
                 `;
@@ -3804,6 +3954,9 @@
             window._deviceModalItem = item;
             const delBtn = document.getElementById('device-modal-delete');
             if (delBtn) delBtn.style.display = deviceRegistryRef(item) ? 'block' : 'none';
+            const ringBtn = document.getElementById('device-modal-ring');
+            if (ringBtn) ringBtn.style.display =
+                ringableHosts(lastRegistryData).has(item.id || item.name) ? 'block' : 'none';
 
             document.getElementById('device-modal').style.display = 'flex';
         }

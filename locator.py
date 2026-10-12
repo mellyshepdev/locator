@@ -418,6 +418,138 @@ def _send_alert(service_name: str, status: str, extra: str = ""):
         pass
 
 
+# ── DEVICE ALERTS + RING ─────────────────────────────────────────────────────
+# One definition of "this device is red", shared by the dashboard (which
+# flashes it) and ser.ops (which polls /api/alerts and notifies Slack, Matrix
+# and email). A node is in alert when it is:
+#   offline  — status not ONLINE, last seen within ALERT_OFFLINE_MAX_DAYS
+#              (older rows are retired kit kept only for the 90-day rule, and
+#              rows that never reported at all are inventory, not alarms)
+#   stale    — ONLINE but silent for DEVICE_STALE_SECONDS
+#   battery  — at/below BATTERY_ALERT_THRESHOLD and not on a charger
+DEVICE_STALE_SECONDS   = int(os.environ.get("DEVICE_STALE_SECONDS", "300"))
+ALERT_OFFLINE_MAX_DAYS = int(os.environ.get("ALERT_OFFLINE_MAX_DAYS", "30"))
+RING_SECONDS           = int(os.environ.get("RING_SECONDS", "30"))
+RING_DELIVERY_WINDOW   = int(os.environ.get("RING_DELIVERY_WINDOW", "180"))  # s a queued ring waits for a heartbeat
+
+# host -> {"id", "requested", "delivered", "acked", "seconds"}; in memory only:
+# a ring that outlives a Locator restart is a ring nobody is waiting for.
+device_rings: dict = {}
+device_rings_lock = threading.Lock()
+
+
+def _truthy(v) -> bool:
+    return v is True or str(v).strip().lower() in ("true", "1", "yes")
+
+
+def node_alerts(now=None) -> list:
+    """Every node currently in alert, most urgent first."""
+    now = now or datetime.now(timezone.utc)
+    out = []
+    with lock:
+        nodes = {k: dict(v) for k, v in registry.get("nodes", {}).items()}
+    for nid, n in nodes.items():
+        meta = n.get("metadata") or {}
+        bat = n.get("battery_percent", meta.get("battery_percent"))
+        try:
+            bat = float(bat) if bat is not None else None
+        except (TypeError, ValueError):
+            bat = None
+        charging = _truthy(n.get("charging", meta.get("charging")))
+        seen = n.get("last_seen")
+        try:
+            age = (now - datetime.fromisoformat(seen)).total_seconds() if seen else None
+        except ValueError:
+            age = None
+        reason = None
+        if n.get("status") != "ONLINE":
+            if age is not None and age <= ALERT_OFFLINE_MAX_DAYS * 86400:
+                reason = "offline"
+        elif age is None or age > DEVICE_STALE_SECONDS:
+            reason = "stale"
+        elif bat is not None and bat <= BATTERY_ALERT_THRESHOLD and not charging:
+            reason = "battery"
+        if not reason:
+            continue
+        out.append({
+            "id": nid, "reason": reason, "type": n.get("type") or "",
+            "model": meta.get("model", ""), "battery": bat, "charging": charging,
+            "last_seen": seen, "silent_seconds": int(age) if age is not None else None,
+            "ringable": nid in _ringable_hosts(),
+        })
+    order = {"battery": 0, "stale": 1, "offline": 2}
+    out.sort(key=lambda a: (order[a["reason"]], a["id"]))
+    return out
+
+
+def _ringable_hosts() -> set:
+    """Hosts whose lokey-android app heartbeats here — the only things that
+    understand a ring command."""
+    with lock:
+        return {s.get("host") for s in registry["services"].values()
+                if s.get("name") == "lokey-mobile" and s.get("host")}
+
+
+def _pending_ring_commands(host: str, metadata: dict) -> list:
+    """Called on each phone heartbeat: settle its ack, hand over a queued ring."""
+    ack = str((metadata or {}).get("ring_ack") or "")
+    now = time.time()
+    with device_rings_lock:
+        r = device_rings.get(host)
+        if not r:
+            return []
+        if ack and ack == r["id"] and not r.get("acked"):
+            r["acked"] = now
+        if r.get("acked") or now - r["requested"] > RING_DELIVERY_WINDOW:
+            return []
+        # Re-sent every beat until the phone acks: a dropped response must
+        # not swallow the ring. The phone ignores an id it has already played.
+        r["delivered"] = r.get("delivered") or now
+        return [{"type": "ring", "id": r["id"], "seconds": r["seconds"]}]
+
+
+def device_alerts():
+    alerts = node_alerts()
+    return jsonify({"alerts": alerts, "count": len(alerts),
+                    "battery_threshold": BATTERY_ALERT_THRESHOLD,
+                    "stale_seconds": DEVICE_STALE_SECONDS,
+                    "generated": datetime.now(timezone.utc).isoformat()}), 200
+
+
+def _ring_status(host: str) -> dict:
+    with device_rings_lock:
+        r = dict(device_rings.get(host) or {})
+    if not r:
+        return {"device": host, "state": "none"}
+    state = ("rang" if r.get("acked") else
+             "delivered" if r.get("delivered") else
+             "expired" if time.time() - r["requested"] > RING_DELIVERY_WINDOW else "queued")
+    return {"device": host, "state": state, "id": r["id"], "seconds": r["seconds"],
+            "requested": r["requested"], "acked": r.get("acked")}
+
+
+def device_ring(node_id):
+    """Make a phone ring at full alarm volume (even on silent) so it can be
+    found. Queued here, picked up by the phone on its next heartbeat (~8s)."""
+    if node_id not in _ringable_hosts():
+        return jsonify({"error": f"{node_id} is not running the Lokey app, so it cannot ring"}), 404
+    body = request.get_json(silent=True) or {}
+    try:
+        secs = max(5, min(120, int(body.get("seconds") or RING_SECONDS)))
+    except (TypeError, ValueError):
+        secs = RING_SECONDS
+    import uuid as _uuid
+    with device_rings_lock:
+        device_rings[node_id] = {"id": _uuid.uuid4().hex[:12], "requested": time.time(),
+                                 "delivered": None, "acked": None, "seconds": secs}
+    print(f"🔔 RING queued for {node_id} ({secs}s)")
+    return jsonify(_ring_status(node_id)), 202
+
+
+def device_ring_status(node_id):
+    return jsonify(_ring_status(node_id)), 200
+
+
 
 # ── INSTANCE LIMITS ──────────────────────────────────────────────────────────
 
@@ -1704,6 +1836,13 @@ def _autofill_policy_stub(name, host):
         print(f"⚠️  auto-policy for '{name}' failed: {e}")
 
 
+# Device alert + ring routes (handlers live with the alert code above, which
+# sits before `app` exists).
+app.add_url_rule("/api/alerts", "device_alerts", device_alerts, methods=["GET"])
+app.add_url_rule("/api/devices/<path:node_id>/ring", "device_ring", device_ring, methods=["POST"])
+app.add_url_rule("/api/devices/<path:node_id>/ring", "device_ring_status", device_ring_status, methods=["GET"])
+
+
 @app.route("/register", methods=["POST"])
 def register_service():
     """
@@ -1849,7 +1988,12 @@ def register_service():
     # a wake page or a half-dead worker carries no echo and counts as a miss,
     # and enough misses in a row make lokey start a locator itself.
     ack = {"seq": data.get("seq"), "unit": UNIT_NAME, "ts": int(time.time())}
-    return jsonify({"result": "registered", "service": service_id, "ack": ack}), 200
+    resp = {"result": "registered", "service": service_id, "ack": ack}
+    if name == "lokey-mobile" and host != "unknown":
+        cmds = _pending_ring_commands(host, data.get("metadata") or {})
+        if cmds:
+            resp["commands"] = cmds
+    return jsonify(resp), 200
 
 
 @app.route("/deregister/<name>", methods=["DELETE"])
