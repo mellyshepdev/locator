@@ -7210,6 +7210,7 @@ def refresh_status():
         except (TypeError, ValueError, KeyError):
             pass
 
+    _overlay_sweep(units, now)
     healthy = [u for u, e in units.items() if (e.get("last_run") or {}).get("status") == "DONE"]
     return jsonify({
         "label": REFRESH_LABEL,
@@ -7218,6 +7219,53 @@ def refresh_status():
         "summary": {"units": len(units), "last_run_ok": len(healthy),
                     "last_run_not_ok": len(units) - len(healthy)},
     })
+
+
+_SWEEP_RUN_STATUS = {"completed": "DONE", "active": "DISPATCHED", "dropped": "DROPPED",
+                     "skipped": "SKIPPED", "unhealthy_after": "UNHEALTHY"}
+
+
+def _overlay_sweep(units, now):
+    """The refresh moved to the fleet sweep (c8718f7), which keeps no per-unit
+    exec jobs — so fill each unit's last_run/next_run from the sweep record,
+    wherever the old schedule/run history has nothing newer. Keeps the
+    dashboard strip showing what actually ran."""
+    cur = _sweep_state.get("current")
+    hist = _sweep_state.get("history") or []
+    last = cur or (hist[0] if hist else None)
+    if not last:
+        return
+    nxt = None
+    if _sweep_state.get("last_started"):
+        nxt = (datetime.fromisoformat(_sweep_state["last_started"])
+               + timedelta(seconds=SWEEP_INTERVAL)).isoformat()
+    try:
+        dur = int((datetime.fromisoformat(last["finished_at"])
+                   - datetime.fromisoformat(last["started_at"])).total_seconds() * 1000)
+    except (TypeError, ValueError, KeyError):
+        dur = None
+    for unit, info in (last.get("units") or {}).items():
+        entry = units.setdefault(unit, {"unit": unit})
+        prev = entry.get("last_run") or {}
+        if prev.get("queued_at") and prev["queued_at"] >= last["started_at"]:
+            continue
+        warned = [ph["name"] for ph in last.get("phases", [])
+                  if (ph.get("results", {}).get(unit) or {}).get("outcome") == "warnings"]
+        note = info.get("reason") or ""
+        if warned:
+            note = (note + "; " if note else "") + "warnings in " + ", ".join(warned)
+        entry["last_run"] = {"status": _SWEEP_RUN_STATUS.get(info.get("state"), (info.get("state") or "").upper()),
+                             "queued_at": last["started_at"], "duration_ms": dur,
+                             "exit_code": None, "error": note or None,
+                             "sweep_id": last.get("id")}
+        entry.setdefault("scheduled", f"sweep every {SWEEP_INTERVAL // 3600}h")
+        entry.setdefault("enabled", SWEEP_ENABLED)
+        entry["next_run"] = entry.get("next_run") or nxt
+        try:
+            entry["hours_since_last_run"] = round(
+                (now - datetime.fromisoformat(last["started_at"])).total_seconds() / 3600, 1)
+        except (TypeError, ValueError):
+            pass
 
 
 @app.route("/api/refresh/runs", methods=["GET"])
@@ -7247,13 +7295,20 @@ def refresh_run_now():
     data = request.get_json(silent=True) or {}
     unit = (data.get("unit") or "").strip()
     if unit:
-        units = [unit]
+        units = [unit] if any(j["unit"] == unit for j in _refresh_jobs()) else []
     elif data.get("all"):
         units = sorted({j["unit"] for j in _refresh_jobs() if j.get("enabled", True)})
     else:
         return jsonify({"error": "Provide 'unit' or 'all': true"}), 400
     if not units:
-        return jsonify({"error": "no refresh jobs registered"}), 404
+        # No per-unit refresh jobs any more: the fleet sweep owns the refresh.
+        if sweep_lock.locked():
+            return jsonify({"error": "a sweep is already running",
+                            "current": _sweep_state.get("current")}), 409
+        only = [unit] if unit else None
+        threading.Thread(target=run_fleet_sweep, kwargs={"trigger": "manual", "only_units": only},
+                         daemon=True, name="fleet_sweep").start()
+        return jsonify({"result": "sweep started", "commands": only or ["all online units"]}), 202
     queued = [_queue_exec_command(u, _refresh_script_for(u), source="manual",
                                   label=REFRESH_LABEL)
               for u in units]
