@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-10-13T20:27:02.478080+00:00 —
+  # 'edge-edge-1' registered on unit11 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  edge-edge-1:
+    deployment_type: optional
+    location_type: stationary
+    units: "11"
+    instances: 1
+    idle_stop: false
