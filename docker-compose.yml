@@ -62,6 +62,9 @@ services:
       # (refresh honours DEBUG=1 -> its debug() helper). Without this the
       # per-unit run logs only its "==>" milestones.
       - REFRESH_SCRIPT=DEBUG=1 REFRESH_NO_FANOUT=1 UNIT_NAME={unit} "$$HOME/.local/bin/refresh"
+      # Fleet sweep (commit/push/pull every repo on every unit). Every 2h since
+      # 2026-10-13 so live-site edits reach git sooner; a sweep takes ~20 min.
+      - REFRESH_SWEEP_INTERVAL=2h
       - COMPOSE_DIR=/app/data/compose
       - BALANCE_HIGH=65
       - BALANCE_DIFF=5
