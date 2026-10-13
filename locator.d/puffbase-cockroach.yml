@@ -1,8 +1,13 @@
 Service:
 
+  # 2026-10-13: PuffBase runs on puffbase-vm (unit9 haproxy be_puffbase/be_git/
+  # be_puffapp -> puffbase-vm.prime-quality.online). This unit4 stanza is kept
+  # only as a record: optional and never auto-restarted, so lokey on unit4
+  # stops redeploying it from the leftover ~/server/puffbase (exit 78 loop).
+
   puffbase-cockroach:
-    deployment_type: essential
+    deployment_type: optional
     location_type: stationary
     units: "4"
     instances: 1
-    restart_when_stopped: true
+    restart_when_stopped: false
