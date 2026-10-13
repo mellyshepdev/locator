@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-10-13T08:23:47.912949+00:00 —
+  # 'infallible_bassi' registered on unit4 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  infallible_bassi:
+    deployment_type: optional
+    location_type: stationary
+    units: "4"
+    instances: 1
+    idle_stop: false
