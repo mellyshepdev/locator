@@ -28,3 +28,4 @@ freeipa/.env
 # Vendored clone that landed under templates/ - never belongs in this repo.
 templates/llama.cpp/
 traccar.env
+locator-db.env

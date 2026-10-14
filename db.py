@@ -409,6 +409,31 @@ def metrics_history(service_id, since, until):
         return [{**r, "sampled_at": r["sampled_at"].isoformat()} for r in rows]
 
 
+def metrics_events(since, until):
+    """Memory-pressure events (oom_kill / mem_spike / node_mem_spike) in
+    [since, until), newest first — backs the metrics tab's pressure panel.
+    They live in the shared events table rather than container_metrics: an OOM
+    is a point-in-time fact, not a per-tick sample."""
+    with _conn() as conn:
+        if conn is None:
+            return []
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT event_type, data, created_at
+                   FROM events
+                   WHERE event_type IN ('oom_kill', 'mem_spike', 'node_mem_spike')
+                     AND created_at >= %s AND created_at < %s
+                   ORDER BY created_at DESC LIMIT 500""",
+                (since, until),
+            )
+            rows = cur.fetchall()
+        return [
+            {"type": r["event_type"], "created_at": r["created_at"].isoformat(),
+             **(r["data"] or {})}
+            for r in rows
+        ]
+
+
 def record_command_run(cmd):
     """Insert (or refresh) the row for a queued exec command.
 

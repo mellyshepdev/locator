@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-10-14T00:54:36.542710+00:00 —
+  # 'mariadb-dns' registered on unit9 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  mariadb-dns:
+    deployment_type: optional
+    location_type: stationary
+    units: "9"
+    instances: 1
+    idle_stop: false

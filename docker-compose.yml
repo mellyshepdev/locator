@@ -13,6 +13,7 @@ services:
       - ./registry_data:/app/data
       - ./templates:/app/templates
       - ./locator.yml:/app/locator.yml
+      - ./db.py:/app/db.py
       # Editable from the dashboard's YAMLs tab. Without this mount the file
       # only exists inside the image, so a UI edit would be discarded on the
       # next rebuild rather than changing the deployment.
@@ -50,6 +51,8 @@ services:
     env_file:
       - path: traccar.env
         required: false
+      - path: locator-db.env
+        required: true
     environment:
       # Identity is discovered at runtime (/etc/hostname natively, the
       # Docker daemon name containerized) — see _resolve_unit_name() in
@@ -113,7 +116,6 @@ services:
       # and anti-flap bypassed) instead of waiting for strikes while the disk
       # fills. lokey's janitor escalates to image-prune -a at 93.
       - DISK_CRIT_PERCENT=92
-      - DATABASE_URL=${DATABASE_URL}
       - LOCATOR_CANONICAL_URL=https://locator.network
       # Traccar runs on unit9 as a systemd service on :8082. Nothing has served
       # 80/443 there since its Caddy went away, so the default host
@@ -178,6 +180,7 @@ services:
     networks:
       - networking
       - traefik_proxy
+      - dbtier_dbtier
 
   # Static dashboard shell — deliberately its own container so the idle
   # reaper can STOP it without touching the API. The shared apache on
@@ -211,6 +214,8 @@ services:
       - traefik_proxy
 
 networks:
+  dbtier_dbtier:
+    external: true
   networking:
     external: true
   traefik_proxy:

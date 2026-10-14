@@ -1,3 +1,7 @@
+x-bao-secrets:
+  IPA_ADMIN_PASSWORD: bao://secret/compose/units/unit4/freeipa#IPA_ADMIN_PASSWORD
+  IPA_DM_PASSWORD: bao://secret/compose/units/unit4/freeipa#IPA_DM_PASSWORD
+
 # ── FREEIPA on unit4 — identity source for Locator clearance levels ─────────
 #
 # Two deliberate deviations from the generic recipe in docker-compose.yml:

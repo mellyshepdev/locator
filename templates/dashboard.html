@@ -1496,6 +1496,25 @@
                 <div id="metrics-summary" style="font-size:13px; color:var(--neon-green);">Loading...</div>
             </div>
 
+            <!-- OOM kills + memory spikes reported by the lokey agents in this
+                 range — filed in the shared events table, so they also appear
+                 in the main event feed the moment they happen. -->
+            <div>
+                <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Pressure Events — OOM &amp; Spikes</h3>
+                <div style="max-width:100%; overflow-x:auto;">
+                    <table style="width:100%; border-collapse:collapse; font-size:12px;">
+                        <thead>
+                            <tr style="border-bottom:1px solid var(--neon-green); text-align:left; color:var(--neon-green);">
+                                <th style="padding:6px;">TIME</th><th style="padding:6px;">TYPE</th>
+                                <th style="padding:6px;">UNIT</th><th style="padding:6px;">CONTAINER</th>
+                                <th style="padding:6px;">DETAIL</th>
+                            </tr>
+                        </thead>
+                        <tbody id="metrics-events-tbody"></tbody>
+                    </table>
+                </div>
+            </div>
+
             <!-- Per-unit live load: every number the node agents push -->
             <div>
                 <h3 style="margin:0 0 10px; color:var(--neon-green); font-size:13px; letter-spacing:2px; text-transform:uppercase;">Unit Load (Live)</h3>
@@ -4381,6 +4400,41 @@
                 renderHostPie(summary.by_host || []);
             } catch (err) {
                 summaryEl.textContent = `Error: ${err.message}`;
+            }
+
+            loadPressureEvents(qs);
+        }
+
+        // OOM kills + spikes in the selected range. oom_kill rows render red,
+        // spikes amber — consistent with --danger/warning elsewhere.
+        async function loadPressureEvents(qs) {
+            const tbody = document.getElementById('metrics-events-tbody');
+            if (!tbody) return;
+            tbody.innerHTML = '<tr><td colspan="5" style="padding:10px;color:#555;">Loading...</td></tr>';
+            try {
+                const rows = await (await fetch(`/api/metrics/events?${qs}`)).json();
+                if (!Array.isArray(rows)) throw new Error(rows.error || 'bad response');
+                if (!rows.length) {
+                    tbody.innerHTML = '<tr><td colspan="5" style="padding:10px;color:#555;">No pressure events in this range.</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = rows.map(ev => {
+                    const isOom = ev.type === 'oom_kill';
+                    const color = isOom ? 'var(--danger, #ff003c)' : '#ffe600';
+                    const label = isOom ? 'OOM KILL' : (ev.type === 'node_mem_spike' ? 'NODE SPIKE' : 'SPIKE');
+                    const detail = isOom
+                        ? `restarts: ${ev.restart_count ?? '—'}`
+                        : `${ev.from_pct ?? '?'}% → ${ev.to_pct ?? '?'}%` + (ev.delta_pp ? ` (+${ev.delta_pp}pp)` : '');
+                    return `<tr style="border-bottom:1px solid #222; color:${color};">
+                        <td style="padding:6px;">${new Date(ev.created_at || ev.at).toLocaleString()}</td>
+                        <td style="padding:6px; font-weight:bold;">${label}</td>
+                        <td style="padding:6px;">${ev.unit || ''}</td>
+                        <td style="padding:6px;">${ev.service || '—'}</td>
+                        <td style="padding:6px;">${detail}</td>
+                    </tr>`;
+                }).join('');
+            } catch (err) {
+                tbody.innerHTML = `<tr><td colspan="5" style="padding:10px;color:var(--danger, #ff003c);">${err.message}</td></tr>`;
             }
         }
 

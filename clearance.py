@@ -273,6 +273,7 @@ ROUTE_CLEARANCE = {
     "metrics_summary":       ENGINEER,
     "metrics_containers":    ENGINEER,
     "metrics_history":       ENGINEER,
+    "metrics_events":        ENGINEER,
     # Combined per-unit vitals for the Glances tab — read-only summary of the
     # same node health the grid already shows; matches VIEW_CLEARANCE level.
     "glances_summary":       CLIENT,

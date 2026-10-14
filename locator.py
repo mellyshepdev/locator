@@ -2934,6 +2934,20 @@ def metrics_history():
         return jsonify({"error": "metrics unavailable"}), 503
 
 
+@app.route("/api/metrics/events", methods=["GET"])
+def metrics_events():
+    """OOM kills + memory spikes in the selected range — lokey reports them in
+    the metrics PATCH, they land in the shared events table."""
+    since, until, err = _metrics_range_args()
+    if err:
+        return err
+    try:
+        return jsonify(db.metrics_events(since, until))
+    except Exception as e:
+        print(f"⚠️  Failed to read pressure events: {e}")
+        return jsonify({"error": "metrics unavailable"}), 503
+
+
 @app.route("/nodes", methods=["POST"])
 def update_nodes():
     """
@@ -3552,6 +3566,18 @@ def update_node_metrics(node_id):
         node["last_seen"]     = now
         node["status"]        = "ONLINE"
         registry["updated"]   = now
+
+    # Memory-pressure events from lokey (oom_kill / mem_spike /
+    # node_mem_spike) are filed in the shared events table outside the
+    # registry lock — a slow DB must never stall a heartbeat, and they surface
+    # in the events feed immediately plus the metrics tab's pressure panel via
+    # /api/metrics/events.
+    for ev in data.get("events") or []:
+        try:
+            db.insert_event(ev.get("type", "mem_event"),
+                            {**ev, "unit": node_id})
+        except Exception as e:
+            print(f"⚠️  failed to record pressure event from {node_id}: {e}")
 
     return jsonify({"result": "metrics_updated", "node": node_id})
 
