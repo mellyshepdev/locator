@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-10-14T17:40:42.774830+00:00 —
+  # 'vibrant_franklin' registered on unit4 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  vibrant_franklin:
+    deployment_type: optional
+    location_type: stationary
+    units: "4"
+    instances: 1
+    idle_stop: false

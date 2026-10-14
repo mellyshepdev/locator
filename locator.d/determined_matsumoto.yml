@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-10-14T17:35:11.026570+00:00 —
+  # 'determined_matsumoto' registered on unit4 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  determined_matsumoto:
+    deployment_type: optional
+    location_type: stationary
+    units: "4"
+    instances: 1
+    idle_stop: false

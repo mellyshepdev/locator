@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-10-14T19:01:20.288650+00:00 —
+  # 'romantic_colden' registered on unit4 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  romantic_colden:
+    deployment_type: optional
+    location_type: stationary
+    units: "4"
+    instances: 1
+    idle_stop: false
