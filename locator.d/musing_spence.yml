@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-10-14T08:37:13.870893+00:00 —
+  # 'musing_spence' registered on unit4 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  musing_spence:
+    deployment_type: optional
+    location_type: stationary
+    units: "4"
+    instances: 1
+    idle_stop: false
