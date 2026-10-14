@@ -43,12 +43,154 @@ _pool = None
 _pool_lock = threading.Lock()
 _warned = False
 
+# Degraded-state tracking + write spool. The original design failed open AND
+# stayed quiet: DATABASE_URL silently empty for ~2.5 weeks (Sep 26 → Oct 14)
+# while every write was dropped — nothing surfaced it. Now the DB layer
+# tracks its own health, spools lost writes to disk, replays them when
+# Postgres returns, and emits a db_outage event so the gap is visible in the
+# feed instead of being a hole in the data.
+_db_ok = None            # None = never connected yet, True/False = health
+_db_since = time.time()
+_db_last_error = "not yet attempted"
+_db_warned_at = 0.0
+_spool_lock = threading.Lock()
+_replaying = False
+DB_SPOOL_PATH = os.environ.get(
+    "DB_SPOOL_PATH",
+    os.path.join(os.environ.get("DATA_DIR", "/app/data"), "db-spool.jsonl"))
+DB_SPOOL_MAX_BYTES = int(os.environ.get("DB_SPOOL_MAX_BYTES", 20 * 1024 * 1024))
+
+
+def db_status():
+    return {
+        "ok": _db_ok,
+        "since": _db_since,
+        "last_error": _db_last_error,
+        "dsn_configured": bool(DATABASE_URL),
+        "spool_bytes": os.path.getsize(DB_SPOOL_PATH)
+                       if os.path.exists(DB_SPOOL_PATH) else 0,
+    }
+
 
 def _warn_once(msg):
     global _warned
     if not _warned:
-        print(f"⚠️  db.py: {msg} — falling back to registry.json/in-memory only")
+        print(f"⚠️  db.py: {msg} — falling back to registry.json/in-memory only", flush=True)
         _warned = True
+
+
+def _mark_down(err):
+    global _db_ok, _db_since, _db_last_error, _db_warned_at
+    _db_last_error = str(err)
+    if _db_ok is not False:
+        _db_ok = False
+        _db_since = time.time()
+        print(f"⚠️  db.py: Postgres degraded — {_db_last_error}; "
+              f"writes spooling to {DB_SPOOL_PATH}", flush=True)
+    elif time.time() - _db_warned_at > 300:
+        # Ongoing outage: keep a heartbeat in the logs, just not per-write spam.
+        print(f"⚠️  db.py: Postgres still degraded "
+              f"({time.time() - _db_since:.0f}s) — {_db_last_error}", flush=True)
+        _db_warned_at = time.time()
+
+
+def _mark_up():
+    global _db_ok, _db_since
+    was_down = _db_ok is False
+    outage_since = _db_since
+    _db_ok = True
+    _db_last_error = ""
+    if was_down:
+        print(f"🗄️  db.py: Postgres back after {time.time() - outage_since:.0f}s "
+              f"— replaying spool", flush=True)
+        _mark_up_replay(outage_since)
+
+
+def _mark_up_replay(outage_since=None):
+    global _replaying
+    if _replaying:
+        return
+    _replaying = True
+    threading.Thread(target=_replay_spool, args=(outage_since,),
+                     daemon=True).start()
+
+
+def _spool(kind, payload):
+    """Persist a dropped write so a DB outage becomes a delay, not a hole."""
+    try:
+        with _spool_lock:
+            if (os.path.exists(DB_SPOOL_PATH)
+                    and os.path.getsize(DB_SPOOL_PATH) > DB_SPOOL_MAX_BYTES):
+                return  # lose a row rather than fill the disk
+            with open(DB_SPOOL_PATH, "a") as fh:
+                fh.write(json.dumps({"kind": kind, "payload": payload}) + "\n")
+    except Exception:
+        pass
+
+
+def _replay_spool(outage_since):
+    """Drain the spool through one transaction, then record the outage itself
+    so the event feed shows the gap boundaries."""
+    global _replaying
+    try:
+        rows = []
+        try:
+            with open(DB_SPOOL_PATH) as fh:
+                rows = [json.loads(l) for l in fh if l.strip()]
+        except FileNotFoundError:
+            rows = []
+        replayed = False
+        if rows:
+            try:
+                with _conn() as conn:
+                    if conn is not None:
+                        with conn.cursor() as cur:
+                            for r in rows:
+                                _spool_insert(cur, r["kind"], r["payload"])
+                        replayed = True  # only set once commit() succeeds
+            except Exception as e:
+                print(f"⚠️  db.py: spool replay failed ({e}) — kept on disk "
+                      f"for next retry", flush=True)
+        if replayed:
+            try:
+                os.unlink(DB_SPOOL_PATH)
+            except OSError:
+                pass
+            print(f"🗄️  db.py: replayed {len(rows)} spooled writes", flush=True)
+            try:
+                secs = (round(time.time() - outage_since)
+                        if outage_since else None)
+                insert_event("db_outage", {
+                    "message": f"Postgres outage — {len(rows)} writes "
+                               f"spooled and replayed"
+                               + (f" after {secs}s" if secs else ""),
+                    "outage_seconds": secs,
+                    "spooled_writes": len(rows),
+                })
+            except Exception:
+                pass
+    finally:
+        _replaying = False
+
+
+def _spool_insert(cur, kind, payload):
+    if kind == "event":
+        cur.execute(
+            "INSERT INTO events (event_type, data) VALUES (%s, %s)",
+            (payload["event_type"], json.dumps(payload["data"])))
+    elif kind == "metric":
+        cur.execute(
+            """INSERT INTO container_metrics (service_id, host, mem_usage_mb, mem_percent)
+               VALUES (%s, %s, %s, %s)""",
+            (payload["service_id"], payload["host"],
+             payload["mem_usage_mb"], payload["mem_percent"]))
+    elif kind == "client_error":
+        cur.execute(
+            """INSERT INTO client_errors
+               (message, stack, source_url, page_url, line, col, user_agent, received_at)
+               VALUES (%(message)s, %(stack)s, %(source_url)s, %(page_url)s,
+                       %(line)s, %(col)s, %(user_agent)s, %(received_at)s)""",
+            payload["data"])
 
 
 def _get_pool():
@@ -57,6 +199,7 @@ def _get_pool():
         _warn_once("psycopg2 not installed")
         return None
     if not DATABASE_URL:
+        _mark_down("DATABASE_URL not configured")
         return None
     if _pool is not None:
         return _pool
@@ -74,7 +217,7 @@ def _get_pool():
                     options=f"-c statement_timeout={DB_STATEMENT_TIMEOUT_MS}",
                 )
             except Exception as e:
-                _warn_once(f"could not connect to Postgres ({e})")
+                _mark_down(f"could not connect to Postgres ({e})")
                 return None
     return _pool
 
@@ -93,18 +236,30 @@ def _conn():
         try:
             conn = pool.getconn()
             break
-        except psycopg2.pool.PoolError:
+        except psycopg2.pool.PoolError as e:
             if attempt == 3:
+                _mark_down(f"pool exhausted ({e})")
                 raise
             time.sleep(0.25 * (attempt + 1))
+    failed = False
     try:
         yield conn
         conn.commit()
-    except Exception:
-        conn.rollback()
+        _mark_up()
+        if not _replaying and os.path.exists(DB_SPOOL_PATH):
+            _mark_up_replay()
+    except Exception as e:
+        failed = True
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        _mark_down(e)
         raise
     finally:
-        pool.putconn(conn)
+        # A conn that just failed is not returned to the pool — handing a dead
+        # socket back in is how one outage turns into permanent failure.
+        pool.putconn(conn, close=failed or conn.closed != 0)
 
 
 SCHEMA = """
@@ -290,16 +445,21 @@ def load_registry_snapshot():
 
 
 def insert_event(event_type, data):
-    with _conn() as conn:
-        if conn is None:
-            return
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO events (event_type, data) VALUES (%s, %s) RETURNING id, created_at",
-                (event_type, json.dumps(data)),
-            )
-            row = cur.fetchone()
-            return {"id": row[0], "created_at": row[1].isoformat(), "type": event_type, **data}
+    try:
+        with _conn() as conn:
+            if conn is None:
+                _spool("event", {"event_type": event_type, "data": data})
+                return
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO events (event_type, data) VALUES (%s, %s) RETURNING id, created_at",
+                    (event_type, json.dumps(data)),
+                )
+                row = cur.fetchone()
+                return {"id": row[0], "created_at": row[1].isoformat(), "type": event_type, **data}
+    except Exception:
+        _spool("event", {"event_type": event_type, "data": data})
+        return None
 
 
 def list_events(limit=200):
@@ -323,15 +483,23 @@ def insert_container_metric(service_id, host, mem_usage_mb, mem_percent):
     OUTSIDE the in-memory registry lock. Never let a slow/unavailable DB
     block a heartbeat -- see the tailnet-round-trip incident documented on
     save_registry_snapshot() above."""
-    with _conn() as conn:
-        if conn is None:
-            return
-        with conn.cursor() as cur:
-            cur.execute(
-                """INSERT INTO container_metrics (service_id, host, mem_usage_mb, mem_percent)
-                   VALUES (%s, %s, %s, %s)""",
-                (service_id, host, mem_usage_mb, mem_percent),
-            )
+    try:
+        with _conn() as conn:
+            if conn is None:
+                _spool("metric", {"service_id": service_id, "host": host,
+                                  "mem_usage_mb": mem_usage_mb,
+                                  "mem_percent": mem_percent})
+                return
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO container_metrics (service_id, host, mem_usage_mb, mem_percent)
+                       VALUES (%s, %s, %s, %s)""",
+                    (service_id, host, mem_usage_mb, mem_percent),
+                )
+    except Exception:
+        _spool("metric", {"service_id": service_id, "host": host,
+                          "mem_usage_mb": mem_usage_mb,
+                          "mem_percent": mem_percent})
 
 
 def metrics_summary(since, until):
@@ -579,17 +747,21 @@ def latest_run_per_unit(label):
 
 
 def insert_client_error(entry):
-    with _conn() as conn:
-        if conn is None:
-            return
-        with conn.cursor() as cur:
-            cur.execute(
-                """INSERT INTO client_errors
-                   (message, stack, source_url, page_url, line, col, user_agent, received_at)
-                   VALUES (%(message)s, %(stack)s, %(source_url)s, %(page_url)s,
-                           %(line)s, %(col)s, %(user_agent)s, %(received_at)s)""",
-                entry,
-            )
+    try:
+        with _conn() as conn:
+            if conn is None:
+                _spool("client_error", {"data": entry})
+                return
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO client_errors
+                       (message, stack, source_url, page_url, line, col, user_agent, received_at)
+                       VALUES (%(message)s, %(stack)s, %(source_url)s, %(page_url)s,
+                               %(line)s, %(col)s, %(user_agent)s, %(received_at)s)""",
+                    entry,
+                )
+    except Exception:
+        _spool("client_error", {"data": entry})
 
 
 def list_client_errors(limit=300):

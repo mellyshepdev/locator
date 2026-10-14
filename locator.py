@@ -679,40 +679,6 @@ prestage_lock = threading.Lock()
 
 # Battery alert state — keyed by svc_id, tracks re-alert-while-low/cleared-on-recovery.
 battery_alert_state: dict = {}
-
-# Pressure-event notification dedup. lokey files oom_kill / mem_spike /
-# node_mem_spike into the events table every metrics tick while a unit sits
-# hot — one broadcast per unit+type(+service) per cooldown keeps a spike
-# audible without paging every 30s. unit2's OOM (2026-10-14) was recorded
-# but never announced; this is the announcement half.
-pressure_alert_state: dict = {}
-PRESSURE_REALERT_SECONDS = int(os.environ.get("PRESSURE_REALERT_SECONDS", "900"))
-
-
-def _notify_pressure_event(node_id, ev):
-    etype = ev.get("type", "")
-    if etype not in ("oom_kill", "mem_spike", "node_mem_spike"):
-        return
-    key = f"{node_id}:{etype}:{ev.get('service', '')}"
-    now = datetime.now(timezone.utc)
-    last = pressure_alert_state.get(key)
-    if last and (now - datetime.fromisoformat(last)).total_seconds() < PRESSURE_REALERT_SECONDS:
-        return
-    pressure_alert_state[key] = now.isoformat()
-    if etype == "oom_kill":
-        text = (f"💀 OOM KILL: `{ev.get('service')}` on *{node_id}* was "
-                f"OOM-killed (restarts: {ev.get('restart_count')})")
-    elif etype == "mem_spike":
-        text = (f"📈 MEM SPIKE: `{ev.get('service')}` on *{node_id}* "
-                f"{ev.get('from_pct')}% → {ev.get('to_pct')}% (+{ev.get('delta_pp')}pp)")
-    else:
-        text = (f"🔥 NODE MEM SPIKE: *{node_id}* memory "
-                f"{ev.get('from_pct')}% → {ev.get('to_pct')}% (+{ev.get('delta_pp')}pp)")
-    try:
-        notifier.notify_all(text, urgent=(etype != "mem_spike"))
-    except Exception as e:
-        print(f"⚠️  pressure-event notify failed: {e}")
-
 battery_alert_lock = threading.Lock()
 BATTERY_ALERT_THRESHOLD  = float(os.environ.get("BATTERY_ALERT_THRESHOLD", "30"))
 BATTERY_REALERT_INTERVAL = int(os.environ.get("BATTERY_REALERT_INTERVAL", "1800"))  # seconds
@@ -3031,6 +2997,10 @@ def health_check():
         "services_online": online_count,
         "nodes_known": node_count,
         "heartbeat_timeout_seconds": HEARTBEAT_TIMEOUT,
+        # Postgres health surfaced here so a dead DATABASE_URL shows up in
+        # /health instead of silently dropping writes for weeks (Sep 26 →
+        # Oct 14 outage went unnoticed because the layer failed open quietly).
+        "database": db.db_status(),
         "timestamp": datetime.now(timezone.utc).isoformat()
     })
 
@@ -3547,7 +3517,7 @@ def trigger_deploy_final():
 
 # ── METRICS & MIGRATION ENDPOINTS ───────────────────────────────────────────
 
-@app.route("/nodes/<node_id>/metrics", methods=["PATCH", "POST"])
+@app.route("/nodes/<node_id>/metrics", methods=["PATCH"])
 def update_node_metrics(node_id):
     """
     Agent-side push: merge live CPU/memory readings into an existing node entry
@@ -3612,7 +3582,6 @@ def update_node_metrics(node_id):
                             {**ev, "unit": node_id})
         except Exception as e:
             print(f"⚠️  failed to record pressure event from {node_id}: {e}")
-        _notify_pressure_event(node_id, ev)
 
     return jsonify({"result": "metrics_updated", "node": node_id})
 
@@ -4827,21 +4796,10 @@ def heartbeat_reaper():
                     record_event("node_agent_down",
                                  f"{node_id} is up but its agent is not reporting — {reason}",
                                  unit=node_id)
-                    try:
-                        notifier.notify_all(
-                            f"⚠️ AGENT DOWN: *{node_id}* is up but lokey stopped reporting — {reason}",
-                            urgent=False)
-                    except Exception:
-                        pass
                 else:
                     print(f"💀 NODE OFFLINE: {node_id} ({reason})")
                     record_event("node_offline", f"{node_id} is offline — {reason}",
                                  unit=node_id)
-                    try:
-                        notifier.notify_all(
-                            f"💀 NODE OFFLINE: *{node_id}* — {reason}", urgent=True)
-                    except Exception:
-                        pass
 
         if changed:
             persist_registry()
