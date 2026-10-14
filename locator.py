@@ -3547,7 +3547,7 @@ def trigger_deploy_final():
 
 # ── METRICS & MIGRATION ENDPOINTS ───────────────────────────────────────────
 
-@app.route("/nodes/<node_id>/metrics", methods=["PATCH"])
+@app.route("/nodes/<node_id>/metrics", methods=["PATCH", "POST"])
 def update_node_metrics(node_id):
     """
     Agent-side push: merge live CPU/memory readings into an existing node entry
