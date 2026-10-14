@@ -5112,15 +5112,30 @@ def _ensure_git_checkout(host_dir):
     never update. Bootstrap it in place: init + origin + fetch + reset, so
     the tree becomes the repo's content and pulls work from here on.
     Local-only modifications are discarded — nothing else manages this dir."""
-    chk = subprocess.run(["git", "-C", host_dir, "rev-parse", "--git-dir"],
-                         capture_output=True, text=True)
-    if chk.returncode == 0:
+    has_git = subprocess.run(
+        ["git", "-C", host_dir, "rev-parse", "--git-dir"],
+        capture_output=True, text=True).returncode == 0
+    has_head = has_git and subprocess.run(
+        ["git", "-C", host_dir, "rev-parse", "--verify", "HEAD"],
+        capture_output=True, text=True).returncode == 0
+    if has_git and has_head:
         return True
-    print(f"[{UNIT_NAME}] self_update: {host_dir} is not a git checkout — "
-          f"bootstrapping repo in place", flush=True)
+    # A previous attempt that died at fetch leaves .git with no HEAD — same
+    # fix path as no .git at all. init/set-url are idempotent over it.
+    print(f"[{UNIT_NAME}] self_update: {host_dir} is not a usable git checkout "
+          f"(git={has_git} head={has_head}) — bootstrapping in place", flush=True)
+    if not has_git:
+        r = _git(host_dir, "init", "-b", "main", timeout=30)
+        if r.returncode != 0:
+            print(f"[{UNIT_NAME}] self_update: bootstrap 'init' failed: "
+                  f"{r.stderr.strip()[:200]}", flush=True)
+            return False
+    if subprocess.run(["git", "-C", host_dir, "remote", "get-url", "origin"],
+                      capture_output=True, text=True).returncode != 0:
+        _git(host_dir, "remote", "add", "origin", LOKEY_GIT_REMOTE, timeout=30)
+    else:
+        _git(host_dir, "remote", "set-url", "origin", LOKEY_GIT_REMOTE, timeout=30)
     steps = [
-        (["init", "-b", "main"], 30),
-        (["remote", "add", "origin", LOKEY_GIT_REMOTE], 30),
         (["fetch", "origin", "main"], 180),
         (["reset", "--hard", "origin/main"], 60),
     ]
