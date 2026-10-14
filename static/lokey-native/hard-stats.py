@@ -3825,6 +3825,45 @@ GIT_AUTHOR_NAME = os.getenv("GIT_AUTHOR_NAME", "lokey")
 GIT_AUTHOR_EMAIL = os.getenv("GIT_AUTHOR_EMAIL", f"lokey@{UNIT_NAME}.fleet.blacksheep")
 
 
+GIT_TOKEN_REF = "bao://secret/compose/git-token#GIT_TOKEN"
+_git_token_seeded = False
+
+
+def _seed_git_token(token):
+    """Publish a working git token under one canonical ref so a bare install
+    (plain-dir checkout, no .git-credentials — unit2 shipped this way) can
+    pull it back through the admin-keyed resolve. First unit with a token
+    seeds it; everyone else benefits."""
+    global _git_token_seeded
+    if _git_token_seeded or not LOCATOR_ADMIN_KEY:
+        return
+    try:
+        r = requests.post(f"{LOCATOR_URL}/api/secrets/ingest", headers={
+            "Host": LOCATOR_HOST_HEADER,
+            "X-Locator-Admin-Key": LOCATOR_ADMIN_KEY},
+            json={"unit": UNIT_NAME, "source": "git-token",
+                  "path": "lokey canonical", "content": f"GIT_TOKEN={token}\n"},
+            timeout=60, verify=False)
+        if r.status_code == 200 and r.json().get("verified") is True:
+            _git_token_seeded = True
+            print(f"[{UNIT_NAME}] git-token: seeded {GIT_TOKEN_REF}", flush=True)
+    except Exception:
+        pass
+
+
+def _canonical_git_token():
+    """Resolve the seeded GIT_TOKEN_REF through the locator. Retried each
+    call — no negative caching, a locator restart must not freeze this."""
+    if not LOCATOR_ADMIN_KEY:
+        return ""
+    try:
+        from bao_env import fetch as _bao_fetch
+        return _bao_fetch([GIT_TOKEN_REF], LOCATOR_URL, LOCATOR_HOST_HEADER,
+                          LOCATOR_ADMIN_KEY).get(GIT_TOKEN_REF, "")
+    except Exception:
+        return ""
+
+
 def _git_token():
     """Reuse the token already embedded in lokey's own remote URL.
 
@@ -3847,6 +3886,8 @@ def _git_token():
                 _git_token_cache = match.group(1) if match else ""
             except Exception:
                 _git_token_cache = ""
+        if _git_token_cache:
+            _seed_git_token(_git_token_cache)
     if not _git_token_cache:
         # scrub_git_tokens() has moved the token out of the URL and left a
         # bao:// reference in lokey's own .git/config instead. Not cached
@@ -3855,7 +3896,11 @@ def _git_token():
         # set to "" that branch never runs again, and without this every pull
         # after the first fell back to bare git — "could not read Username"
         # on every credential-less remote, forever.
-        return _repo_token(_host_dir(LOKEY_PROJECT_DIR)) or ""
+        tok = _repo_token(_host_dir(LOKEY_PROJECT_DIR))
+        if tok:
+            _seed_git_token(tok)
+            return tok
+        return _canonical_git_token() or ""
     return _git_token_cache
 
 
@@ -5085,6 +5130,11 @@ def _ensure_git_checkout(host_dir):
             print(f"[{UNIT_NAME}] self_update: bootstrap '{' '.join(args)}' "
                   f"failed: {r.stderr.strip()[:200]}", flush=True)
             return False
+    # Point the fresh checkout at the canonical token ref — same contract
+    # scrub_git_tokens() leaves behind, so _repo_token() resolves it.
+    _git(host_dir, "config", "--local", "lokey.tokenref", GIT_TOKEN_REF)
+    print(f"[{UNIT_NAME}] self_update: {host_dir} bootstrapped to origin/main",
+          flush=True)
     return True
 
 
