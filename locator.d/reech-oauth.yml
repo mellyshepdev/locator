@@ -5,7 +5,7 @@ Service:
   reech-oauth:
     deployment_type: essential
     location_type: stationary
-    units: "2"
+    units: "4"   # runs on unit4 (unit2 was its old home; restart_when_stopped must point here)
     instances: 1
     idle_stop: false
     restart_when_stopped: true
