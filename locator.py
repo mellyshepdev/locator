@@ -5963,7 +5963,14 @@ def duplicate_killer():
                 labels = ctr.labels or {}
                 project = labels.get("com.docker.compose.project")
                 service = labels.get("com.docker.compose.service")
-                group_key = f"compose:{project}/{service}" if project and service else f"image:{image_key}"
+                if not (project and service):
+                    # No compose labels: nothing says two of these are the same
+                    # service. Same-image grouping stopped pg-relay-tailnet
+                    # (Keycloak's DB relay - every login broke) and then
+                    # pgdb-18.3-tailnet on 2026-10-17: distinct relays that
+                    # merely share alpine/socat. Leave docker-run containers alone.
+                    continue
+                group_key = f"compose:{project}/{service}"
                 by_image.setdefault(group_key, []).append(ctr)
 
             for image_key, ctrs in by_image.items():
