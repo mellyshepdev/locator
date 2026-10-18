@@ -152,6 +152,22 @@ def _api(path, method="GET", body=None):
         raise
 
 
+def _user_id() -> str:
+    # The service-account user UUID, decoded from its own access token.
+    # vaultwarden requires encryptedFor as a string in CipherData (the
+    # key-rotation owner). Deriving it from the JWT sub claim keeps this
+    # correct across account reissues.
+    if not _state.get("user_id"):
+        try:
+            payload = _state["access_token"].split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            _state["user_id"] = json.loads(
+                base64.urlsafe_b64decode(payload))["sub"]
+        except Exception:
+            _state["user_id"] = ""
+    return _state["user_id"]
+
+
 def _sig(fields: dict) -> str:
     """Content signature: the sorted key/value pairs. Two notes with the same
     fields ARE the same credential however they were named — the fleet files
@@ -231,6 +247,10 @@ def mirror(name: str, fields: dict, notes: str = "") -> bool:
                 "favorite": False,
                 "folderId": None,
                 "organizationId": None,
+                # Newer vaultwarden CipherData requires this field (key-rotation
+                # "encrypted for" user id). Omitting it made every POST/PUT
+                # 422 for the missing field. Null = no rotation owner.
+                "encryptedFor": _user_id(),
                 "secureNote": {"type": 0},
                 "fields": fields_js,
                 "reprompt": 0,

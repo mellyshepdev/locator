@@ -308,6 +308,13 @@ LOCATOR_CANONICAL_URL = os.environ.get("LOCATOR_CANONICAL_URL", "https://locator
 TELEMETRY_URL     = os.environ.get("TELEMETRY_URL", "http://beast-telemetry:8087")
 ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL", "")
 LOCATOR_IS_PRIMARY    = os.environ.get("LOCATOR_IS_PRIMARY", "true").lower() == "true"
+# Whole-registry Postgres snapshots are debounced to this interval (seconds).
+# save_registry_snapshot() upserts EVERY node+service row in one transaction;
+# called per-heartbeat it hot-row-churns the nodes table and per-heartbeat
+# upserts pile up behind it until statement_timeout cancels them (the
+# 2026-10-18 "Failed to persist registry" / /api/secrets 502 storm).
+DB_SNAPSHOT_MIN_INTERVAL = float(os.environ.get("DB_SNAPSHOT_MIN_INTERVAL", "30"))
+_last_db_snapshot = 0.0
 SELF_CONTAINER_NAME   = os.environ.get("SELF_CONTAINER_NAME", "locator")
 
 _STARTED_AT = datetime.now(timezone.utc)  # used by dedup election to find the oldest instance
@@ -4495,9 +4502,15 @@ def secure_the_bag(commit_message="Auto-commit: Securing data before container o
         print(f"⚠️ Git backup skipped/failed: {e}")
 
 
-def persist_registry():
+def persist_registry(db_now=False):
     """Write the current registry to disk for file-based consumers, and
-    snapshot it into Postgres (unit3) if DATABASE_URL is configured."""
+    snapshot it into Postgres (unit3) if DATABASE_URL is configured.
+
+    db_now forces the Postgres half immediately. Without it the snapshot is
+    debounced to DB_SNAPSHOT_MIN_INTERVAL: the file write above is the live
+    source and stays immediate every call, while Postgres is only the
+    restart replica and tolerates lag. Callers run at heartbeat rate, so
+    without the gate the bulk upsert churns the nodes table nonstop."""
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         filepath = os.path.join(DATA_DIR, "registry.json")
@@ -4512,7 +4525,10 @@ def persist_registry():
         return
 
     try:
-        db.save_registry_snapshot(registry_copy)
+        global _last_db_snapshot
+        if db_now or (time.monotonic() - _last_db_snapshot) >= DB_SNAPSHOT_MIN_INTERVAL:
+            db.save_registry_snapshot(registry_copy)
+            _last_db_snapshot = time.monotonic()
     except Exception as e:
         print(f"⚠️  Failed to persist registry to Postgres: {e}")
 
@@ -9229,7 +9245,7 @@ def main():
 
     db.init_schema()
     load_seed()
-    persist_registry()
+    persist_registry(db_now=True)
     load_schedule()
     load_cert_state()
 
@@ -9252,7 +9268,7 @@ else:
         # could not have worked on any gunicorn deployment.
         db.init_schema()
         load_seed()
-        persist_registry()
+        persist_registry(db_now=True)
         load_schedule()
         load_cert_state()
         start_background_workers()

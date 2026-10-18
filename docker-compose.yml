@@ -27,6 +27,7 @@ services:
       # editable mounts above; falls back to baked copies if ever unmounted.
       - ./locator.py:/app/locator.py
       - ./bao.py:/app/bao.py
+      - ./vaultwarden.py:/app/vaultwarden.py
       - ./static:/app/static
       # Fleet refresh phases. Locator sends these to each lokey; no unit keeps
       # a copy of refresh on disk any more.
@@ -91,7 +92,12 @@ services:
       - GIT_AUTO_PUSH=true
       - GIT_REMOTE=${GIT_REMOTE:-}
       - PYTHONUNBUFFERED=1
-      - LOCATOR_IS_PRIMARY=false
+      - LOCATOR_IS_PRIMARY=true
+      # Postgres per-statement budget in ms (db.py sets it via connect options).
+      # Default 15s was cancelling writers queued behind save_registry_snapshot
+      # bulk upserts on the hot nodes rows -> Failed to persist registry -> 502s
+      # on /api/secrets/*. 60s rides out a pileup instead of dropping the write.
+      - DB_STATEMENT_TIMEOUT_MS=60000
       - SELF_CONTAINER_NAME=locator
       # No BAO_ADDR: bao.py finds OpenBao through the registry (lokey reports
       # it every heartbeat). Set BAO_ADDR only as an emergency override.
@@ -116,7 +122,7 @@ services:
       # and anti-flap bypassed) instead of waiting for strikes while the disk
       # fills. lokey's janitor escalates to image-prune -a at 93.
       - DISK_CRIT_PERCENT=92
-      - LOCATOR_CANONICAL_URL=https://locator.network
+      - LOCATOR_CANONICAL_URL=https://locator.prime-quality.online
       # Traccar runs on unit9 as a systemd service on :8082. Nothing has served
       # 80/443 there since its Caddy went away, so the default host
       # (traccar.theofficialblacksheepco.online) resolves to a machine with no
