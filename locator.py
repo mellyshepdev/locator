@@ -2918,6 +2918,46 @@ def glances_summary():
     return jsonify({"units": results})
 
 
+# Hop-by-hop / re-encoded headers that must not be copied off the upstream.
+_GLANCES_DROP_HEADERS = {"content-encoding", "content-length", "transfer-encoding", "connection"}
+
+
+@app.route("/glances/<unit>/", defaults={"sub": ""}, methods=["GET", "POST"])
+@app.route("/glances/<unit>/<path:sub>", methods=["GET", "POST"])
+def glances_proxy(unit, sub):
+    """One unit's full Glances web UI, proxied over the tailnet.
+
+    The unit popup and the Glances tab's FULL VIEW link here. Each unit serves
+    `glances -w` on its tailnet IP :61208; the Glances page uses relative
+    asset and API paths, so passing /glances/<unit>/<sub> straight through
+    works without rewriting. Replaces the glances-unitN.* edge hostnames,
+    which never had DNS records. The target IP comes only from the registry.
+    """
+    unit = unit.lower()
+    if not re.fullmatch(r"unit\d+", unit):
+        return jsonify({"error": "not a unit"}), 404
+    with lock:
+        info = next((v for k, v in registry["nodes"].items() if str(k).lower() == unit), None)
+    ip = str((info or {}).get("tailscale_ip") or "").split(",")[0].strip()
+    if not ip:
+        return jsonify({"error": f"{unit} has no tailnet IP in the registry"}), 404
+    try:
+        upstream = requests.request(
+            request.method, f"http://{ip}:61208/{sub}",
+            params=request.args,
+            data=request.get_data() if request.method == "POST" else None,
+            headers={"Content-Type": request.headers["Content-Type"]} if "Content-Type" in request.headers else None,
+            timeout=10, stream=True,
+        )
+    except requests.RequestException as e:
+        return Response(
+            f"<h3>Glances on {unit} is unreachable</h3><p>{ip}:61208 — {str(e)[:200]}</p>",
+            status=502, mimetype="text/html",
+        )
+    headers = [(k, v) for k, v in upstream.raw.headers.items() if k.lower() not in _GLANCES_DROP_HEADERS]
+    return Response(upstream.iter_content(65536), status=upstream.status_code, headers=headers)
+
+
 @app.route("/api/metrics/history", methods=["GET"])
 def metrics_history():
     """Ordered raw RAM samples for one container, for the history chart."""

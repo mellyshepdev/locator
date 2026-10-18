@@ -277,6 +277,8 @@ ROUTE_CLEARANCE = {
     # Combined per-unit vitals for the Glances tab — read-only summary of the
     # same node health the grid already shows; matches VIEW_CLEARANCE level.
     "glances_summary":       CLIENT,
+    # Full per-unit Glances UI proxied over the tailnet (unit popup link).
+    "glances_proxy":         CLIENT,
     "list_migrations":       PARTNER,
     # Fleet refresh — status/history read like the other operational telemetry;
     # triggering one redeploys across the fleet, so that sits with the deploys.

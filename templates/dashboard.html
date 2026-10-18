@@ -1635,7 +1635,7 @@
         // ── GLANCES COMBINED VIEW ──
         // /api/glances fans out to each unit's glances -w REST API over the
         // tailnet (locator.py). Cards show quicklook vitals + link to the
-        // unit's full glances-unitN.* UI (edge basicAuth).
+        // unit's full glances UI via Locator's /glances/<unit>/ proxy.
         let _glancesTimer = null;
 
         function loadGlances() {
@@ -1682,7 +1682,7 @@
                 return `<div style="border:1px solid ${up ? 'var(--neon-green)' : 'var(--danger)'};background:rgba(0,0,0,0.6);padding:14px 16px;border-radius:4px;box-shadow:0 0 12px ${up ? 'rgba(0,255,65,0.15)' : 'rgba(255,0,60,0.15)'};">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
                         <span style="color:${up ? 'var(--neon-green)' : '#ff4444'};font-weight:bold;letter-spacing:2px;text-transform:uppercase;">${u.unit}</span>
-                        <a href="https://glances-${u.unit}.theofficialblacksheepco.com" target="_blank" rel="noopener" style="color:var(--accent);font-size:11px;text-decoration:none;letter-spacing:1px;" title="full glances UI (basic-auth login)">FULL VIEW ↗</a>
+                        <a href="/glances/${u.unit}/" target="_blank" rel="noopener" style="color:var(--accent);font-size:11px;text-decoration:none;letter-spacing:1px;" title="full glances UI, proxied by Locator">FULL VIEW ↗</a>
                     </div>
                     ${up ? `
                     <div style="font-size:11px;color:rgba(255,255,255,0.6);margin-bottom:6px;">${host}${os ? ' · ' + os : ''}</div>
@@ -3942,10 +3942,10 @@
             }
 
             // Glances live view — unitN nodes get a link to that unit's
-            // public glances-web UI (glances-<unit>.theofficialblacksheepco.com,
-            // basicAuth-gated at the edge; the unit serves `glances -w` bound
-            // to its own tailnet IP via glances-web.service). Devices never
-            // match /^unit\d+$/ so the link only shows on real units.
+            // glances web UI, proxied by Locator at /glances/<unit>/ (the unit
+            // serves `glances -w` bound to its own tailnet IP via
+            // glances-web.service). Devices never match /^unit\d+$/ so the
+            // link only shows on real units.
             const _unitName = (item.id || item.name || '').toLowerCase();
             if (/^unit\d+$/.test(_unitName)) {
                 const sep = document.createElement('tr');
@@ -3956,12 +3956,12 @@
                 tdLabel.innerText = 'Glances';
                 const tdVal = document.createElement('td');
                 const a = document.createElement('a');
-                a.href = `https://glances-${_unitName}.theofficialblacksheepco.com`;
+                a.href = `/glances/${_unitName}/`;
                 a.target = '_blank';
                 a.rel = 'noopener';
                 a.innerText = 'open live view ↗';
                 a.style.color = 'var(--accent)';
-                a.title = `glances -w on ${_unitName} (tailnet-bound, edge-published; asks for the glances basic-auth login)`;
+                a.title = `glances -w on ${_unitName}, proxied over the tailnet by Locator`;
                 tdVal.appendChild(a);
                 tr.appendChild(tdLabel);
                 tr.appendChild(tdVal);
