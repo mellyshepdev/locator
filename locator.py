@@ -6825,6 +6825,13 @@ def secrets_unit_resolve():
         for ref in refs:
             out[ref] = bao.resolve_ref(ref)
     except bao.BaoError as e:
+        # A ref whose field was never vaulted is a permanent dead ref — callers
+        # (lokey secrets env, autosave) fail all-or-nothing on it forever.
+        # Surface it as a secrets event so the ops board sees it instead of a
+        # bare 502 no one reads.
+        _ingest_log(f"{scope}: dead ref — {e}")
+        emit_event("secrets", action="dead_ref", unit=scope, error=str(e),
+                   refs=sorted(r for r in refs if str(r) in str(e)))
         return jsonify({"error": str(e)}), 502
     return jsonify({"resolved": out, "count": len(out)})
 
