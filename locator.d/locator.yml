@@ -26,6 +26,22 @@ Service:
 
   locator:
     deployment_type: essential
-    location_type: stationary
-    units: "7"
+    # Self-evacuates EARLY by design (2026-10-18): was stationary, which meant a
+    # unit climbing toward disk/RAM exhaustion drained everything else while the
+    # locator itself froze in place — by then the box is too loaded to hand off
+    # cleanly. Mobile + first-priority so the balancer moves the command plane
+    # while the host can still execute.
+    # Make-before-break: enforce_unit_placement stands the standby up first and
+    # _self_election only stops the loser after the winner serves. See the
+    # election code for the metrics/serving hold-guards.
+    location_type: mobile
+    # Legal homes — units that can actually carry it (unit9 1GB excluded;
+    # unit3/6 are desktop/edge units without the docker+pg footprint).
+    units: "2_4_7_8"
     instances: 1
+    project_dir: /home/swoopg111/projects/locator
+    git_remote: https://github.com/mellyshepdev/locator.git
+    # KNOWN LIMIT: the DB is unit4-local. A migrated locator needs DATABASE_URL
+    # pointing at a tailnet-reachable Postgres (pg-relay-tailnet :5433), not the
+    # docker-local pgdb2-18.3 name — provide locator-db.env on the target or the
+    # migrated instance starts stateless until the DB link is sorted.
