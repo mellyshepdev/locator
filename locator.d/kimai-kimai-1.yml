@@ -7,7 +7,7 @@ Service:
   # or delete this file to return to implicit defaults.
   kimai-kimai-1:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "11"
     instances: 1
     idle_stop: false

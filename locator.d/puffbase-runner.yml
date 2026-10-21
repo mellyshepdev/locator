@@ -8,6 +8,6 @@ Service:
   # /home/swoopg111/server/puffbase and it will be placed.
   puffbase-runner:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     instances: 1
     idle_stop: false

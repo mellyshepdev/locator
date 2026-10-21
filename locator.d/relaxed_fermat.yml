@@ -7,7 +7,7 @@ Service:
   # or delete this file to return to implicit defaults.
   relaxed_fermat:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "7"
     instances: 1
     idle_stop: false

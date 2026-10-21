@@ -14,7 +14,7 @@ Service:
   # wake_with. edge_port is the dashboard's tailnet publish port.
   live-logger:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "7"
     instances: 1
     idle_stop: true

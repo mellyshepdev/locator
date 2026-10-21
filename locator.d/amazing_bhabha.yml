@@ -7,6 +7,6 @@ Service:
   # or delete this file to return to implicit defaults.
   amazing_bhabha:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     instances: 1
     idle_stop: false

@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-10-21T06:46:10.864682+00:00 —
+  # 'proxmox-oauth2-proxy' registered on unit4 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  proxmox-oauth2-proxy:
+    deployment_type: optional
+    location_type: mobile
+    units: "4"
+    instances: 1
+    idle_stop: false

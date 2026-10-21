@@ -7,7 +7,7 @@ Service:
   # or delete this file to return to implicit defaults.
   site-chat:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "4"
     edge_port: 8220
     instances: 1

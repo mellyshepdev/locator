@@ -5,6 +5,6 @@ Service:
   # the substring match against `puffbase`'s policy can never deploy-loop it.
   puffbase-gitea:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     instances: 1
     idle_stop: false

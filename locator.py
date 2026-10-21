@@ -175,6 +175,7 @@ BALANCE_LOW      = float(os.environ.get("BALANCE_LOW",  "30"))   # % — node is
 BALANCE_INTERVAL = int(os.environ.get("BALANCE_INTERVAL", "120"))  # seconds between balance checks
 BALANCE_COOLDOWN = int(os.environ.get("BALANCE_COOLDOWN", "300"))  # seconds before re-migrating from same node
 BALANCE_DIFF     = float(os.environ.get("BALANCE_DIFF", "25"))     # % spread between busiest/least busy to trigger balance
+BALANCE_SPREAD_TARGET = float(os.environ.get("BALANCE_SPREAD_TARGET", "30"))  # % max-min gap that forces immediate action (bypasses anti-flap)
 BALANCE_STRIKES  = int(os.environ.get("BALANCE_STRIKES", "1"))      # consecutive overloaded checks before migrating
 OOM_THRESHOLD    = float(os.environ.get("OOM_THRESHOLD", "80"))     # % mem — emergency migration, bypasses anti-flap/cooldown
 DISK_CRIT_PERCENT = float(os.environ.get("DISK_CRIT_PERCENT", "95")) # % disk — same emergency treatment; a full disk crashes the whole unit
@@ -675,6 +676,10 @@ node_last_migrated: dict = {}
 # every balance cycle and burn the node's one-migration-per-cooldown slot
 # forever. Stamped at both FAILED transitions.
 migration_failed_at: dict = {}
+# Containers the source agent marked as impossible to move (no compose project,
+# e.g. docker-run containers). Excluded from balance picks — retrying them was
+# the FAILED-every-30min churn seen in /api/migrations.
+unmigratable: set = set()
 # Anti-flap: how many consecutive balance checks a node has been overloaded
 overload_strikes: dict = {}
 
@@ -3816,6 +3821,9 @@ def complete_migration():
                 mig["completed_at"] = datetime.now(timezone.utc).isoformat()
                 if not success:
                     migration_failed_at[mig.get("container", "")] = datetime.now(timezone.utc)
+                    if data.get("unmigratable"):
+                        unmigratable.add(mig.get("container", ""))
+                        print(f"🚫 MIGRATION {mig_id}: '{mig.get('container')}' marked unmigratable ({data.get('error')}) — excluded from future balance picks")
                 print(f"{'✅' if success else '❌'} MIGRATION {mig_id}: {'DONE' if success else 'FAILED'}")
                 # A start-type failure leaves the source stopped — the same
                 # hole _verify_migration covers on timeout, but reached faster.
@@ -5669,6 +5677,10 @@ def load_balancer():
         # Differential trigger: if spread between busiest and least busy >= BALANCE_DIFF,
         # promote the busiest into overloaded and least busy into underloaded even if
         # neither crosses the absolute thresholds (e.g. 50% vs 1% = 49% spread).
+        # A gap >= BALANCE_SPREAD_TARGET is not a flap risk — it's a standing
+        # imbalance — so the busiest node bypasses strikes/cooldown like an
+        # OOM/disk emergency does.
+        spread_emergency = set()
         if all_nodes_load and not (overloaded and underloaded):
             all_nodes_load.sort(key=lambda x: x[1])
             least = all_nodes_load[0]
@@ -5678,6 +5690,9 @@ def load_balancer():
                     overloaded.append(busiest)
                 if least not in underloaded and _node_runs_containers(least[0], services_snap):
                     underloaded.append(least)
+                if busiest[1] - least[1] >= BALANCE_SPREAD_TARGET:
+                    spread_emergency.add(busiest[0])
+                    print(f"📐 BALANCE: spread {busiest[1]-least[1]:.1f}% ({busiest[0]} {busiest[1]:.1f}% vs {least[0]} {least[1]:.1f}%) exceeds {BALANCE_SPREAD_TARGET}% target — forcing action")
 
         if not overloaded:
             # Reset strikes for any node that's no longer overloaded
@@ -5718,11 +5733,14 @@ def load_balancer():
         for src_id, src_load, src_info in overloaded:
             is_oom = (src_info.get("mem_percent") or 0) >= OOM_THRESHOLD
             is_diskcrit = (src_info.get("disk_percent") or 0) >= DISK_CRIT_PERCENT
+            is_spread = src_id in spread_emergency
             if is_oom:
                 print(f"🚨 BALANCE: OOM emergency on {src_id} mem={src_info.get('mem_percent'):.1f}% — bypassing anti-flap/cooldown")
             elif is_diskcrit:
                 print(f"🚨 BALANCE: DISK emergency on {src_id} disk={src_info.get('disk_percent'):.1f}% — bypassing anti-flap/cooldown")
-            emergency = is_oom or is_diskcrit
+            elif is_spread:
+                print(f"📐 BALANCE: spread emergency on {src_id} — bypassing anti-flap/cooldown")
+            emergency = is_oom or is_diskcrit or is_spread
 
             # Cooldown check (skipped in OOM/disk emergency)
             last_mig = node_last_migrated.get(src_id)
@@ -5783,6 +5801,7 @@ def load_balancer():
                 # binds off the pool stay behind no matter what the image is.
                 and not _has_host_local_mounts(svc.get("name") or "")
                 and svc.get("name") not in in_flight
+                and svc.get("name") not in unmigratable
                 and (migration_failed_at.get(svc.get("name"))
                      or datetime.min.replace(tzinfo=timezone.utc)) < fail_cutoff
                 and not resolve_migration_order(svc_id, services_snap)[1]  # no missing deps

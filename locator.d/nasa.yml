@@ -9,7 +9,7 @@ Service:
   # A FAILED dedup migration no longer blocks the next one, so it relaunched
   # forever: 147 failures between 20:48 and 01:00.
   #
-  # Declaring both units is what actually stops it. location_type: stationary
+  # Declaring both units is what actually stops it. location_type: mobile
   # does NOT — _enforce_dedup only exempts via _PINNED_NAMES or
   # _is_multi_unit_service(), and the latter reads THIS field.
   #

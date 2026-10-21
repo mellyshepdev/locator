@@ -13,7 +13,7 @@ Service:
   # auto-revived by lokey keep_alive if it dies.
   puffbase:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "4"
     instances: 1
     idle_stop: false

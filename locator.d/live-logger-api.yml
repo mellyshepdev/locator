@@ -9,7 +9,7 @@ Service:
   # The dashboard is the thing that is safe to idle-stop, not this.
   live-logger-api:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "4"
     instances: 1
     idle_stop: false

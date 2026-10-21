@@ -7,7 +7,7 @@ Service:
   # or delete this file to return to implicit defaults.
   ser-ops:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "4"
     edge_port: 8137
     instances: 1

@@ -7,7 +7,7 @@ Service:
   # or delete this file to return to implicit defaults.
   gallant_sutherland:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "4"
     instances: 1
     idle_stop: false

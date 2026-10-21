@@ -7,7 +7,7 @@ Service:
   # or delete this file to return to implicit defaults.
   store:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "none"
     edge_host: apache
     edge_port: 8094

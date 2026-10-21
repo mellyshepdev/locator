@@ -18,7 +18,7 @@ Service:
   # can be reselected if those backends come back.
   agent-0:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "4"
     instances: 1
     # idle_stop is OFF deliberately (was: true/15m on unit7). The edge now

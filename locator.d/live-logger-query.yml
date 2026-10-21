@@ -12,7 +12,7 @@ Service:
   # looks perfectly healthy.
   live-logger-query:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "7"
     instances: 1
     idle_stop: false

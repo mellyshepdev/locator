@@ -5,7 +5,7 @@ Service:
   # unit8 because the edge reaches it by docker-network name, not tailnet.
   pgadmin_ui:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "8"
     instances: 1
     public_wake: true

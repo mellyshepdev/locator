@@ -2,7 +2,7 @@ Service:
 
   live-logger-container-names:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "4_8_9"
     instances: 1
     idle_stop: true

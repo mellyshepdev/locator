@@ -13,7 +13,7 @@ Service:
   # docker label `locator.idle.stop=true` — both sides are required.
   locator-ui:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "7"
     instances: 1
     idle_stop: true

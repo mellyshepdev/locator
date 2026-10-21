@@ -10,7 +10,7 @@ Service:
     # the host's tailnet Ollama port and unit7 is chronically overloaded, so
     # it stays put even when forge itself migrates (the @http upstream
     # resolves over the tailnet anyway).
-    location_type: stationary
+    location_type: mobile
     units: "2"
     instances: 1
     # Not idle-stopped: it has no wake trigger of its own, so letting it

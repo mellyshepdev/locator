@@ -5,7 +5,7 @@ Service:
   # because a search app with a stopped database answers 500, not "starting".
   searchsearcher-app:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "4"
     instances: 1
     # Publishes 100.123.158.58:8219:3000 — the apex /api/search router

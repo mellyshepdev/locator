@@ -1,7 +1,7 @@
 Service:
   wireshark:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "11"
     instances: 1
     idle_stop: false

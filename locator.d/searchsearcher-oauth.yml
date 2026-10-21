@@ -3,7 +3,7 @@ Service:
   # OAuth2 front door for searchsearcher on unit8 — exempt with the app.
   searchsearcher-oauth:
     deployment_type: optional
-    location_type: stationary
+    location_type: mobile
     units: "4"
     edge_port: 4180
     instances: 1
