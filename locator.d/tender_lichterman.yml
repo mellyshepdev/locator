@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-10-21T07:52:25.450541+00:00 —
+  # 'tender_lichterman' registered on unit4 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  tender_lichterman:
+    deployment_type: optional
+    location_type: stationary
+    units: "4"
+    instances: 1
+    idle_stop: false
