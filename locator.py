@@ -495,13 +495,21 @@ def node_alerts(now=None) -> list:
     return out
 
 
+def _ringable_hosts_locked() -> set:
+    """_ringable_hosts for callers already holding `lock`. `lock` is not
+    reentrant: register_service calling _ringable_hosts() inside its own
+    `with lock:` froze the whole locator on 2026-10-22 (02:29-05:05, and
+    again from the 05:05 deploy until this fix)."""
+    return {s.get("host") for s in registry["services"].values()
+            if s.get("host") and (s.get("name") == "lokey-mobile"
+                or (s.get("metadata") or {}).get("ringable"))}
+
+
 def _ringable_hosts() -> set:
     """Hosts whose lokey-android app heartbeats here — the only things that
     understand a ring command."""
     with lock:
-        return {s.get("host") for s in registry["services"].values()
-                if s.get("host") and (s.get("name") == "lokey-mobile"
-                    or (s.get("metadata") or {}).get("ringable"))}
+        return _ringable_hosts_locked()
 
 
 def _pending_ring_commands(host: str, metadata: dict) -> list:
@@ -1935,7 +1943,7 @@ def register_service():
             _pb = float(_prev_battery) if _prev_battery is not None else None
         except (TypeError, ValueError):
             _nb = _pb = None
-        if _nb is not None and host in _ringable_hosts():
+        if _nb is not None and host in _ringable_hosts_locked():
             if _nb > BATTERY_ALERT_RESET:
                 _battery_alerted.pop(host, None)
             elif _nb <= max(BATTERY_RING_LEVELS) or (_pb is not None and _nb < _pb):
