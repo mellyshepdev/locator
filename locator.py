@@ -172,6 +172,12 @@ DNS_ZONES = [z.strip() for z in os.environ.get(
 BALANCE_ENABLED  = os.environ.get("BALANCE_ENABLED", "true").lower() == "true"
 BALANCE_HIGH     = float(os.environ.get("BALANCE_HIGH", "50"))   # % — node is overloaded above this
 BALANCE_LOW      = float(os.environ.get("BALANCE_LOW",  "30"))   # % — node is a migration target below this
+# % — highest load a node may have and still receive a service, as long as it
+# is BALANCE_DIFF below the node being drained. Overloaded (>= BALANCE_HIGH)
+# nodes used to be barred as targets outright, so with most of the fleet over
+# 65% on some metric nothing could move (unit11 at 66.5% mem, 50% disk, was
+# never a target while unit8 sat at 97% disk, 2026-10-22).
+BALANCE_TARGET_MAX = float(os.environ.get("BALANCE_TARGET_MAX", "85"))
 BALANCE_INTERVAL = int(os.environ.get("BALANCE_INTERVAL", "120"))  # seconds between balance checks
 BALANCE_COOLDOWN = int(os.environ.get("BALANCE_COOLDOWN", "300"))  # seconds before re-migrating from same node
 BALANCE_DIFF     = float(os.environ.get("BALANCE_DIFF", "25"))     # % spread between busiest/least busy to trigger balance
@@ -5747,21 +5753,25 @@ def load_balancer():
         # Accept any ONLINE docker-capable node below BALANCE_HIGH; the
         # per-source check below still requires the target to be meaningfully
         # freer than the node being drained.
-        fallback_targets = not underloaded
-        if fallback_targets:
+        # Since 2026-10-22 the pool is every such node below BALANCE_TARGET_MAX,
+        # overloaded ones included: a node at 66% is a fine home for a service
+        # from one at 97%. The per-source check still requires the target to
+        # be BALANCE_DIFF below the source, and never the source itself.
+        fallback_targets = True
+        _pool_ids = {n[0] for n in underloaded}
+        underloaded = underloaded + [
+            n for n in all_nodes_load
+            if n[0] not in _pool_ids
+            and n[1] < BALANCE_TARGET_MAX
+            and _best_ip(n[2])
+            and _node_runs_containers(n[0], services_snap)]
+        _any_diskcrit = any((o[2].get("disk_percent") or 0) >= DISK_CRIT_PERCENT for o in overloaded)
+        if True:
             skip = {o[0] for o in overloaded}
-            underloaded = sorted(
-                (n for n in all_nodes_load
-                 if n[0] not in skip
-                 and n[1] < BALANCE_HIGH
-                 and _best_ip(n[2])
-                 and _node_runs_containers(n[0], services_snap)),
-                key=lambda x: x[1])
-            if not underloaded:
+            if not underloaded and not _any_diskcrit:
                 # This is the "drowning with nowhere to send anyone" state —
-                # say so once per cycle instead of vanishing quietly; an
-                # at-threshold node (65.0 exactly) is not below BALANCE_HIGH.
-                print(f"⚠️  BALANCE: {[o[0] for o in overloaded]} overloaded but no ONLINE node is below {BALANCE_HIGH}% — nowhere to move")
+                # say so once per cycle instead of vanishing quietly.
+                print(f"⚠️  BALANCE: {[o[0] for o in overloaded]} overloaded but no ONLINE node is below {BALANCE_TARGET_MAX}% — nowhere to move")
                 for node_id in list(overload_strikes):
                     if node_id not in skip:
                         overload_strikes.pop(node_id, None)
@@ -5881,12 +5891,34 @@ def load_balancer():
                     # Fall back to searching fresh — first underloaded node with
                     # a usable IP that the service's units spec also allows.
                     for _tid, _tload, _tinfo in underloaded:
+                        if _tid == src_id:
+                            continue
                         if allowed_units is not None and _tid not in allowed_units:
                             continue
                         # In fallback mode the pool is "below BALANCE_HIGH", not
                         # "below BALANCE_LOW" — require the move to be a real
                         # win, not a shuffle between equally-loaded boxes.
                         if fallback_targets and _tload >= src_load - BALANCE_DIFF:
+                            continue
+                        _tip = _best_ip(_tinfo)
+                        if _tip:
+                            tgt_id, tgt_load, tgt_info, tgt_ip = _tid, _tload, _tinfo, _tip
+                            break
+                if not tgt_id and is_diskcrit:
+                    # A full disk is the emergency, so the target only needs
+                    # disk room and memory out of OOM range — not the
+                    # max(cpu, mem, disk) rule. Most free disk first.
+                    for _tid, _tload, _tinfo in sorted(
+                            all_nodes_load, key=lambda n: n[2].get("disk_percent") or 100):
+                        if _tid == src_id:
+                            continue
+                        if allowed_units is not None and _tid not in allowed_units:
+                            continue
+                        if (_tinfo.get("disk_percent") or 100) >= DISK_VETO_PERCENT - 10:
+                            continue
+                        if (_tinfo.get("mem_percent") or 100) >= OOM_THRESHOLD:
+                            continue
+                        if not _node_runs_containers(_tid, services_snap):
                             continue
                         _tip = _best_ip(_tinfo)
                         if _tip:
