@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-10-22T01:30:38.393607+00:00 —
+  # 'condescending_agnesi' registered on unit4 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  condescending_agnesi:
+    deployment_type: optional
+    location_type: stationary
+    units: "4"
+    instances: 1
+    idle_stop: false

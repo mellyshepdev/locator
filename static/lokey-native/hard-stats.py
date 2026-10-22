@@ -1369,6 +1369,45 @@ def _heartbeat_acked(resp, seq):
     return isinstance(body, dict) and body.get("result") == "registered"
 
 
+MESH_SSH_KEY = os.path.expanduser("~/.ssh/lokey_mesh_ed25519")
+
+def _mesh_pubkey():
+    """Ed25519 keypair this unit publishes to the locator for lokey-mesh SSH."""
+    try:
+        os.makedirs(os.path.dirname(MESH_SSH_KEY), exist_ok=True)
+        if not os.path.exists(MESH_SSH_KEY + ".pub"):
+            subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "",
+                            "-C", "lokey-mesh@" + UNIT_NAME, "-f", MESH_SSH_KEY],
+                           check=True, capture_output=True)
+        return open(MESH_SSH_KEY + ".pub").read().strip()
+    except Exception as e:
+        logging.warning("mesh key: %s", e)
+        return None
+
+
+def _sync_mesh_authorized():
+    """Install every unit-published mesh pubkey into authorized_keys so any
+    lokey host can ssh to any other."""
+    try:
+        r = req.get(LOCATOR_URL + "/api/registry", timeout=15, verify=False)
+        keys = set()
+        for svc in (r.json().get("services") or {}).values():
+            k = ((svc.get("metadata") or {}).get("ssh_pubkey") or "").strip()
+            if k:
+                keys.add(k)
+        ak = os.path.expanduser("~/.ssh/authorized_keys")
+        have = set()
+        if os.path.exists(ak):
+            have = set(open(ak).read().splitlines())
+        add = [k for k in keys if k not in have]
+        if add:
+            with open(ak, "a") as f:
+                f.write("\n".join(add) + "\n")
+            logging.info("mesh ssh: installed %d new pubkey(s)", len(add))
+    except Exception as e:
+        logging.debug("mesh auth sync: %s", e)
+
+
 def register_stats():
     global _hb_acked, _hb_payload
     _fetch_geolocation_background()  # Update geolocation in background each heartbeat
@@ -1401,6 +1440,7 @@ def register_stats():
     # Add geolocation data if available (for laptops/desktops without GPS)
     if _geolocation:
         metadata.update(_geolocation)
+    metadata["ssh_pubkey"] = _mesh_pubkey()
 
     # This was the literal string "container" on every unit, which is how boxes
     # with no Docker at all ended up filed under "docker containers" in the
@@ -1460,6 +1500,7 @@ def register_stats():
         print(f"[{UNIT_NAME}] Failed to reach locator at {LOCATOR_URL}: {e} (NO ACK for #{seq})")
     _hb_payload = {k: v for k, v in payload.items() if k != "seq"}
 
+    _sync_mesh_authorized()
     push_node_metrics(stats, containers_summary,
                       detect_pressure_events(running, containers_summary, stats))
 
