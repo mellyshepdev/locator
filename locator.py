@@ -177,7 +177,10 @@ BALANCE_LOW      = float(os.environ.get("BALANCE_LOW",  "30"))   # % — node is
 # nodes used to be barred as targets outright, so with most of the fleet over
 # 65% on some metric nothing could move (unit11 at 66.5% mem, 50% disk, was
 # never a target while unit8 sat at 97% disk, 2026-10-22).
-BALANCE_TARGET_MAX = float(os.environ.get("BALANCE_TARGET_MAX", "85"))
+# Default 100 = no ceiling (SwoopG, 2026-10-22): if every node is at 85% and
+# one hits 99.9%, its service goes to an 85% node. The only rule is that the
+# target has more room than the source (BALANCE_DIFF lower).
+BALANCE_TARGET_MAX = float(os.environ.get("BALANCE_TARGET_MAX", "100"))
 BALANCE_INTERVAL = int(os.environ.get("BALANCE_INTERVAL", "120"))  # seconds between balance checks
 BALANCE_COOLDOWN = int(os.environ.get("BALANCE_COOLDOWN", "300"))  # seconds before re-migrating from same node
 BALANCE_DIFF     = float(os.environ.get("BALANCE_DIFF", "25"))     # % spread between busiest/least busy to trigger balance
@@ -5914,7 +5917,8 @@ def load_balancer():
                             continue
                         if allowed_units is not None and _tid not in allowed_units:
                             continue
-                        if (_tinfo.get("disk_percent") or 100) >= DISK_VETO_PERCENT - 10:
+                        # any unit with more free disk than the source, no fixed cap
+                        if (_tinfo.get("disk_percent") or 100) >= (src_info.get("disk_percent") or 100) - BALANCE_DIFF:
                             continue
                         if (_tinfo.get("mem_percent") or 100) >= OOM_THRESHOLD:
                             continue
