@@ -442,6 +442,11 @@ RING_DELIVERY_WINDOW   = int(os.environ.get("RING_DELIVERY_WINDOW", "180"))  # s
 
 # host -> {"id", "requested", "delivered", "acked", "seconds"}; in memory only:
 # a ring that outlives a Locator restart is a ring nobody is waiting for.
+BATTERY_RING_LEVELS  = (30, 20, 10, 5)   # ring as battery crosses each, downward
+BATTERY_ALERT_RESET  = 35                    # > this clears the alerted set (charging)
+BATTERY_RING_SECONDS = 15
+_battery_alerted: dict = {}                  # host -> set(levels already fired this cycle)
+
 device_rings: dict = {}
 device_rings_lock = threading.Lock()
 
@@ -1918,6 +1923,32 @@ def register_service():
             "subdomain": data.get("subdomain", existing.get("subdomain")),
             "domain": data.get("domain", existing.get("domain")),
         }
+
+        # Battery-low ring: each ringable device rings once per threshold it
+        # crosses going DOWN; the set resets when the battery climbs back
+        # above BATTERY_ALERT_RESET (i.e. it's charging again).
+        import uuid as _uuid_b
+        _new_batt = (registry["services"][service_id].get("metadata") or {}).get("battery_percent")
+        try:
+            _nb = float(_new_batt) if _new_batt is not None else None
+            _pb = float(_prev_battery) if _prev_battery is not None else None
+        except (TypeError, ValueError):
+            _nb = _pb = None
+        if _nb is not None and host in _ringable_hosts():
+            if _nb > BATTERY_ALERT_RESET:
+                _battery_alerted.pop(host, None)
+            elif _pb is not None and _nb < _pb:
+                fired = _battery_alerted.setdefault(host, set())
+                for lvl in BATTERY_RING_LEVELS:
+                    if _pb > lvl >= _nb and lvl not in fired:
+                        fired.add(lvl)
+                        with device_rings_lock:
+                            device_rings[host] = {
+                                "id": _uuid_b.uuid4().hex[:12],
+                                "requested": time.time(),
+                                "delivered": None, "acked": None,
+                                "seconds": BATTERY_RING_SECONDS}
+                        print(f"battery {lvl}% -> ring queued for {host}")
 
         # Health verification tier for docker containers. Green is EARNED:
         # only a docker HEALTHCHECK reporting 'healthy' (metadata.health from
