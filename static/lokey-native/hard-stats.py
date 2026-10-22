@@ -3032,7 +3032,7 @@ def _start_local_locator_docker(host_dir):
     result = subprocess.run(
         _docker_argv(["docker", "compose", "-f", "docker-compose.standby.yml", "up", "-d"],
                      cwd=host_dir),
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, timeout=900,
     )
     if result.returncode != 0:
         # the cause is at the end of compose output (the head is just "Building")
@@ -3098,6 +3098,50 @@ def _start_local_locator():
         return
     _local_locator_started = True
     print(f"[{UNIT_NAME}] ✅ failover: local locator started on {UNIT_NAME}")
+
+
+STANDBY_PREBUILD_SECONDS = int(os.getenv("STANDBY_PREBUILD_SECONDS", "21600"))
+STANDBY_PREBUILD_DISK_MAX = float(os.getenv("STANDBY_PREBUILD_DISK_MAX", "85"))
+
+
+def _standby_prebuild_loop():
+    """Keep the standby locator image built ahead of time on failover units.
+
+    2026-10-22: unit11's failover fired at 02:18, but the image had never
+    been built there, so every attempt had to build it mid-outage and
+    `compose up` failed 107 times until the primary came back at 05:08.
+    A scheduled build is cached and quick when nothing changed, so failover
+    only has to start a container. Skipped when the disk is above
+    STANDBY_PREBUILD_DISK_MAX so a build can never fill a unit."""
+    time.sleep(300)
+    last_ok = None
+    while True:
+        try:
+            host = _host_dir_for_create(LOCATOR_COMPOSE_DIR or LOCATOR_STANDBY_DIR)
+            compose = os.path.join(host, "docker-compose.standby.yml")
+            root = "/host" if os.path.isdir("/host/proc") else "/"
+            disk = psutil.disk_usage(root).percent
+            if not (os.path.isfile(compose) or os.path.isfile("/host" + compose)):
+                pass    # no checkout yet; failover clones one when it fires
+            elif disk >= STANDBY_PREBUILD_DISK_MAX:
+                print(f"[{UNIT_NAME}] ⚠️  standby prebuild skipped: disk {disk:.0f}% "
+                      f">= {STANDBY_PREBUILD_DISK_MAX:.0f}%")
+            else:
+                r = subprocess.run(
+                    _docker_argv(["docker", "compose", "-f", "docker-compose.standby.yml", "build"],
+                                 cwd=host),
+                    capture_output=True, text=True, timeout=1800,
+                )
+                if r.returncode != 0:
+                    print(f"[{UNIT_NAME}] ❌ standby prebuild failed: "
+                          f"{(r.stderr or r.stdout).strip()[-600:]}")
+                elif last_ok is None:
+                    print(f"[{UNIT_NAME}] ✅ standby locator image built ({host})")
+                if r.returncode == 0:
+                    last_ok = time.time()
+        except Exception as e:
+            print(f"[{UNIT_NAME}] ❌ standby prebuild error: {e}")
+        time.sleep(STANDBY_PREBUILD_SECONDS)
 
 
 def check_locator_failover():
@@ -5413,6 +5457,9 @@ if __name__ == "__main__":
 
     threading.Thread(target=_heartbeat_pulse_loop, daemon=True,
                      name="heartbeat-pulse").start()
+    if LOCATOR_FAILOVER_ENABLED:
+        threading.Thread(target=_standby_prebuild_loop, daemon=True,
+                         name="standby-prebuild").start()
 
     _dns_tick = 0
     _update_tick = 0
