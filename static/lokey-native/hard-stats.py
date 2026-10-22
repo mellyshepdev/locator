@@ -3034,7 +3034,8 @@ def _start_local_locator_docker(host_dir):
         capture_output=True, text=True, timeout=120,
     )
     if result.returncode != 0:
-        print(f"[{UNIT_NAME}] ❌ failover: compose up failed: {result.stderr.strip()[:200]}")
+        # the cause is at the end of compose output (the head is just "Building")
+        print(f"[{UNIT_NAME}] ❌ failover: compose up failed: {result.stderr.strip()[-600:]}")
         return False
     return True
 
