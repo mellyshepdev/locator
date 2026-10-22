@@ -1938,10 +1938,10 @@ def register_service():
         if _nb is not None and host in _ringable_hosts():
             if _nb > BATTERY_ALERT_RESET:
                 _battery_alerted.pop(host, None)
-            elif _pb is not None and _nb < _pb:
+            elif _nb <= max(BATTERY_RING_LEVELS) or (_pb is not None and _nb < _pb):
                 fired = _battery_alerted.setdefault(host, set())
                 for lvl in BATTERY_RING_LEVELS:
-                    if _pb > lvl >= _nb and lvl not in fired:
+                    if ((_pb is not None and _pb > lvl >= _nb) or (_pb is None and _nb <= lvl)) and lvl not in fired:
                         fired.add(lvl)
                         with device_rings_lock:
                             device_rings[host] = {
