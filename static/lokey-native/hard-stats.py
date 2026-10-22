@@ -1408,6 +1408,60 @@ def _sync_mesh_authorized():
         logging.debug("mesh auth sync: %s", e)
 
 
+RING_ACK_FILE = os.path.expanduser("~/.config/lokey/ring_ack")
+
+def _last_ring_ack():
+    try:
+        return open(RING_ACK_FILE).read().strip()
+    except Exception:
+        return ""
+
+def _ring_wav(path):
+    import math, struct, wave
+    frames = b"".join(
+        struct.pack("<h", int(12000 * math.sin(2 * math.pi * 880 * i / 22050)))
+        for i in range(22050))
+    with wave.open(path, "w") as w:
+        w.setparams((1, 2, 22050, 22050))
+        w.writeframes(frames)
+    return path
+
+def _ring_for(seconds):
+    try:
+        import shutil as _sh
+        wav = _ring_wav("/tmp/lokey-ring.wav")
+        cmds = ([["afplay", wav]] if sys.platform == "darwin" else
+                [["paplay", wav], ["aplay", wav], ["ffplay", "-nodisp", "-autoexit", wav]])
+        cmd = next((c for c in cmds if _sh.which(c[0])), None)
+        end = time.time() + seconds
+        while time.time() < end:
+            if cmd:
+                subprocess.run(cmd, capture_output=True, timeout=15)
+            else:
+                print("\a", end="", flush=True)
+                time.sleep(1)
+    except Exception as e:
+        print(f"[{UNIT_NAME}] ring playback failed: {e}")
+
+def _handle_ring_commands(resp):
+    """Phones get ring via PhoneRinger.kt; desktop lokey handles the same
+    locator 'commands' payload here."""
+    try:
+        cmds = (resp.json() or {}).get("commands") or []
+    except Exception:
+        return
+    for c in cmds:
+        if c.get("type") != "ring":
+            continue
+        try:
+            os.makedirs(os.path.dirname(RING_ACK_FILE), exist_ok=True)
+            open(RING_ACK_FILE, "w").write(str(c.get("id") or ""))
+        except Exception:
+            pass
+        threading.Thread(target=_ring_for, args=(int(c.get("seconds") or 15),), daemon=True).start()
+        print(f"[{UNIT_NAME}] RING received — playing {c.get('seconds')}s")
+
+
 def register_stats():
     global _hb_acked, _hb_payload
     _fetch_geolocation_background()  # Update geolocation in background each heartbeat
@@ -1441,6 +1495,8 @@ def register_stats():
     if _geolocation:
         metadata.update(_geolocation)
     metadata["ssh_pubkey"] = _mesh_pubkey()
+    metadata["ringable"] = True
+    metadata["ring_ack"] = _last_ring_ack()
 
     # This was the literal string "container" on every unit, which is how boxes
     # with no Docker at all ended up filed under "docker containers" in the
@@ -1493,6 +1549,7 @@ def register_stats():
             headers=headers, timeout=HEARTBEAT_ACK_TIMEOUT, allow_redirects=True, verify=False
         )
         _hb_acked = _heartbeat_acked(resp, seq)
+        _handle_ring_commands(resp)
         ack_note = (f"ack #{seq} from {_hb_ack_unit or '?'}" if _hb_acked
                     else f"NO ACK for #{seq}")
         print(f"[{UNIT_NAME}] Heartbeat sent: {resp.status_code} {ack_note} | disk: {stats['disk_percent']}% | containers: {len(running)}")

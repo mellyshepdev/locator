@@ -500,7 +500,8 @@ def _ringable_hosts() -> set:
     understand a ring command."""
     with lock:
         return {s.get("host") for s in registry["services"].values()
-                if s.get("name") == "lokey-mobile" and s.get("host")}
+                if s.get("host") and (s.get("name") == "lokey-mobile"
+                    or (s.get("metadata") or {}).get("ringable"))}
 
 
 def _pending_ring_commands(host: str, metadata: dict) -> list:
