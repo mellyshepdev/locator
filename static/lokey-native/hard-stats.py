@@ -16,6 +16,7 @@ import envscan
 import unitsecrets
 import urllib3
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from types import SimpleNamespace
