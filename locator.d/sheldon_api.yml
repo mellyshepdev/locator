@@ -1,0 +1,13 @@
+Service:
+
+  # AUTO-GENERATED 2026-10-23T09:42:08.083574+00:00 —
+  # 'sheldon_api' registered on unit8 with no locator.d stanza.
+  # Conservative defaults: never idle-stopped, never drained,
+  # not essential. Tune (idle_stop/drain_stop/deployment_type)
+  # or delete this file to return to implicit defaults.
+  sheldon_api:
+    deployment_type: optional
+    location_type: stationary
+    units: "8"
+    instances: 1
+    idle_stop: false
