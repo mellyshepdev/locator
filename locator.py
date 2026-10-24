@@ -3743,19 +3743,21 @@ def claim_migration(mig_id):
     allowed = _migration_allowed_units(mig.get("container") or "")
     bad_target = allowed is not None and mig.get("to_node") not in allowed
     host_local = _has_host_local_mounts(mig.get("container") or "")
+    no_def = not _has_deploy_definition(mig.get("container") or "")
 
     with migration_lock:
         # Re-check under the lock — another claim could have landed in the
         # gap between the first check and now.
         if mig["status"] != "PENDING":
             return jsonify({"error": "already claimed", "status": mig["status"]}), 409
-        if pinned or stateful or bad_target or host_local:
+        if pinned or stateful or bad_target or host_local or no_def:
             mig["status"] = "CANCELLED"
             mig["cancelled_at"] = datetime.now(timezone.utc).isoformat()
             mig["cancel_reason"] = ("pinned" if pinned else
                                     "stateful image" if stateful else
                                     f"target {mig.get('to_node')} outside units spec" if bad_target else
-                                    "host-local mounts off clusterfs")
+                                    "host-local mounts off clusterfs" if host_local else
+                                    "no compose or policy on record (one-off container)")
             print(f"🚫 MIGRATION {mig_id}: cancelled at claim — {mig['cancel_reason']}")
             return jsonify({"error": "cancelled", "reason": mig["cancel_reason"]}), 409
         mig["status"]     = "IN_PROGRESS"
@@ -5635,6 +5637,19 @@ def _in_flight_migrations():
         }
 
 
+def _has_deploy_definition(name):
+    """True when there is something to redeploy on a target: a stored compose
+    or a policy stanza. Neither means a one-off `docker run` — the ser.ops
+    volume backups (debian:bookworm-slim `tar -czf - -C /data`, random names
+    like gracious_bose) were queued unit4 -> puffbase-vm on 2026-10-23, and a
+    move's first step stops the source container, mid-backup. The mount
+    check above can't see their volumes because it reads the stored compose,
+    and they have none.
+    """
+    return (os.path.exists(os.path.join(COMPOSE_DIR, f"{name}.yml"))
+            or bool(_policy_for(name)))
+
+
 def _movable_services(src_id, services_snap, in_flight, now):
     """[(svc_id, svc)] on src_id that the balancer may migrate right now."""
     # A service that keeps failing (no compose dir on source, target
@@ -5669,6 +5684,7 @@ def _movable_services(src_id, services_snap, in_flight, now):
         # Same hazard, image-agnostic: named volumes and absolute
         # binds off the pool stay behind no matter what the image is.
         and not _has_host_local_mounts(svc.get("name") or "")
+        and _has_deploy_definition(svc.get("name") or "")
         and svc.get("name") not in in_flight
         and svc.get("name") not in unmigratable
         and (migration_failed_at.get(svc.get("name"))
