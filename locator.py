@@ -1823,6 +1823,9 @@ def _infer_category(svc_type, url=""):
 # AUTO_POLICY_FILL=false if the generated files ever get in the way.
 AUTO_POLICY_FILL = os.environ.get("AUTO_POLICY_FILL", "true").lower() == "true"
 _POLICY_FNAME_SAFE = re.compile(r"[^a-zA-Z0-9_.-]+")
+# Docker's generated adjective_surname names: one-off `docker run` containers
+# (ser.ops backup tars) that exit in minutes — a stub per run is just clutter.
+_DOCKER_RANDOM_NAME = re.compile(r"^[a-z]+_[a-z]+$")
 
 
 def _autofill_policy_stub(name, host):
@@ -1839,7 +1842,7 @@ def _autofill_policy_stub(name, host):
     if not AUTO_POLICY_FILL:
         return
     try:
-        if _policy_for(name):
+        if _policy_for(name) or _DOCKER_RANDOM_NAME.match(str(name)):
             return
         fname = _POLICY_FNAME_SAFE.sub("-", str(name)).strip("-.") or "unnamed"
         path = os.path.join(LOCATOR_YML_DIR, f"{fname}.yml")
