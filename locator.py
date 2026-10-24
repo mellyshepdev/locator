@@ -5623,6 +5623,60 @@ def _requeue_stale_claims():
                   f"requeued #{mig['requeues']}")
 
 
+def _in_flight_migrations():
+    # OOM bypasses cooldown, so without this check the same service gets
+    # re-queued every tick while its first migration is still being
+    # claimed/executed by the source lokey.
+    with migration_lock:
+        return {
+            m.get("container")
+            for m in migration_queue.values()
+            if m.get("status") in ("PENDING", "IN_PROGRESS")
+        }
+
+
+def _movable_services(src_id, services_snap, in_flight, now):
+    """[(svc_id, svc)] on src_id that the balancer may migrate right now."""
+    # A service that keeps failing (no compose dir on source, target
+    # rejects it) sits out one backoff window instead of eating this
+    # node's one-migration-per-cooldown slot every cycle forever.
+    fail_cutoff = now - timedelta(seconds=MIGRATION_FAIL_BACKOFF)
+    return [
+        (svc_id, svc)
+        for svc_id, svc in services_snap.items()
+        if svc.get("host") == src_id
+        # OFFLINE is admitted only for idle-stopped containers: moving
+        # one is a compose-dir relocate (the next wake lands on the
+        # target), which is exactly what a service parked on an
+        # overloaded unit needs. Any other OFFLINE means broken —
+        # leave it, don't churn it.
+        and (svc.get("status") == "ONLINE"
+             or (svc.get("status") == "OFFLINE"
+                 and svc.get("type") == "container"
+                 and _policy_for((svc.get("name") or "").lower()).get("idle_stop")))
+        and svc.get("type") in ("container", "native")
+        and not _pinned_blocks_migration(svc.get("name"))
+        and not svc.get("metadata", {}).get("pinned")
+        # A stateful IMAGE means the data stays behind — migration
+        # moves the compose file, not the volume. ops-pgdb (postgres:
+        # 16-alpine) slipped the name pins because it is spelled
+        # "pgdb", and ops-dashboard lost its database live. Lifted
+        # only when every volume binds from the CephFS pool — then
+        # the data is equally local on any target unit.
+        and (not any(m in (svc.get("metadata", {}).get("image") or "").lower()
+                     for m in _STATEFUL_IMAGE_MARKERS)
+             or _volumes_on_clusterfs(svc.get("name") or ""))
+        # Same hazard, image-agnostic: named volumes and absolute
+        # binds off the pool stay behind no matter what the image is.
+        and not _has_host_local_mounts(svc.get("name") or "")
+        and svc.get("name") not in in_flight
+        and svc.get("name") not in unmigratable
+        and (migration_failed_at.get(svc.get("name"))
+             or datetime.min.replace(tzinfo=timezone.utc)) < fail_cutoff
+        and not resolve_migration_order(svc_id, services_snap)[1]  # no missing deps
+    ]
+
+
 def load_balancer():
     """
     Periodically checks node CPU/memory and queues container migrations
@@ -5729,11 +5783,23 @@ def load_balancer():
         # A gap >= BALANCE_SPREAD_TARGET is not a flap risk — it's a standing
         # imbalance — so the busiest node bypasses strikes/cooldown like an
         # OOM/disk emergency does.
+        #
+        # "Busiest" means busiest node that has something to move. Picking the
+        # raw maximum let a node with nothing movable (unit6, a Chromebook with
+        # no docker, at 95.6% disk) win every cycle, log "no movable services"
+        # and end the pass — so unit4 at load 15 under a backup flood was never
+        # even considered (2026-10-23). The disk/OOM emergencies above still
+        # see such nodes; this only stops them hogging the spread slot.
         spread_emergency = set()
         if all_nodes_load and not (overloaded and underloaded):
             all_nodes_load.sort(key=lambda x: x[1])
             least = all_nodes_load[0]
-            busiest = all_nodes_load[-1]
+            _spread_in_flight = _in_flight_migrations()
+            busiest = next(
+                (n for n in reversed(all_nodes_load)
+                 if n[1] - least[1] >= BALANCE_DIFF
+                 and _movable_services(n[0], services_snap, _spread_in_flight, now)),
+                all_nodes_load[-1])
             if busiest[1] - least[1] >= BALANCE_DIFF:
                 if busiest not in overloaded:
                     overloaded.append(busiest)
@@ -5812,53 +5878,9 @@ def load_balancer():
             # Find movable services on this node — container OR native, as long as
             # their declared dependencies (if any) are satisfied somewhere in the
             # registry. Native services used to be hard-excluded here entirely.
-            # OOM bypasses cooldown, so without this check the same service
-            # gets re-queued every tick while its first migration is still
-            # being claimed/executed by the source lokey.
-            with migration_lock:
-                in_flight = {
-                    m.get("container")
-                    for m in migration_queue.values()
-                    if m.get("status") in ("PENDING", "IN_PROGRESS")
-                }
-            # A service that keeps failing (no compose dir on source, target
-            # rejects it) sits out one backoff window instead of eating this
-            # node's one-migration-per-cooldown slot every cycle forever.
-            fail_cutoff = now - timedelta(seconds=MIGRATION_FAIL_BACKOFF)
-            movable = [
-                (svc_id, svc)
-                for svc_id, svc in services_snap.items()
-                if svc.get("host") == src_id
-                # OFFLINE is admitted only for idle-stopped containers: moving
-                # one is a compose-dir relocate (the next wake lands on the
-                # target), which is exactly what a service parked on an
-                # overloaded unit needs. Any other OFFLINE means broken —
-                # leave it, don't churn it.
-                and (svc.get("status") == "ONLINE"
-                     or (svc.get("status") == "OFFLINE"
-                         and svc.get("type") == "container"
-                         and _policy_for((svc.get("name") or "").lower()).get("idle_stop")))
-                and svc.get("type") in ("container", "native")
-                and not _pinned_blocks_migration(svc.get("name"))
-                and not svc.get("metadata", {}).get("pinned")
-                # A stateful IMAGE means the data stays behind — migration
-                # moves the compose file, not the volume. ops-pgdb (postgres:
-                # 16-alpine) slipped the name pins because it is spelled
-                # "pgdb", and ops-dashboard lost its database live. Lifted
-                # only when every volume binds from the CephFS pool — then
-                # the data is equally local on any target unit.
-                and (not any(m in (svc.get("metadata", {}).get("image") or "").lower()
-                             for m in _STATEFUL_IMAGE_MARKERS)
-                     or _volumes_on_clusterfs(svc.get("name") or ""))
-                # Same hazard, image-agnostic: named volumes and absolute
-                # binds off the pool stay behind no matter what the image is.
-                and not _has_host_local_mounts(svc.get("name") or "")
-                and svc.get("name") not in in_flight
-                and svc.get("name") not in unmigratable
-                and (migration_failed_at.get(svc.get("name"))
-                     or datetime.min.replace(tzinfo=timezone.utc)) < fail_cutoff
-                and not resolve_migration_order(svc_id, services_snap)[1]  # no missing deps
-            ]
+            # Re-read in_flight per source: an earlier source this cycle may
+            # have just queued one.
+            movable = _movable_services(src_id, services_snap, _in_flight_migrations(), now)
 
             if not movable:
                 print(f"⚠️  BALANCE: {src_id} overloaded but no movable services found (container or native, deps satisfied)")

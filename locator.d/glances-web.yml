@@ -6,7 +6,11 @@ Service:
   # tailnet-only, so no domain wake trigger).
   glances-web:
     deployment_type: optional
-    location_type: mobile
+    # stationary since 2026-10-23: glances-web is now a native per-unit
+    # monitor (Locator /glances/<unit>/ proxies to each one), so a copy
+    # only makes sense on the host it watches. The spread balancer queued
+    # unit4 -> unit2 the first time it got past unit6.
+    location_type: stationary
     # units covers 2_7: a same-named glances-web also runs on unit2.
     units: "2"
     instances: 1
